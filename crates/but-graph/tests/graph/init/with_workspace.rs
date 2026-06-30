@@ -7732,3 +7732,952 @@ fn remote_ref_as_stack_top() -> anyhow::Result<()> {
     ");
     Ok(())
 }
+
+/// Comparable `[(ref_name, [commit ids])]` from a commit-graph projection.
+/// Per stack: its base, then each segment's (ref name, remote-tracking ref, commits, remote-ahead
+/// commits).
+type StackShape = (
+    Option<gix::ObjectId>,
+    Vec<(
+        Option<String>,
+        Option<String>,
+        Vec<gix::ObjectId>,
+        Vec<gix::ObjectId>,
+    )>,
+);
+
+fn cg_projection_shape(
+    stacks: &[but_graph::commit_graph_projection::StackView],
+) -> Vec<StackShape> {
+    stacks
+        .iter()
+        .map(|s| {
+            (
+                s.base,
+                s.segments
+                    .iter()
+                    .map(|seg| {
+                        (
+                            seg.ref_name.as_ref().map(|r| r.as_bstr().to_string()),
+                            seg.remote_tracking_ref_name
+                                .as_ref()
+                                .map(|r| r.as_bstr().to_string()),
+                            seg.commits.clone(),
+                            seg.commits_on_remote.clone(),
+                        )
+                    })
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// The same shape from the segment-based `Workspace`.
+fn segment_projection_shape(ws: &but_graph::Workspace) -> Vec<StackShape> {
+    ws.stacks
+        .iter()
+        .map(|s| {
+            (
+                s.base(),
+                s.segments
+                    .iter()
+                    .map(|seg| {
+                        (
+                            seg.ref_name().map(|r| r.as_bstr().to_string()),
+                            seg.remote_tracking_ref_name
+                                .as_ref()
+                                .map(|r| r.as_bstr().to_string()),
+                            seg.commits.iter().map(|c| c.id).collect(),
+                            seg.commits_on_remote.iter().map(|c| c.id).collect(),
+                        )
+                    })
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// Each in-workspace stack's ordered branch refs, read from the workspace metadata.
+fn stack_branches_from_meta(
+    meta: &impl RefMetadata,
+) -> anyhow::Result<Vec<Vec<gix::refs::FullName>>> {
+    let ws = meta.workspace(WORKSPACE_REF_NAME.try_into()?)?;
+    Ok(ws
+        .stacks
+        .iter()
+        .filter(|s| s.is_in_workspace())
+        .map(|s| s.branches.iter().map(|b| b.ref_name.clone()).collect())
+        .collect())
+}
+
+/// The target (e.g. `origin/main`) commit that bounds the workspace base: the metadata's target ref,
+/// falling back to `origin/main`.
+fn target_commit(repo: &gix::Repository, meta: &impl RefMetadata) -> Option<gix::ObjectId> {
+    let target_ref = project_meta(meta)
+        .target_ref
+        .or_else(|| "refs/remotes/origin/main".try_into().ok())?;
+    Some(
+        repo.find_reference(&target_ref)
+            .ok()?
+            .peel_to_commit()
+            .ok()?
+            .id()
+            .detach(),
+    )
+}
+
+/// Enrichment data for the projection: local branch -> its remote-tracking branch, deduced by name
+/// (`refs/remotes/origin/<X>` for `refs/heads/<X>`) for every origin remote branch that exists. This
+/// mirrors the segment graph's name-based deduction for these fixtures (all use the `origin` remote).
+fn remote_tracking_map(
+    repo: &gix::Repository,
+) -> anyhow::Result<std::collections::HashMap<gix::refs::FullName, gix::refs::FullName>> {
+    let mut map = std::collections::HashMap::new();
+    for reference in repo.references()?.all()?.filter_map(Result::ok) {
+        let full = reference.name().as_bstr();
+        if let Some(short) = full.strip_prefix(b"refs/remotes/origin/") {
+            let local = format!("refs/heads/{}", String::from_utf8_lossy(short));
+            if let Ok(local_ref) = gix::refs::FullName::try_from(local) {
+                map.insert(local_ref, reference.name().to_owned());
+            }
+        }
+    }
+    Ok(map)
+}
+
+/// SPIKE (commit-graph-experiment): assert the gather-then-build commit-graph projection — built from
+/// BOTH a `from_segment_graph` bridge and a straight-from-git `from_repository` CommitGraph — exactly
+/// reproduces the segment-based `Workspace.stacks` (ref names + commits, including empty branches).
+/// Consumes `graph` to project the segment-based view.
+fn assert_commit_graph_projection_parity(
+    repo: &gix::Repository,
+    graph: but_graph::Graph,
+    stack_branches: &[Vec<gix::refs::FullName>],
+    target: Option<gix::ObjectId>,
+) -> anyhow::Result<()> {
+    let ws_commit = graph
+        .managed_entrypoint_commit(repo)?
+        .expect("managed workspace commit")
+        .id;
+    let remote_tracking = remote_tracking_map(repo)?;
+    let bridge = but_graph::commit_graph_projection::project(
+        &but_graph::CommitGraph::from_segment_graph(&graph),
+        ws_commit,
+        Some(stack_branches),
+        target,
+        &remote_tracking,
+    );
+    let from_git = but_graph::commit_graph_projection::project(
+        &but_graph::CommitGraph::from_repository(repo)?,
+        ws_commit,
+        Some(stack_branches),
+        target,
+        &remote_tracking,
+    );
+    assert_eq!(
+        cg_projection_shape(&from_git),
+        cg_projection_shape(&bridge),
+        "straight-from-git vs bridge CommitGraph should project identically"
+    );
+    let ws = graph.into_workspace()?;
+    assert_eq!(
+        cg_projection_shape(&bridge),
+        segment_projection_shape(&ws),
+        "commit-graph projection should reproduce the segment-based stacks"
+    );
+    Ok(())
+}
+
+/// SPIKE: the SELF-CONTAINED entry — `project_from_repository(repo, meta)` derives its own inputs
+/// (stack branch lists, target, remote-tracking map) and must reproduce the segment-based stacks. This
+/// is the interface in which the projection can replace the segment graph.
+fn assert_self_contained_projection_parity(
+    repo: &gix::Repository,
+    meta: &impl RefMetadata,
+) -> anyhow::Result<()> {
+    let self_contained = but_graph::commit_graph_projection::project_from_repository(repo, meta)?;
+    let graph =
+        Graph::from_head(repo, meta, project_meta(meta), standard_options())?.validated()?;
+    let ws = graph.into_workspace()?;
+    assert_eq!(
+        cg_projection_shape(&self_contained),
+        segment_projection_shape(&ws),
+        "project_from_repository should reproduce the segment-based stacks from (repo, meta) alone"
+    );
+    Ok(())
+}
+
+#[test]
+fn cg_proj_self_contained_multiple_stacks_shared_remote() -> anyhow::Result<()> {
+    let (repo, mut meta) =
+        read_only_in_memory_scenario("ws/multiple-stacks-with-shared-segment-and-remote")?;
+    add_stack_with_segments(&mut meta, 1, "C-on-A", StackState::InWorkspace, &[]);
+    assert_self_contained_projection_parity(&repo, &*meta)
+}
+
+#[test]
+fn cg_proj_self_contained_two_stacks_with_empty_branch() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/reproduce-11483")?;
+    add_stack_with_segments(&mut meta, 1, "A", StackState::InWorkspace, &[]);
+    add_stack_with_segments(&mut meta, 2, "B", StackState::InWorkspace, &["below"]);
+    assert_self_contained_projection_parity(&repo, &*meta)
+}
+
+#[test]
+fn cg_proj_self_contained_integrated_merge_at_bottom() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/integrated-merge-at-bottom")?;
+    add_stack_with_segments(&mut meta, 0, "local-stack", StackState::InWorkspace, &[]);
+    assert_self_contained_projection_parity(&repo, &*meta)
+}
+
+#[test]
+fn cg_proj_self_contained_single_stack_fallback() -> anyhow::Result<()> {
+    // No explicit stack metadata (add_workspace) — the derived branch lists are empty, so the
+    // self-contained path exercises the ref-driven fallback segmentation end to end.
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/single-stack")?;
+    add_workspace(&mut meta);
+    assert_self_contained_projection_parity(&repo, &*meta)
+}
+
+#[test]
+fn commit_graph_projection_parity_two_stacks_with_empty_branch() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/reproduce-11483")?;
+    add_stack_with_segments(&mut meta, 1, "A", StackState::InWorkspace, &[]);
+    add_stack_with_segments(&mut meta, 2, "B", StackState::InWorkspace, &["below"]);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    let stack_branches = stack_branches_from_meta(&*meta)?;
+    let target = target_commit(&repo, &*meta);
+    assert_commit_graph_projection_parity(&repo, graph, &stack_branches, target)
+}
+
+#[test]
+fn commit_graph_projection_parity_single_multi_segment_stack() -> anyhow::Result<()> {
+    // A single stack B -> B-sub -> A on base origin/main — exercises the single-stack base (bounded by
+    // the target) and within-stack segmentation at each ref.
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/single-stack")?;
+    add_workspace(&mut meta);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    let stack_branches = stack_branches_from_meta(&*meta)?;
+    let target = target_commit(&repo, &*meta);
+    assert_commit_graph_projection_parity(&repo, graph, &stack_branches, target)
+}
+
+#[test]
+fn commit_graph_projection_parity_stack_with_remote_ahead() -> anyhow::Result<()> {
+    // The `main` stack's remote (origin/main) is ahead, so main's commits stop at the merge base with
+    // it (excluding the shared commits) — exercises per-stack, target-relative base.
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/local-target-and-stack")?;
+    add_workspace(&mut meta);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    let stack_branches = stack_branches_from_meta(&*meta)?;
+    let target = target_commit(&repo, &*meta);
+    assert_commit_graph_projection_parity(&repo, graph, &stack_branches, target)
+}
+
+#[test]
+fn commit_graph_projection_parity_merge_into_main() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/single-merge-into-main")?;
+    add_stack_with_segments(&mut meta, 0, "C", StackState::InWorkspace, &["merge"]);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    let stack_branches = stack_branches_from_meta(&*meta)?;
+    let target = target_commit(&repo, &*meta);
+    assert_commit_graph_projection_parity(&repo, graph, &stack_branches, target)
+}
+
+#[test]
+fn cg_proj_parity_reproduce_11459() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/reproduce-11459")?;
+    add_stack_with_segments(&mut meta, 1, "X", StackState::InWorkspace, &[]);
+    add_stack_with_segments(&mut meta, 2, "feat-2", StackState::InWorkspace, &[]);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    let stack_branches = stack_branches_from_meta(&*meta)?;
+    let target = target_commit(&repo, &*meta);
+    assert_commit_graph_projection_parity(&repo, graph, &stack_branches, target)
+}
+
+#[test]
+fn cg_proj_parity_advanced_stack_tip_outside() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/advanced-stack-tip-outside-workspace")?;
+    add_stack_with_segments(&mut meta, 1, "B", StackState::InWorkspace, &["A"]);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    let stack_branches = stack_branches_from_meta(&*meta)?;
+    let target = target_commit(&repo, &*meta);
+    assert_commit_graph_projection_parity(&repo, graph, &stack_branches, target)
+}
+
+#[test]
+fn cg_proj_parity_diverged_disjoint_target() -> anyhow::Result<()> {
+    // origin/main is a DISJOINT target (not an ancestor of the stacks), so the fork point falls back to
+    // the global base (fafd9d0). advanced-lane keeps its commit; lane is an empty, metadata-tracked
+    // stack sitting on the base and is kept. The ws-commit parents are swapped, exercising alignment.
+    let (repo, mut meta) = read_only_in_memory_scenario(
+        "ws/two-branches-one-advanced-two-parent-ws-commit-diverged-ttb",
+    )?;
+    for (idx, name) in ["advanced-lane", "lane"].into_iter().enumerate() {
+        add_stack_with_segments(&mut meta, idx, name, StackState::InWorkspace, &[]);
+    }
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    let stack_branches = stack_branches_from_meta(&*meta)?;
+    let target = target_commit(&repo, &*meta);
+    assert_commit_graph_projection_parity(&repo, graph, &stack_branches, target)
+}
+
+/// A canonical, `SegmentIndex`-free structural fingerprint of a segment `Graph`: one sorted line per
+/// segment describing its name, remote, generation, commits (+flags), outgoing connection targets, and
+/// sibling — all keyed by COMMIT ID, not segment index. Two graphs with equal fingerprints are
+/// structurally identical regardless of how segment ids happen to be numbered. This is the oracle for a
+/// future `CommitGraph`-built `Graph`, whose id numbering will differ from the walk's.
+fn graph_structure(graph: &but_graph::Graph) -> Vec<String> {
+    let mask = but_graph::CommitFlags::all();
+    let seg_key = |sidx: but_graph::SegmentIndex| -> String {
+        let s = &graph[sidx];
+        s.commits
+            .first()
+            .map(|c| c.id.to_hex_with_len(7).to_string())
+            .or_else(|| s.ref_info.as_ref().map(|ri| ri.ref_name.to_string()))
+            .unwrap_or_else(|| "∅".into())
+    };
+    let mut lines: Vec<String> = graph
+        .segments()
+        .map(|sidx| {
+            let s = &graph[sidx];
+            let name = s
+                .ref_info
+                .as_ref()
+                .map_or("∅".to_string(), |ri| ri.ref_name.to_string());
+            let remote = s
+                .remote_tracking_ref_name
+                .as_ref()
+                .map_or("∅".to_string(), |r| r.to_string());
+            let commits: Vec<String> = s
+                .commits
+                .iter()
+                .map(|c| format!("{}:{:?}", c.id.to_hex_with_len(7), c.flags & mask))
+                .collect();
+            let mut conns: Vec<String> = s
+                .connections
+                .iter()
+                .map(|c| {
+                    c.dst_id()
+                        .map_or("∅".into(), |id| id.to_hex_with_len(7).to_string())
+                })
+                .collect();
+            conns.sort();
+            let sibling = s.sibling_segment_id.map_or("∅".to_string(), seg_key);
+            let meta = match &s.metadata {
+                None => "∅",
+                Some(but_graph::SegmentMetadata::Branch(_)) => "B",
+                Some(but_graph::SegmentMetadata::Workspace(_)) => "W",
+            };
+            format!(
+                "{name}|rt={remote}|gen={}|meta={meta}|commits=[{}]|conn=[{}]|sib={sibling}",
+                s.generation,
+                commits.join(","),
+                conns.join(","),
+            )
+        })
+        .collect();
+    lines.sort();
+    lines
+}
+
+/// Build the segment `Graph` straight from a git `CommitGraph` via `graph_from_commit_graph`.
+fn build_cg_graph(
+    repo: &gix::Repository,
+    meta: &impl RefMetadata,
+) -> anyhow::Result<but_graph::Graph> {
+    let mut cg = but_graph::CommitGraph::from_repository(repo)?;
+    let target = target_commit(repo, meta);
+    cg.mark_integrated(target);
+    let ws_ref: gix::refs::FullName = WORKSPACE_REF_NAME.try_into()?;
+    let ws_commit = repo
+        .find_reference(&ws_ref)?
+        .peel_to_commit()?
+        .id()
+        .detach();
+    let remote_tracking = remote_tracking_map(repo)?;
+    let stack_branches = stack_branches_from_meta(meta)?;
+    Ok(but_graph::graph_from_commit_graph(
+        &cg,
+        ws_commit,
+        target,
+        &remote_tracking,
+        Some(&stack_branches),
+        meta,
+        project_meta(meta),
+        standard_options(),
+    ))
+}
+
+/// Assert the CommitGraph-built segment `Graph` is STRUCTURALLY identical (commit-id fingerprint,
+/// id-numbering-independent) to the walk-built graph.
+fn assert_cg_to_sg_parity(repo: &gix::Repository, meta: &impl RefMetadata) -> anyhow::Result<()> {
+    let real = Graph::from_head(repo, meta, project_meta(meta), standard_options())?.validated()?;
+    let built = build_cg_graph(repo, meta)?;
+    assert_eq!(graph_structure(&built), graph_structure(&real));
+    Ok(())
+}
+
+/// Assert the CommitGraph-built graph, run through the REAL `into_workspace()` projection, produces the
+/// same display stacks (name + commits per segment, commit-id keyed) as the walk-built graph. This is
+/// the projection-level parity that the eventual flip depends on.
+fn assert_cg_to_sg_projects(repo: &gix::Repository, meta: &impl RefMetadata) -> anyhow::Result<()> {
+    let real = Graph::from_head(repo, meta, project_meta(meta), standard_options())?.validated()?;
+    let built = build_cg_graph(repo, meta)?;
+    let real_ws = real.into_workspace()?;
+    let built_ws = built.into_workspace()?;
+    assert_eq!(
+        segment_projection_shape(&built_ws),
+        segment_projection_shape(&real_ws),
+    );
+    Ok(())
+}
+
+#[test]
+fn cg_to_sg_projects_single_stack() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/single-stack")?;
+    add_workspace(&mut meta);
+    assert_cg_to_sg_projects(&repo, &*meta)
+}
+
+#[test]
+fn cg_to_sg_projects_two_stacks_empty_branch() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/reproduce-11483")?;
+    add_stack_with_segments(&mut meta, 1, "A", StackState::InWorkspace, &[]);
+    add_stack_with_segments(&mut meta, 2, "B", StackState::InWorkspace, &["below"]);
+    assert_cg_to_sg_projects(&repo, &*meta)
+}
+
+#[test]
+fn cg_to_sg_projects_remote_ahead() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/local-target-and-stack")?;
+    add_workspace(&mut meta);
+    assert_cg_to_sg_projects(&repo, &*meta)
+}
+
+#[test]
+fn cg_to_sg_projects_dependent_branches() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/reproduce-12146")?;
+    add_stack_with_segments(&mut meta, 0, "A", StackState::InWorkspace, &[]);
+    add_stack_with_segments(&mut meta, 1, "B", StackState::InWorkspace, &[]);
+    assert_cg_to_sg_projects(&repo, &*meta)
+}
+
+#[test]
+fn cg_to_sg_projects_ambiguous() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/single-stack-ambiguous")?;
+    add_workspace(&mut meta);
+    assert_cg_to_sg_projects(&repo, &*meta)
+}
+
+#[test]
+fn cg_to_sg_projects_one_integrated() -> anyhow::Result<()> {
+    let (repo, mut meta) =
+        read_only_in_memory_scenario("ws/multi-lane-with-shared-segment-one-integrated")?;
+    add_workspace(&mut meta);
+    assert_cg_to_sg_projects(&repo, &*meta)
+}
+
+#[test]
+fn cg_to_sg_projects_remote_includes_another_remote() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/remote-includes-another-remote")?;
+    add_workspace(&mut meta);
+    assert_cg_to_sg_projects(&repo, &*meta)
+}
+
+#[test]
+fn cg_to_sg_single_stack() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/single-stack")?;
+    add_workspace(&mut meta);
+    assert_cg_to_sg_parity(&repo, &*meta)
+}
+
+#[test]
+fn cg_to_sg_two_stacks_empty_branch() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/reproduce-11483")?;
+    add_stack_with_segments(&mut meta, 1, "A", StackState::InWorkspace, &[]);
+    add_stack_with_segments(&mut meta, 2, "B", StackState::InWorkspace, &["below"]);
+    assert_cg_to_sg_parity(&repo, &*meta)
+}
+
+#[test]
+fn cg_to_sg_dependent_branches() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/reproduce-12146")?;
+    add_stack_with_segments(&mut meta, 0, "A", StackState::InWorkspace, &[]);
+    add_stack_with_segments(&mut meta, 1, "B", StackState::InWorkspace, &[]);
+    assert_cg_to_sg_parity(&repo, &*meta)
+}
+
+#[test]
+fn cg_to_sg_remote_ahead() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/local-target-and-stack")?;
+    add_workspace(&mut meta);
+    assert_cg_to_sg_parity(&repo, &*meta)
+}
+
+#[test]
+fn cg_to_sg_ambiguous() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/single-stack-ambiguous")?;
+    add_workspace(&mut meta);
+    assert_cg_to_sg_parity(&repo, &*meta)
+}
+
+#[test]
+fn cg_to_sg_shared_segment() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/multi-lane-with-shared-segment")?;
+    add_workspace(&mut meta);
+    assert_cg_to_sg_parity(&repo, &*meta)
+}
+
+#[test]
+fn cg_to_sg_merge_into_main() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/single-merge-into-main")?;
+    add_workspace(&mut meta);
+    assert_cg_to_sg_parity(&repo, &*meta)
+}
+
+#[test]
+fn cg_to_sg_one_integrated() -> anyhow::Result<()> {
+    let (repo, mut meta) =
+        read_only_in_memory_scenario("ws/multi-lane-with-shared-segment-one-integrated")?;
+    add_workspace(&mut meta);
+    assert_cg_to_sg_parity(&repo, &*meta)
+}
+
+#[ignore = "frontier: remote/target segment subsystem (untracked remotes, target outside workspace, condition-d rename gating)"]
+#[test]
+fn cg_to_sg_reproduce_11459() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/reproduce-11459")?;
+    add_workspace(&mut meta);
+    assert_cg_to_sg_parity(&repo, &*meta)
+}
+
+#[test]
+fn cg_to_sg_advanced_tip_outside() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/advanced-stack-tip-outside-workspace")?;
+    add_workspace(&mut meta);
+    assert_cg_to_sg_parity(&repo, &*meta)
+}
+
+#[test]
+fn cg_to_sg_integrated_merge_at_bottom() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/integrated-merge-at-bottom")?;
+    add_workspace(&mut meta);
+    assert_cg_to_sg_parity(&repo, &*meta)
+}
+
+#[test]
+fn cg_to_sg_merge_from_main() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/merge-from-main-in-branch")?;
+    add_workspace(&mut meta);
+    assert_cg_to_sg_parity(&repo, &*meta)
+}
+
+#[test]
+fn cg_to_sg_multiple_stacks_shared_remote() -> anyhow::Result<()> {
+    let (repo, mut meta) =
+        read_only_in_memory_scenario("ws/multiple-stacks-with-shared-segment-and-remote")?;
+    add_workspace(&mut meta);
+    assert_cg_to_sg_parity(&repo, &*meta)
+}
+
+#[test]
+fn cg_to_sg_disambiguate_by_remote() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/disambiguate-by-remote")?;
+    add_workspace(&mut meta);
+    assert_cg_to_sg_parity(&repo, &*meta)
+}
+
+#[test]
+fn cg_to_sg_remote_includes_another_remote() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/remote-includes-another-remote")?;
+    add_workspace(&mut meta);
+    assert_cg_to_sg_parity(&repo, &*meta)
+}
+
+#[test]
+fn graph_structure_is_stable_and_discriminating() -> anyhow::Result<()> {
+    // The fingerprint equals itself and distinguishes structurally different workspaces — the property
+    // a CommitGraph-built graph will be verified against.
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/single-stack-ambiguous")?;
+    add_workspace(&mut meta);
+    let a =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    let a2 =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    assert_eq!(
+        graph_structure(&a),
+        graph_structure(&a2),
+        "the same workspace fingerprints identically"
+    );
+
+    let (repo_b, mut meta_b) = read_only_in_memory_scenario("ws/reproduce-12146")?;
+    add_stack_with_segments(&mut meta_b, 0, "A", StackState::InWorkspace, &[]);
+    add_stack_with_segments(&mut meta_b, 1, "B", StackState::InWorkspace, &[]);
+    let b = Graph::from_head(
+        &repo_b,
+        &*meta_b,
+        project_meta(&*meta_b),
+        standard_options(),
+    )?
+    .validated()?;
+    assert_ne!(
+        graph_structure(&a),
+        graph_structure(&b),
+        "structurally different workspaces fingerprint differently"
+    );
+    Ok(())
+}
+
+/// The straight-from-git CommitGraph must compute the same per-commit `CommitFlags` (the standard
+/// four: NotInRemote/InWorkspace/Integrated/ShallowBoundary, ignoring goal bits) as the segment graph,
+/// whose flags the `from_segment_graph` bridge carries over. Compared on the segment graph's commits.
+fn assert_commit_flags_parity(
+    repo: &gix::Repository,
+    graph: &but_graph::Graph,
+    target: Option<gix::ObjectId>,
+) -> anyhow::Result<()> {
+    let oracle = but_graph::CommitGraph::from_segment_graph(graph);
+    let mut from_git = but_graph::CommitGraph::from_repository(repo)?;
+    from_git.mark_integrated(target);
+    let mask = but_graph::CommitFlags::all();
+    for id in oracle.commit_ids() {
+        let want = oracle.node(id).expect("present").commit.flags & mask;
+        let got = from_git.node(id).map(|n| n.commit.flags & mask);
+        assert_eq!(got, Some(want), "CommitFlags mismatch for {id}");
+    }
+    Ok(())
+}
+
+#[test]
+fn cg_flags_parity_single_stack_ambiguous() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/single-stack-ambiguous")?;
+    add_workspace(&mut meta);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    assert_commit_flags_parity(&repo, &graph, target_commit(&repo, &*meta))
+}
+
+#[test]
+fn cg_flags_parity_two_stacks_empty_branch() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/reproduce-11483")?;
+    add_stack_with_segments(&mut meta, 1, "A", StackState::InWorkspace, &[]);
+    add_stack_with_segments(&mut meta, 2, "B", StackState::InWorkspace, &["below"]);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    assert_commit_flags_parity(&repo, &graph, target_commit(&repo, &*meta))
+}
+
+#[test]
+fn cg_flags_parity_remote_ahead() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/local-target-and-stack")?;
+    add_workspace(&mut meta);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    assert_commit_flags_parity(&repo, &graph, target_commit(&repo, &*meta))
+}
+
+#[test]
+fn cg_flags_parity_deduced_remote_ahead() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/deduced-remote-ahead")?;
+    add_workspace(&mut meta);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    assert_commit_flags_parity(&repo, &graph, target_commit(&repo, &*meta))
+}
+
+#[test]
+fn cg_flags_parity_advanced_stack_tip_outside() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/advanced-stack-tip-outside-workspace")?;
+    add_stack_with_segments(&mut meta, 1, "B", StackState::InWorkspace, &["A"]);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    assert_commit_flags_parity(&repo, &graph, target_commit(&repo, &*meta))
+}
+
+#[test]
+fn cg_flags_parity_multi_lane_one_integrated() -> anyhow::Result<()> {
+    let (repo, mut meta) =
+        read_only_in_memory_scenario("ws/multi-lane-with-shared-segment-one-integrated")?;
+    add_workspace(&mut meta);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    assert_commit_flags_parity(&repo, &graph, target_commit(&repo, &*meta))
+}
+
+#[test]
+fn cg_flags_parity_remote_includes_another_remote() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/remote-includes-another-remote")?;
+    add_workspace(&mut meta);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    assert_commit_flags_parity(&repo, &graph, target_commit(&repo, &*meta))
+}
+
+/// Bridge-only parity (the entrypoint can't be replicated by `from_repository`, which pins it to the
+/// workspace commit): project the `from_segment_graph` CommitGraph and compare to the segment-based
+/// stacks.
+fn assert_bridge_projection_parity(
+    repo: &gix::Repository,
+    graph: but_graph::Graph,
+    stack_branches: &[Vec<gix::refs::FullName>],
+    target: Option<gix::ObjectId>,
+) -> anyhow::Result<()> {
+    let ws_ref: gix::refs::FullName = WORKSPACE_REF_NAME.try_into()?;
+    let ws_commit = repo
+        .find_reference(&ws_ref)?
+        .peel_to_commit()?
+        .id()
+        .detach();
+    let remote_tracking = remote_tracking_map(repo)?;
+    let bridge = but_graph::commit_graph_projection::project(
+        &but_graph::CommitGraph::from_segment_graph(&graph),
+        ws_commit,
+        Some(stack_branches),
+        target,
+        &remote_tracking,
+    );
+    let ws = graph.into_workspace()?;
+    assert_eq!(
+        cg_projection_shape(&bridge),
+        segment_projection_shape(&ws),
+        "commit-graph projection (bridge) with an entrypoint should reproduce the segment-based stacks"
+    );
+    Ok(())
+}
+
+#[test]
+fn cg_proj_parity_entrypoint_splits_segment() -> anyhow::Result<()> {
+    // Checking out B-empty (2a31450) inside the single ambiguous B segment forces a boundary there: B
+    // keeps its upper commits, and the entrypoint starts a new anonymous segment (B-empty/ambiguous-01
+    // are ambiguous), matching the segment graph's 👉 split.
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/single-stack-ambiguous")?;
+    add_workspace(&mut meta);
+    let (ep_id, _ref) = id_at(&repo, "B-empty");
+    let graph = Graph::from_commit_traversal(
+        ep_id,
+        None,
+        &*meta,
+        project_meta(&*meta),
+        standard_options(),
+    )?
+    .validated()?;
+    let stack_branches = stack_branches_from_meta(&*meta)?;
+    let target = target_commit(&repo, &*meta);
+    assert_bridge_projection_parity(&repo, graph, &stack_branches, target)
+}
+
+#[test]
+fn cg_proj_parity_entrypoint_named_segment() -> anyhow::Result<()> {
+    // Same checkout, but with the B-empty ref passed: the entrypoint segment is NAMED B-empty even
+    // though the commit is ambiguous, overriding disambiguation.
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/single-stack-ambiguous")?;
+    add_workspace(&mut meta);
+    let (ep_id, ep_ref) = id_at(&repo, "B-empty");
+    let graph = Graph::from_commit_traversal(
+        ep_id,
+        ep_ref,
+        &*meta,
+        project_meta(&*meta),
+        standard_options(),
+    )?
+    .validated()?;
+    let stack_branches = stack_branches_from_meta(&*meta)?;
+    let target = target_commit(&repo, &*meta);
+    assert_bridge_projection_parity(&repo, graph, &stack_branches, target)
+}
+
+#[test]
+fn cg_proj_parity_disambiguate_by_remote() -> anyhow::Result<()> {
+    // Each commit carries competing local branches; the one with a remote-tracking branch wins (A over
+    // ambiguous-A, B over ambiguous-B). The C commit stays anonymous because BOTH C and ambiguous-C
+    // have remotes.
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/disambiguate-by-remote")?;
+    add_workspace(&mut meta);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    let stack_branches = stack_branches_from_meta(&*meta)?;
+    let target = target_commit(&repo, &*meta);
+    assert_commit_graph_projection_parity(&repo, graph, &stack_branches, target)
+}
+
+#[test]
+fn cg_proj_parity_remote_includes_another_remote() -> anyhow::Result<()> {
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/remote-includes-another-remote")?;
+    add_workspace(&mut meta);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    let stack_branches = stack_branches_from_meta(&*meta)?;
+    let target = target_commit(&repo, &*meta);
+    assert_commit_graph_projection_parity(&repo, graph, &stack_branches, target)
+}
+
+#[test]
+fn cg_proj_parity_deduced_remote_ahead() -> anyhow::Result<()> {
+    // Single stack A with NO target, and origin/A ahead by a merge: commits_on_remote must include the
+    // merge's second-parent commit (full reachability, generation-ordered), and the base walks to the
+    // root (no convergence for a lone stack without a target).
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/deduced-remote-ahead")?;
+    add_workspace(&mut meta);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    let stack_branches = stack_branches_from_meta(&*meta)?;
+    let target = target_commit(&repo, &*meta);
+    assert_commit_graph_projection_parity(&repo, graph, &stack_branches, target)
+}
+
+#[test]
+fn cg_proj_parity_multiple_stacks_shared_remote() -> anyhow::Result<()> {
+    // Two stacks B-on-A and C-on-A share the base segment A (which has a remote origin/A ahead). A is
+    // NOT itself a stack top, so it forms a shared segment inside each stack — unlike a sibling stack
+    // top, which is absorbed (reproduce-12146).
+    let (repo, mut meta) =
+        read_only_in_memory_scenario("ws/multiple-stacks-with-shared-segment-and-remote")?;
+    add_stack_with_segments(&mut meta, 1, "C-on-A", StackState::InWorkspace, &[]);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    let stack_branches = stack_branches_from_meta(&*meta)?;
+    let target = target_commit(&repo, &*meta);
+    assert_commit_graph_projection_parity(&repo, graph, &stack_branches, target)
+}
+
+#[test]
+fn cg_proj_parity_integrated_below_target_upstream_ahead() -> anyhow::Result<()> {
+    // Two stacks whose trunk below their fork points ('target', 'base') is integrated: the fork-point
+    // base floors each stack at its own divergence (my-branch on 2121f9c, old-branch on 322cb14),
+    // pruning the integrated trunk even though origin/main has advanced past the stored target.
+    let (repo, mut meta) =
+        read_only_in_memory_scenario("ws/integrated-below-target-upstream-ahead")?;
+    let target_id = repo.rev_parse_single("main~1")?.detach();
+    add_workspace_with_target(&mut meta, target_id);
+    add_stack_with_segments(&mut meta, 0, "my-branch", StackState::InWorkspace, &[]);
+    add_stack_with_segments(&mut meta, 1, "old-branch", StackState::InWorkspace, &[]);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    let stack_branches = stack_branches_from_meta(&*meta)?;
+    let target = target_commit(&repo, &*meta);
+    assert_commit_graph_projection_parity(&repo, graph, &stack_branches, target)
+}
+
+#[test]
+fn cg_proj_parity_catchup_merge_below_target() -> anyhow::Result<()> {
+    // X forks below the target and catches up via `merge origin/main`, so the target enters X only
+    // through the merge's SECOND parent (off X's first-parent spine). The fork-point base floors X at
+    // its own divergence b4bd43f, keeping X's commits and pruning the trunk below.
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/catchup-merge-leak")?;
+    let target_id = repo.rev_parse_single("main~2")?.detach();
+    add_workspace_with_target(&mut meta, target_id);
+    add_stack_with_segments(&mut meta, 0, "X", StackState::InWorkspace, &[]);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    let stack_branches = stack_branches_from_meta(&*meta)?;
+    let target = target_commit(&repo, &*meta);
+    assert_commit_graph_projection_parity(&repo, graph, &stack_branches, target)
+}
+
+#[test]
+fn cg_proj_parity_integrated_empty_tracked_stack_kept() -> anyhow::Result<()> {
+    // With the target advanced to origin/main, my-branch's commits are all at/below its base (fully
+    // integrated) so the stack is empty — but because it is metadata-tracked it is KEPT as an empty
+    // placeholder, not dropped like an untracked integrated sibling.
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/integrated-above-target")?;
+    let main_id = repo.rev_parse_single("main")?.detach();
+    add_workspace_with_target(&mut meta, main_id);
+    add_stack_with_segments(&mut meta, 0, "my-branch", StackState::InWorkspace, &[]);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    let stack_branches = stack_branches_from_meta(&*meta)?;
+    let target = target_commit(&repo, &*meta);
+    assert_commit_graph_projection_parity(&repo, graph, &stack_branches, target)
+}
+
+#[test]
+fn cg_proj_parity_merge_from_main_in_branch() -> anyhow::Result<()> {
+    // The branch merges main into itself, then commits again. The fork point is the original
+    // divergence (fafd9d0), not the merged-in main tip (ef56fab, reachable only via the merge's second
+    // parent), so all three branch commits stay visible.
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/merge-from-main-in-branch")?;
+    add_stack_with_segments(&mut meta, 0, "my-branch", StackState::InWorkspace, &[]);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    let stack_branches = stack_branches_from_meta(&*meta)?;
+    let target = target_commit(&repo, &*meta);
+    assert_commit_graph_projection_parity(&repo, graph, &stack_branches, target)
+}
+
+#[test]
+fn cg_proj_parity_integrated_merge_at_bottom() -> anyhow::Result<()> {
+    // The stack's base is the first-parent fork point (fafd9d0), not the general merge-base with the
+    // target (which reaches f5f42e0 via the merge's second parent, off the first-parent spine). The
+    // integrated merge commit 0b3ccaf is kept because it is above the target.
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/integrated-merge-at-bottom")?;
+    add_stack_with_segments(&mut meta, 0, "local-stack", StackState::InWorkspace, &[]);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    let stack_branches = stack_branches_from_meta(&*meta)?;
+    let target = target_commit(&repo, &*meta);
+    assert_commit_graph_projection_parity(&repo, graph, &stack_branches, target)
+}
+
+#[test]
+fn cg_proj_parity_reproduce_12146() -> anyhow::Result<()> {
+    // Dependent branches: B is stacked on A, and both are workspace stacks (ws-commit parents). A owns
+    // only the shared commit 81d4e38; B owns its own commit plus 81d4e38 — the shared commit appears in
+    // both stacks, and B does not carve out a nested "A" segment.
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/reproduce-12146")?;
+    add_stack_with_segments(&mut meta, 0, "A", StackState::InWorkspace, &[]);
+    add_stack_with_segments(&mut meta, 1, "B", StackState::InWorkspace, &[]);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    let stack_branches = stack_branches_from_meta(&*meta)?;
+    let target = target_commit(&repo, &*meta);
+    assert_commit_graph_projection_parity(&repo, graph, &stack_branches, target)
+}
+
+#[test]
+fn cg_proj_parity_multi_lane_shared_segment() -> anyhow::Result<()> {
+    // Three stacks (A, B, D) sharing an S1..S3 "shared" segment, with D stacked on the non-workspace
+    // C. The shared segment repeats in every stack — the per-stack spine walk reproduces that.
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/multi-lane-with-shared-segment")?;
+    add_workspace(&mut meta);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    let stack_branches = stack_branches_from_meta(&*meta)?;
+    let target = target_commit(&repo, &*meta);
+    assert_commit_graph_projection_parity(&repo, graph, &stack_branches, target)
+}
+
+#[test]
+fn cg_proj_parity_multi_lane_shared_segment_one_integrated() -> anyhow::Result<()> {
+    // Like the above, but A is fully integrated into origin/main (a merge). Without an extra target the
+    // base rises to the shared tip (d4f537e): A drops out entirely (zero commits) and the shared
+    // segment is excluded from B and D.
+    let (repo, mut meta) =
+        read_only_in_memory_scenario("ws/multi-lane-with-shared-segment-one-integrated")?;
+    add_workspace(&mut meta);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    let stack_branches = stack_branches_from_meta(&*meta)?;
+    let target = target_commit(&repo, &*meta);
+    assert_commit_graph_projection_parity(&repo, graph, &stack_branches, target)
+}
+
+#[test]
+fn cg_proj_parity_single_stack_ambiguous() -> anyhow::Result<()> {
+    // Stack B: segment-B~1 carries two competing local branches (B-empty, ambiguous-01), neither in the
+    // workspace metadata — the real projection leaves that split anonymous (disambiguation fails).
+    let (repo, mut meta) = read_only_in_memory_scenario("ws/single-stack-ambiguous")?;
+    add_workspace(&mut meta);
+    let graph =
+        Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?.validated()?;
+    let stack_branches = stack_branches_from_meta(&*meta)?;
+    let target = target_commit(&repo, &*meta);
+    assert_commit_graph_projection_parity(&repo, graph, &stack_branches, target)
+}
