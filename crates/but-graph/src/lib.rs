@@ -228,7 +228,10 @@ pub use commit_graph::{CommitGraph, CommitNode};
 pub mod commit_graph_projection;
 
 mod commit_graph_to_segment_graph;
-pub use commit_graph_to_segment_graph::graph_from_commit_graph;
+pub use commit_graph_to_segment_graph::{
+    graph_from_commit_graph, graph_from_repository, graph_from_repository_unmanaged,
+    graph_from_repository_with_overlay,
+};
 
 mod statistics;
 pub use statistics::Statistics;

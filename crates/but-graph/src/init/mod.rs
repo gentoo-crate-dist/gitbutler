@@ -557,6 +557,11 @@ impl Graph {
         options: Options,
     ) -> anyhow::Result<Self> {
         let head = repo.head()?;
+        // The flip dispatch lives in `from_commit_traversal` (which every case below
+        // delegates to): a checkout inside a managed workspace — including HEAD on the workspace
+        // ref itself — builds from a CommitGraph; everything else stays on the walk. The
+        // non-managed builder (`graph_from_repository_unmanaged`) is not parity-proven yet and is
+        // deliberately NOT routed to.
         let mut is_detached = false;
         let (tip, maybe_name) = match head.kind {
             gix::head::Kind::Unborn(ref_name) => {
@@ -680,8 +685,57 @@ impl Graph {
     ) -> anyhow::Result<Self> {
         let repo = tip.repo;
         let tip = tip.detach();
-        let (overlay_repo, overlay_meta, _entrypoint) = Overlay::default().into_parts(repo, meta);
         let ref_name = ref_name.into();
+        // THE FLIP (default): if the entrypoint is inside a managed workspace, build from a CommitGraph
+        // (with an entrypoint split). Falls through to the walk for adhoc / outside entrypoints. A
+        // workspace-ref tip is the plain from_head case (no explicit entrypoint). NEVER for raw
+        // debugging graphs: the flip itself runs the raw walk underneath (`CommitGraph::from_walk`),
+        // which would recurse. BUT_GRAPH_NO_FLIP forces the legacy walk until it is deleted.
+        if std::env::var_os("BUT_GRAPH_NO_FLIP").is_none()
+            && !options.dangerously_skip_postprocessing_for_debugging
+        {
+            let is_ws_tip = ref_name
+                .as_ref()
+                .is_some_and(|r| but_core::is_workspace_ref_name(r.as_ref()));
+            let (entrypoint, entrypoint_ref) = if is_ws_tip {
+                (None, None)
+            } else {
+                (Some(tip), ref_name.clone())
+            };
+            if let Some(graph) = crate::graph_from_repository(
+                repo,
+                meta,
+                entrypoint,
+                entrypoint_ref,
+                project_meta.clone(),
+                options.clone(),
+            )? {
+                return Ok(graph);
+            }
+        }
+        Self::from_commit_traversal_with_overlay(
+            repo,
+            tip,
+            ref_name,
+            meta,
+            project_meta,
+            options,
+            Overlay::default(),
+        )
+    }
+
+    /// Like [`Self::from_commit_traversal()`], but with in-memory `overlay` refs and metadata, and
+    /// without the flip dispatch — this IS the walk, which the flip also runs underneath.
+    pub(crate) fn from_commit_traversal_with_overlay(
+        repo: &gix::Repository,
+        tip: gix::ObjectId,
+        ref_name: Option<gix::refs::FullName>,
+        meta: &impl RefMetadata,
+        project_meta: ProjectMeta,
+        options: Options,
+        overlay: Overlay,
+    ) -> anyhow::Result<Self> {
+        let (overlay_repo, overlay_meta, _entrypoint) = overlay.into_parts(repo, meta);
         let tips = initial_tips_from_workspace_metadata(
             &overlay_repo,
             &overlay_meta,
@@ -1046,6 +1100,7 @@ impl Graph {
         meta: &impl RefMetadata,
         overlay: Overlay,
     ) -> anyhow::Result<Self> {
+        let overlay_for_flip = overlay.clone();
         let (repo, meta, entrypoint) = overlay.into_parts(repo, meta);
         let (tip, ref_name) = match entrypoint {
             Some(t) => t,
@@ -1081,6 +1136,32 @@ impl Graph {
                 (tip, ref_name)
             }
         };
+        // THE FLIP (default): the same dispatch as `from_commit_traversal`, with the overlay served
+        // from memory by the flip builder. Falls through to the walk when the entrypoint isn't
+        // inside a managed workspace. BUT_GRAPH_NO_FLIP forces the legacy walk.
+        if std::env::var_os("BUT_GRAPH_NO_FLIP").is_none()
+            && !self.options.dangerously_skip_postprocessing_for_debugging
+        {
+            let is_ws_tip = ref_name
+                .as_ref()
+                .is_some_and(|r| but_core::is_workspace_ref_name(r.as_ref()));
+            let (flip_ep, flip_ep_ref) = if is_ws_tip {
+                (None, None)
+            } else {
+                (Some(tip), ref_name.clone())
+            };
+            if let Some(graph) = crate::graph_from_repository_with_overlay(
+                repo.for_attach_only(),
+                meta.for_inner_only(),
+                flip_ep,
+                flip_ep_ref,
+                self.project_meta.clone(),
+                self.options.clone(),
+                overlay_for_flip,
+            )? {
+                return Ok(graph);
+            }
+        }
         let tips = initial_tips_from_workspace_metadata(
             &repo,
             &meta,
