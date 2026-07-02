@@ -908,9 +908,6 @@ impl Graph {
             repo.worktree_branches(graph.entrypoint_ref.as_ref().map(|r| r.as_ref()))?;
 
         let mut ctx = post::Context {
-            repo,
-            symbolic_remote_names: &initial_tips.symbolic_remote_names,
-            configured_remote_tracking_branches: &configured_remote_tracking_branches,
             inserted_proxy_segments: Vec::new(),
             refs_by_id,
             hard_limit: false,
@@ -1960,7 +1957,7 @@ fn queue_initial_tips<T: RefMetadata>(
     commit_graph: Option<&gix::commitgraph::Graph>,
     repo: &OverlayRepo<'_>,
     meta: &OverlayMetadata<'_, T>,
-    ctx: &post::Context<'_>,
+    ctx: &post::Context,
     buf: &mut Vec<u8>,
 ) -> anyhow::Result<Vec<SegmentIndex>> {
     // `target_local_segments` holds the local side once its segment and goal

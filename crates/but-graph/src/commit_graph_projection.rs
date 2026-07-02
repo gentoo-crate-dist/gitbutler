@@ -246,58 +246,6 @@ pub fn project(
     ))
 }
 
-/// Self-contained entry: build a [`CommitGraph`] straight from `repo` and project it, deriving the
-/// enrichment inputs (each in-workspace stack's branch list, the target, and the remote-tracking map)
-/// from the repository and its ref metadata — the same inputs the segment-graph path takes. This is
-/// the shape in which the projection can replace the segment graph: given only `(repo, meta)`, produce
-/// the display stacks.
-pub fn project_from_repository<T: but_core::RefMetadata>(
-    repo: &gix::Repository,
-    meta: &T,
-) -> anyhow::Result<Vec<StackView>> {
-    let cg = CommitGraph::from_repository(repo)?;
-    let ws_ref: gix::refs::FullName = but_core::WORKSPACE_REF_NAME.try_into()?;
-    let ws_commit = repo
-        .find_reference(&ws_ref)?
-        .peel_to_commit()?
-        .id()
-        .detach();
-
-    let ws_meta = meta.workspace(ws_ref.as_ref())?;
-    // Each in-workspace stack's ordered branch refs.
-    let stack_branches: Vec<Vec<gix::refs::FullName>> = ws_meta
-        .stacks
-        .iter()
-        .filter(|s| s.is_in_workspace())
-        .map(|s| s.branches.iter().map(|b| b.ref_name.clone()).collect())
-        .collect();
-    // The target that bounds each stack's base: the metadata target ref, else `origin/main`.
-    let target = ws_meta
-        .project_meta()
-        .target_ref
-        .or_else(|| "refs/remotes/origin/main".try_into().ok())
-        .and_then(|tr| {
-            Some(
-                repo.find_reference(&tr)
-                    .ok()?
-                    .peel_to_commit()
-                    .ok()?
-                    .id()
-                    .detach(),
-            )
-        });
-    let (remote_tracking, _symbolic_remotes) =
-        remote_tracking_from_repository(repo, &ws_meta.project_meta())?;
-
-    Ok(project(
-        &cg,
-        ws_commit,
-        Some(&stack_branches),
-        target,
-        &remote_tracking,
-    ))
-}
-
 /// Local branch -> its remote-tracking branch, mirroring the walk's
 /// `lookup_remote_tracking_branch_or_deduce_it`, plus the SYMBOLIC remote names in play:
 /// 1. A branch CONFIGURED in git (`branch.<name>.remote`/`merge`) tracks that remote branch.

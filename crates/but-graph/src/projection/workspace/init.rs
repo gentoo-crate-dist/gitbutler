@@ -19,9 +19,7 @@ use crate::{
     utils::SeenTable,
     workspace::{
         Stack, StackCommit, StackCommitFlags, StackSegment, TargetCommit, TargetRef, WorkspaceKind,
-        workspace::{
-            WorkspaceReconciliationInput, WorkspaceState, find_segment_owner_indexes_by_refname,
-        },
+        workspace::{WorkspaceState, find_segment_owner_indexes_by_refname},
     },
 };
 
@@ -30,8 +28,6 @@ pub(crate) enum Downgrade {
     /// out to be outside the workspace.
     /// This is typically what you want when producing a workspace for display, as the workspace then isn't relevant.
     Allow,
-    /// Use this if the closest workspace is what you want, even if the reference in question is below the workspace lower bound.
-    Disallow,
 }
 
 /// Shared graph-level workspace analysis before projection-only cleanup.
@@ -123,24 +119,6 @@ impl Graph {
         ws.add_commits_on_remote(self);
         ws.truncate_single_stack_to_match_base();
         Ok(ws)
-    }
-
-    pub(crate) fn workspace_reconciliation_input(
-        &self,
-    ) -> anyhow::Result<Option<WorkspaceReconciliationInput>> {
-        let frame = self.workspace_frame(Downgrade::Disallow)?;
-        let Some(metadata) = frame.metadata.clone() else {
-            return Ok(None);
-        };
-        let stacks = self.workspace_stacks(&frame)?;
-        Ok(Some(WorkspaceReconciliationInput {
-            id: frame.ws_tip_segment_id,
-            stacks,
-            lower_bound_segment_id: frame.lower_bound_segment_id,
-            target_ref: frame.target_ref,
-            target_commit: frame.target_commit,
-            metadata,
-        }))
     }
 
     fn workspace_frame(&self, downgrade: Downgrade) -> anyhow::Result<WorkspaceFrame> {
