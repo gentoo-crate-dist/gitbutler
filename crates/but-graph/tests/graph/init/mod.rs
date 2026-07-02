@@ -1003,13 +1003,14 @@ fn stacked_rebased_remotes() -> anyhow::Result<()> {
 
     ├── 👉►:0[0]:B[🌳] <> origin/B →:2:
     │   └── ·312f819 (⌂|001)
-    │       └── ►:1[1]:A <> origin/A →:3:
+    │       └── ►:1[1]:A <> origin/A →:4:
     │           └── ❌·e255adc (⌂|101)
     └── ►:2[0]:origin/B →:0:
         └── 🟣682be32 (0x0|010)
-            └── ►:3[1]:origin/A →:1:
-                ├── 🟣e29c23d (0x0|010)
-                └── 🏁🟣fafd9d0 (0x0|010) ►main
+            └── ►:4[1]:origin/A →:1:
+                └── 🟣e29c23d (0x0|010)
+                    └── ►:3[2]:main
+                        └── 🏁🟣fafd9d0 (0x0|010)
     ");
     assert!(
         graph.hard_limit_hit(),

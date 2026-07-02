@@ -79,11 +79,6 @@ pub struct CommitGraph {
     /// cut (limit, integrated stop-early); connectivity accessors must not rejoin what the walk
     /// severed. `None` for graphs built directly from commits (all raw parents count).
     connected: Option<HashSet<(gix::ObjectId, gix::ObjectId)>>,
-    /// When built [from the walk](Self::from_walk): the name the raw traversal gave the segment
-    /// STARTING at each commit. The walk's naming is traversal-order dependent (which tip reached a
-    /// commit first) and cannot be reproduced statically — carrying it over makes the derived
-    /// segmentation name commits exactly like the walk.
-    walk_names: HashMap<gix::ObjectId, gix::refs::FullName>,
     /// When built [from the walk](Self::from_walk): whether the traversal stopped queueing after
     /// hitting the hard limit. Derived graphs must carry it onto the final `Graph`.
     pub(crate) hard_limit_hit: bool,
@@ -136,7 +131,6 @@ impl CommitGraph {
             entrypoint_ref: None,
             managed_ws_commits: HashSet::new(),
             connected: None,
-            walk_names: HashMap::new(),
             hard_limit_hit: false,
             traversal_tips: Vec::new(),
             explicit_tips: false,
@@ -161,7 +155,6 @@ impl CommitGraph {
             .and_then(|ep| ep.commit_and_owner)
             .and_then(|(_, owner)| owner.ref_info.as_ref().map(|ri| ri.ref_name.clone()));
         let mut commits = Vec::new();
-        let mut walk_names = HashMap::new();
         for s in graph.node_weights() {
             for (i, c) in s.commits.iter().enumerate() {
                 let mut c = c.clone();
@@ -170,9 +163,6 @@ impl CommitGraph {
                 if i == 0
                     && let Some(ri) = &s.ref_info
                 {
-                    // Remember which ref the traversal chose to NAME the segment — its naming is
-                    // traversal-order dependent and cannot be reproduced statically.
-                    walk_names.insert(c.id, ri.ref_name.clone());
                     if !c.refs.iter().any(|r| r.ref_name == ri.ref_name) {
                         c.refs.insert(0, ri.clone());
                     }
@@ -220,7 +210,6 @@ impl CommitGraph {
         }
         let mut cg = CommitGraph::from_commits(commits, entrypoint);
         cg.entrypoint_ref = entrypoint_ref;
-        cg.walk_names = walk_names;
         cg.set_connected(connected);
         cg.hard_limit_hit = graph.hard_limit_hit();
         cg.traversal_tips = graph.traversal_tips.clone();
@@ -253,12 +242,6 @@ impl CommitGraph {
         self.connected
             .as_ref()
             .is_none_or(|c| c.contains(&(child, parent)))
-    }
-
-    /// The name the raw walk gave the segment starting at `c`, when built
-    /// [from the walk](Self::from_walk).
-    pub fn walk_name_of(&self, c: gix::ObjectId) -> Option<&gix::refs::FullName> {
-        self.walk_names.get(&c)
     }
 
     /// Build by running the WALK's real traversal (queue, goals, limits, flag propagation) with

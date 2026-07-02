@@ -770,7 +770,6 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
                 &owner_of,
                 None,
                 &pinned_commits,
-                false,
             );
             // The target's LOCAL tracking branch can sit on the region's tip (a fully disjoint
             // target only reached via the target tip itself). The local owns the commit — remotes
@@ -840,7 +839,6 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
             &owner_of,
             None,
             &pinned_commits,
-            false,
         );
     }
 
@@ -863,7 +861,6 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
             &owner_of,
             None,
             &pinned_commits,
-            true,
         );
     }
 
@@ -888,7 +885,6 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
                 &owner_of,
                 None,
                 &pinned_commits,
-                true,
             ),
             Some(owner_sidx) => {
                 let Some(ref_name) = t.ref_name.clone() else {
@@ -1018,7 +1014,15 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
         // A workspace-stack tip that another stack flows into (via first-parent) is a SHARED commit: it
         // is anonymized into its own segment and its ref floats up as an empty placeholder that the
         // workspace connects to (the dependent-branch pattern).
-        anonymize_shared_stack_tips(cg, &mut sg, workspace_commit, target, &seg_of_tip, &in_set);
+        anonymize_shared_stack_tips(
+            cg,
+            &mut sg,
+            workspace_commit,
+            target,
+            &seg_of_tip,
+            &in_set,
+            stack_branches,
+        );
         // The empty workspace segment must exist BEFORE empty branches are spliced in, so each empty
         // stack routes from it (not from the stack segment the ws ref sits on — which would be degenerate).
         if empty_ws_case {
@@ -1047,34 +1051,6 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
         // represents their stack.
         let ws_lower_bound =
             effective_lower_bound(cg, workspace_commit, target, &project_meta, &options);
-        // A segment still ANONYMOUS takes the name the RAW WALK gave it, when that name is a plain
-        // local branch not already naming another segment. The walk's naming is traversal-order
-        // dependent and cannot be reproduced statically (e.g. two remote-tracked stack branches on
-        // one commit are statically ambiguous; the walk names it after whichever tip claimed it).
-        // BEFORE empty-branch splicing, so a walk-named anchor keeps its lane and the other
-        // branches splice above it; demotions afterward can still strip it.
-        for sidx in sg.node_indices().collect::<Vec<_>>() {
-            let Some(first) = sg
-                .node(sidx)
-                .filter(|s| s.ref_info.is_none())
-                .and_then(|s| s.commits.first().map(|c| c.id))
-            else {
-                continue;
-            };
-            if let Some(name) = cg
-                .walk_name_of(first)
-                .filter(|n| is_plain_local_branch(n))
-                .cloned()
-                && segment_by_ref(&sg, &name).is_none()
-                && let Some(s) = sg.node_mut(sidx)
-            {
-                s.ref_info = Some(RefInfo {
-                    ref_name: name,
-                    commit_id: Some(first),
-                    worktree: None,
-                });
-            }
-        }
         insert_empty_branches(
             &mut sg,
             cg,
@@ -1502,7 +1478,6 @@ fn add_remote_segments(
             owner_of,
             Some(local_sidx),
             pinned_commits,
-            false,
         );
     }
 }
@@ -1531,10 +1506,6 @@ fn segment_ahead_region(
     // region — the projection's `TargetCommit::from_commit` ignores one that sits mid-segment,
     // silently disabling integration checks against it.
     pinned_commits: &HashSet<gix::ObjectId>,
-    // LOCAL regions (an outside entrypoint's history, an explicit tip's component) split at every
-    // plain local branch and name those segments, like the walk. REMOTE ahead-runs must NOT —
-    // interior local refs stay passive commit refs there (e.g. `main` inside the target's region).
-    split_at_local_refs: bool,
 ) {
     // Commits the remote is ahead by: ancestors of the tip that stop at the in-set boundary.
     let mut ahead_set: HashSet<gix::ObjectId> = HashSet::new();
@@ -1565,7 +1536,7 @@ fn segment_ahead_region(
             || pinned_commits.contains(&c)
             || cg.all_parent_ids(c).len() > 1
             || merge_first_parents.contains(&c)
-            || (split_at_local_refs && cg.refs_at(c).iter().any(is_plain_local_branch))
+            || cg.refs_at(c).iter().any(is_plain_local_branch)
             || {
                 let kids = children.get(&c).map(Vec::as_slice).unwrap_or_default();
                 kids.len() > 1
@@ -1590,12 +1561,27 @@ fn segment_ahead_region(
     });
     let mut ahead_owner: HashMap<gix::ObjectId, gix::ObjectId> = HashMap::new();
     let mut ahead_seg: HashMap<gix::ObjectId, SegmentIndex> = HashMap::new();
+    let mut reused: HashSet<gix::ObjectId> = HashSet::new();
     for &tip in &tips {
         let commits = commit_run(cg, tip, &ahead_set, &is_boundary);
         for c in &commits {
             ahead_owner.insert(c.id, tip);
         }
         let is_root = tip == remote_tip;
+        // Overlapping regions can split at the same boundary (two stacked remotes above `main`):
+        // a segment starting at this commit may already exist. Reuse it — a duplicate twin would
+        // dangle after the stacked-remote truncation. Roots keep their own identity (their name
+        // and sibling links belong to THIS region's ref).
+        if !is_root
+            && let Some(existing) = sg.node_indices().find(|&sidx| {
+                sg.node(sidx)
+                    .is_some_and(|s| s.commits.first().is_some_and(|c| c.id == tip))
+            })
+        {
+            ahead_seg.insert(tip, existing);
+            reused.insert(tip);
+            continue;
+        }
         let root_name = || {
             remote_ref.cloned().or_else(|| {
                 let mut it = cg
@@ -1605,12 +1591,9 @@ fn segment_ahead_region(
                 it.next().filter(|_| it.next().is_none())
             })
         };
-        // Interior segments in a LOCAL region are named by the unique plain local branch at
-        // their boundary, like the walk's ref-driven segmentation; ambiguity keeps them anonymous.
+        // Interior segments are named by the unique plain local branch at their boundary,
+        // like the local graph's ref-driven segmentation; ambiguity keeps them anonymous.
         let interior_name = || {
-            if !split_at_local_refs {
-                return None;
-            }
             let mut it = cg
                 .refs_at(tip)
                 .into_iter()
@@ -1650,6 +1633,10 @@ fn segment_ahead_region(
     }
 
     for &tip in &tips {
+        // A reused segment already carries its own outgoing connections.
+        if reused.contains(&tip) {
+            continue;
+        }
         let src = ahead_seg[&tip];
         let bottom = sg
             .node(src)
@@ -1705,9 +1692,14 @@ fn add_untracked_remote_segments(
             continue;
         };
         // Only surface a remote whose LOCAL counterpart actually sits on the same commit (e.g.
-        // `C`/`origin/C` on an ambiguous tip). A remote alone (`origin/A` with no local `A`) is just
-        // where the remote is — the walk drops it. `remote_tracking` maps every remote to a local name,
-        // so the discriminator is whether that local ref really exists here.
+        // `C`/`origin/C` on an ambiguous tip). An ORPHAN remote (`origin/A` with no local `A`)
+        // has no lane to pair with and is deliberately invisible: the traversal never walks it
+        // (remotes are queued off encountered LOCAL refs only), and a metadata branch whose local
+        // ref is missing is skipped at seeding. When the local ref (re)appears — e.g. an anonymous
+        // segment renamed back to `A` — the next build pairs the remote again automatically.
+        // Probed 2026-07-03: surfacing orphans leaks into apply/ad-hoc behavior, not just display.
+        // `remote_tracking` maps every remote to a local name, so the discriminator is whether
+        // that local ref really exists here.
         let has_local_counterpart = cg
             .refs_at(tip)
             .iter()
@@ -1916,6 +1908,7 @@ fn anonymize_shared_stack_tips(
     target: Option<gix::ObjectId>,
     seg_of_tip: &HashMap<gix::ObjectId, SegmentIndex>,
     in_set: &HashSet<gix::ObjectId>,
+    stack_branches: Option<&[Vec<gix::refs::FullName>]>,
 ) {
     let Some(&ws_sidx) = seg_of_tip.get(&workspace_commit) else {
         return;
@@ -1945,30 +1938,43 @@ fn anonymize_shared_stack_tips(
         if std::env::var_os("BUT_GRAPH_FLIP_DEBUG").is_some() {
             eprintln!("FLIP anonymize_shared_stack_tips floats ref off segment of {parent}");
         }
-        // Float the ref onto a new empty placeholder segment. The walk floats the TIP-SEEDED
-        // (traversal) name; when build-time disambiguation picked a different ref (e.g. the
-        // remote-tracked `main` over the stack's `lane`), float the walk's choice and return
-        // the displaced name to the commit as a passive ref.
+        // Float the ref onto a new empty placeholder segment. When build-time disambiguation
+        // picked a NON-stack ref (e.g. the remote-tracked `main` over the stack's `lane`), float
+        // the unique metadata STACK branch instead and return the displaced name to the commit as
+        // a passive ref: an applied-but-empty stack must keep its own lane, or the projection's
+        // integration-prune swallows the whole stack with the shared base it would otherwise own.
         let mut ref_info = sg.node_mut(p_sidx).expect("present").ref_info.take();
-        if let Some(walk_name) = cg
-            .walk_name_of(parent)
-            .filter(|n| {
-                is_plain_local_branch(n) && ref_info.as_ref().is_none_or(|ri| ri.ref_name != **n)
-            })
-            .cloned()
-            && segment_by_ref(sg, &walk_name).is_none()
+        let is_stack_branch = |n: &gix::refs::FullName| {
+            stack_branches
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|b| b == n)
+        };
+        if ref_info
+            .as_ref()
+            .is_none_or(|ri| !is_stack_branch(&ri.ref_name))
         {
-            let displaced = ref_info.replace(RefInfo {
-                ref_name: walk_name,
-                commit_id: Some(parent),
-                worktree: None,
-            });
-            if let Some(displaced) = displaced
-                && let Some(c0) = sg.node_mut(p_sidx).and_then(|s| s.commits.first_mut())
-                && !c0.refs.iter().any(|r| r.ref_name == displaced.ref_name)
+            let mut stack_refs = cg
+                .refs_at(parent)
+                .into_iter()
+                .filter(|r| is_plain_local_branch(r) && is_stack_branch(r));
+            if let Some(stack_ref) = stack_refs.next()
+                && stack_refs.next().is_none()
+                && segment_by_ref(sg, &stack_ref).is_none()
             {
-                c0.refs.push(displaced);
-                c0.refs.sort_by(|a, b| a.ref_name.cmp(&b.ref_name));
+                let displaced = ref_info.replace(RefInfo {
+                    ref_name: stack_ref,
+                    commit_id: Some(parent),
+                    worktree: None,
+                });
+                if let Some(displaced) = displaced
+                    && let Some(c0) = sg.node_mut(p_sidx).and_then(|s| s.commits.first_mut())
+                    && !c0.refs.iter().any(|r| r.ref_name == displaced.ref_name)
+                {
+                    c0.refs.push(displaced);
+                    c0.refs.sort_by(|a, b| a.ref_name.cmp(&b.ref_name));
+                }
             }
         }
         if let Some(s) = sg.node_mut(p_sidx) {
