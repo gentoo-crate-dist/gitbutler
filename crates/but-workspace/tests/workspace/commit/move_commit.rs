@@ -668,9 +668,9 @@ fn move_commit_in_non_managed_workspace() -> anyhow::Result<()> {
     └── ≡:0:three[🌳] {1}
         ├── :0:three[🌳]
         │   └── ·c9f444c
-        ├── :1:two <> origin/two →:2:
+        ├── :1:two <> origin/two →:3:
         │   └── ❄️16fd221
-        └── :3:one
+        └── :2:one
             └── ❄8b426d0
     ");
 
@@ -713,13 +713,15 @@ fn move_commit_in_non_managed_workspace() -> anyhow::Result<()> {
     ");
 
     insta::assert_snapshot!(graph_workspace(&ws), @"
-    ⌂:0:three[🌳] <> ✓!
-    └── ≡:0:three[🌳] {1}
-        ├── :0:three[🌳]
-        │   ├── ·c9f444c ►two
-        │   └── ·16fd221
-        └── :3:one
-            └── ·8b426d0
+    ⌂:3:three[🌳] <> ✓!
+    └── ≡:3:three[🌳] {1}
+        ├── :3:three[🌳]
+        ├── :0:two <> origin/two →:1:⇡1
+        │   └── ·c9f444c
+        ├── :1:origin/two →:0:
+        │   └── ❄16fd221
+        └── :2:one
+            └── ❄8b426d0
     ");
 
     Ok(())
@@ -749,9 +751,9 @@ fn reorder_merge_commit_above_keeps_child_commits_visible() -> anyhow::Result<()
     └── ≡:0:child-stack[🌳] on aa67ae0 {1}
         ├── :0:child-stack[🌳]
         │   └── ·32c8bda ►C2
-        ├── :3:C1
+        ├── :1:C1
         │   └── ·64dace5
-        └── :4:M
+        └── :2:M
             └── ·197bdf1
     ");
 
@@ -821,9 +823,9 @@ fn reorder_merge_commit_below_keeps_child_commits_visible() -> anyhow::Result<()
     └── ≡:0:child-stack[🌳] on aa67ae0 {1}
         ├── :0:child-stack[🌳]
         │   └── ·32c8bda ►C2
-        ├── :3:C1
+        ├── :1:C1
         │   └── ·64dace5
-        └── :4:M
+        └── :2:M
             └── ·197bdf1
     ");
 
@@ -885,9 +887,9 @@ fn reorder_commit_in_non_managed_workspace() -> anyhow::Result<()> {
     └── ≡:0:three[🌳] {1}
         ├── :0:three[🌳]
         │   └── ·c9f444c
-        ├── :1:two <> origin/two →:2:
+        ├── :1:two <> origin/two →:3:
         │   └── ❄️16fd221
-        └── :3:one
+        └── :2:one
             └── ❄8b426d0
     ");
 
@@ -939,13 +941,15 @@ fn reorder_commit_in_non_managed_workspace() -> anyhow::Result<()> {
     ");
 
     insta::assert_snapshot!(graph_workspace(&ws), @"
-    ⌂:0:three[🌳] <> ✓!
-    └── ≡:0:three[🌳] {1}
-        ├── :0:three[🌳]
-        │   ├── ·09ad3ca ►two
+    ⌂:3:three[🌳] <> ✓!
+    └── ≡:3:three[🌳] {1}
+        ├── :3:three[🌳]
+        ├── :0:two <> origin/two →:2:⇡2⇣1
+        │   ├── 🟣16fd221
+        │   ├── ·09ad3ca
         │   └── ·0c38dd9
-        └── :2:one
-            └── ·8b426d0
+        └── :1:one
+            └── ❄8b426d0
     ");
 
     Ok(())

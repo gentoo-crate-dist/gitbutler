@@ -1,5 +1,5 @@
-//! SPIKE (commit-graph-experiment): a commit-first graph that both the display projection and
-//! but-rebase's `StepGraph` could be built from directly, so the segment graph can be deleted.
+//! A commit-first graph flattened out of the raw traversal — the substrate every
+//! [`Graph`](crate::Graph) is built from (see `commit_graph_to_segment_graph`).
 //!
 //! # Why
 //!
@@ -33,28 +33,17 @@
 //! order-stacks machinery ([`crate::Graph`] post-pass) disappears — the order is read straight off
 //! the merge commit's parents.
 //!
-//! This module is a standalone spike: it is not wired into traversal or the projection yet. It
-//! defines the structure and proves the load-bearing derivation (first-parent segmentation) so we
-//! can validate the shape before swapping any behavior.
-
-#![allow(dead_code)]
+//! Historically this was a standalone spike toward deleting the segment graph outright; today the
+//! production builders source it from the REAL traversal ([`CommitGraph::from_walk`]) and rebuild
+//! the full segment graph on top, so downstream consumers are unchanged. The commit-first model
+//! remains the intended shape for the eventual but-graph/but-rebase unification.
 
 use std::collections::{HashMap, HashSet};
-
-use bstr::ByteSlice;
-use gix::reference::Category;
 
 use crate::{Commit, CommitFlags};
 
 /// An index into a [`CommitGraph`]'s node arena.
 pub type CommitIdx = usize;
-
-/// A plain (non-`gitbutler/*`) local branch ref — a "non-remote" tip for flag seeding.
-fn is_plain_local_branch(rn: &gix::refs::FullName) -> bool {
-    let rn = rn.as_ref();
-    rn.category() == Some(Category::LocalBranch)
-        && !rn.as_bstr().starts_with_str("refs/heads/gitbutler/")
-}
 
 /// A node in the commit graph: a commit, plus where it sits topologically.
 #[derive(Debug, Clone)]
@@ -90,11 +79,17 @@ pub struct CommitGraph {
     /// cut (limit, integrated stop-early); connectivity accessors must not rejoin what the walk
     /// severed. `None` for graphs built directly from commits (all raw parents count).
     connected: Option<HashSet<(gix::ObjectId, gix::ObjectId)>>,
-    /// When built [from the walk](Self::from_walk): the name the raw traversal gave the segment
-    /// STARTING at each commit. The walk's naming is traversal-order dependent (which tip reached a
-    /// commit first) and cannot be reproduced statically — carrying it over makes the derived
-    /// segmentation name commits exactly like the walk.
-    walk_names: HashMap<gix::ObjectId, gix::refs::FullName>,
+    /// When built [from the walk](Self::from_walk): whether the traversal stopped queueing after
+    /// hitting the hard limit. Derived graphs must carry it onto the final `Graph`.
+    pub(crate) hard_limit_hit: bool,
+    /// When built [from the walk](Self::from_walk): the traversal's normalized seed tips. Graphs
+    /// built from EXPLICIT tips must carry them onto the final `Graph` — the projection reads tip
+    /// roles (e.g. integrated tips) for such graphs.
+    pub(crate) traversal_tips: Vec<crate::init::Tip>,
+    /// Built from EXPLICIT tips ([`Self::from_walk_tips`]): every tip must start (or get) its own
+    /// segment. Workspace-discovered builds must NOT carve boundaries at their normalized tips —
+    /// the walk merges tip-seeded segments back in post-processing.
+    pub(crate) explicit_tips: bool,
 }
 
 impl CommitGraph {
@@ -136,13 +131,15 @@ impl CommitGraph {
             entrypoint_ref: None,
             managed_ws_commits: HashSet::new(),
             connected: None,
-            walk_names: HashMap::new(),
+            hard_limit_hit: false,
+            traversal_tips: Vec::new(),
+            explicit_tips: false,
         };
         graph.recompute_generations();
         graph
     }
 
-    /// Bridge (spike): build a commit graph from the existing segment graph, so the StepGraph and
+    /// Bridge: build a commit graph from the existing segment graph, so the StepGraph and
     /// projection builders can be exercised against it without first rewriting traversal. Every
     /// segment's commits become nodes; their `parent_ids` are the edges, and the entrypoint commit
     /// carries over.
@@ -158,7 +155,6 @@ impl CommitGraph {
             .and_then(|ep| ep.commit_and_owner)
             .and_then(|(_, owner)| owner.ref_info.as_ref().map(|ri| ri.ref_name.clone()));
         let mut commits = Vec::new();
-        let mut walk_names = HashMap::new();
         for s in graph.node_weights() {
             for (i, c) in s.commits.iter().enumerate() {
                 let mut c = c.clone();
@@ -167,9 +163,6 @@ impl CommitGraph {
                 if i == 0
                     && let Some(ri) = &s.ref_info
                 {
-                    // Remember which ref the traversal chose to NAME the segment — its naming is
-                    // traversal-order dependent and cannot be reproduced statically.
-                    walk_names.insert(c.id, ri.ref_name.clone());
                     if !c.refs.iter().any(|r| r.ref_name == ri.ref_name) {
                         c.refs.insert(0, ri.clone());
                     }
@@ -217,8 +210,9 @@ impl CommitGraph {
         }
         let mut cg = CommitGraph::from_commits(commits, entrypoint);
         cg.entrypoint_ref = entrypoint_ref;
-        cg.walk_names = walk_names;
         cg.set_connected(connected);
+        cg.hard_limit_hit = graph.hard_limit_hit();
+        cg.traversal_tips = graph.traversal_tips.clone();
         cg
     }
 
@@ -250,23 +244,6 @@ impl CommitGraph {
             .is_none_or(|c| c.contains(&(child, parent)))
     }
 
-    /// The name the raw walk gave the segment starting at `c`, when built
-    /// [from the walk](Self::from_walk).
-    pub fn walk_name_of(&self, c: gix::ObjectId) -> Option<&gix::refs::FullName> {
-        self.walk_names.get(&c)
-    }
-
-    /// KEYSTONE SPIKE: build a commit graph straight from git — no segment graph at all. Resolves the
-    /// workspace ref, walks from the workspace commit and every ref tip, and attaches the refs
-    /// pointing at each commit. This is what lets the segment graph eventually be deleted: the
-    /// `CommitGraph` no longer needs to come *from* it (cf. [`Self::from_segment_graph`]).
-    ///
-    /// Spike scope: walks the full reachable history (no bounding at the base) and leaves flags empty;
-    /// both are fine for the projection (which only reads above the base) and for proving the build.
-    pub fn from_repository(repo: &gix::Repository) -> anyhow::Result<Self> {
-        Self::from_repository_with_limit(repo, None)
-    }
-
     /// Build by running the WALK's real traversal (queue, goals, limits, flag propagation) with
     /// post-processing skipped, flattening the raw traversal segments into commits. This keeps the
     /// battle-tested traversal semantics — extents (limit cuts, integrated stop-early) and flags are
@@ -287,12 +264,39 @@ impl CommitGraph {
             meta,
             project_meta,
             crate::init::Options {
-                dangerously_skip_postprocessing_for_debugging: true,
+                raw_traversal: true,
                 ..options
             },
             overlay,
         )?;
         Ok(Self::from_segment_graph(&raw))
+    }
+
+    /// Like [`Self::from_walk`], but seeded from explicit `tips` — the REAL
+    /// [`Graph::from_commit_traversal_tips`](crate::Graph::from_commit_traversal_tips) traversal
+    /// with `raw_traversal`, flattened.
+    pub fn from_walk_tips<T: but_core::RefMetadata>(
+        repo: &gix::Repository,
+        meta: &T,
+        tips: Vec<crate::init::Tip>,
+        project_meta: but_core::ref_metadata::ProjectMeta,
+        options: crate::init::Options,
+        overlay: crate::init::Overlay,
+    ) -> anyhow::Result<Self> {
+        let raw = crate::Graph::from_commit_traversal_tips_with_overlay(
+            repo,
+            tips,
+            meta,
+            project_meta,
+            crate::init::Options {
+                raw_traversal: true,
+                ..options
+            },
+            overlay,
+        )?;
+        let mut cg = Self::from_segment_graph(&raw);
+        cg.explicit_tips = true;
+        Ok(cg)
     }
 
     /// Mark `id` as a GitButler-managed workspace commit when its message says so.
@@ -303,231 +307,6 @@ impl CommitGraph {
         {
             self.managed_ws_commits.insert(id);
         }
-    }
-
-    /// Like [`Self::from_repository`], but bounding the LOCAL walk to about `commits_limit_hint`
-    /// commits below each local tip. Remote tips stay unbounded — they must be able to find their
-    /// local counterparts independently of the limit, exactly like the walk.
-    pub fn from_repository_with_limit(
-        repo: &gix::Repository,
-        commits_limit_hint: Option<usize>,
-    ) -> anyhow::Result<Self> {
-        let ws_ref_name: gix::refs::FullName = but_core::WORKSPACE_REF_NAME.try_into()?;
-        let ws_commit = repo
-            .find_reference(&ws_ref_name)?
-            .peel_to_commit()?
-            .id()
-            .detach();
-        Self::from_repository_seeded(repo, Some(ws_commit), Some(ws_commit), commits_limit_hint)
-    }
-
-    /// Like [`Self::from_repository`], but for a non-managed checkout: there is no workspace ref, so no
-    /// commit carries [`InWorkspace`](crate::CommitFlags::InWorkspace). `head_tip` seeds the walk (and
-    /// `NotInRemote`) so the checked-out history is included even if no local branch names it.
-    pub fn from_repository_unmanaged(
-        repo: &gix::Repository,
-        head_tip: Option<gix::ObjectId>,
-    ) -> anyhow::Result<Self> {
-        Self::from_repository_seeded(repo, head_tip, None, None)
-    }
-
-    /// Shared builder. `head_seed` roots the walk / `NotInRemote` / entrypoint (the workspace octopus
-    /// merge when managed, else the checked-out tip). `ws_commit` marks
-    /// [`InWorkspace`](crate::CommitFlags::InWorkspace) — `None` for a non-managed checkout.
-    fn from_repository_seeded(
-        repo: &gix::Repository,
-        head_seed: Option<gix::ObjectId>,
-        ws_commit: Option<gix::ObjectId>,
-        commits_limit_hint: Option<usize>,
-    ) -> anyhow::Result<Self> {
-        // Refs pointing at each commit (heads + remotes, peeled).
-        let mut refs_by_commit: HashMap<gix::ObjectId, Vec<gix::refs::FullName>> = HashMap::new();
-        for mut reference in repo.references()?.all()?.filter_map(Result::ok) {
-            if let Ok(id) = reference.peel_to_id() {
-                refs_by_commit
-                    .entry(id.detach())
-                    .or_default()
-                    .push(reference.name().to_owned());
-            }
-        }
-
-        // Walk from the workspace/head commit AND every ref tip, so commits a remote-tracking branch is
-        // ahead by (not reachable from the workspace commit) are included too.
-        let seeds: Vec<gix::ObjectId> = head_seed
-            .into_iter()
-            .chain(refs_by_commit.keys().copied())
-            .collect();
-        // With a limit, restrict the LOCAL side to about `limit` commits below the head/workspace
-        // commit (a budgeted BFS, taking the best budget a commit is reached with). Other local tips
-        // are not seeded at all — the walk only walks its traversal tips under a limit. Remote tips
-        // are unbounded so they can find their local counterparts, matching the walk's limit
-        // semantics.
-        let include: Option<HashSet<gix::ObjectId>> = match commits_limit_hint {
-            None => None,
-            Some(limit) => {
-                let mut best: HashMap<gix::ObjectId, usize> = HashMap::new();
-                let mut queue: std::collections::VecDeque<(gix::ObjectId, usize)> =
-                    std::collections::VecDeque::new();
-                for (&id, refs) in &refs_by_commit {
-                    let is_remote = refs
-                        .iter()
-                        .any(|r| r.category() == Some(gix::reference::Category::RemoteBranch));
-                    if is_remote {
-                        queue.push_back((id, usize::MAX));
-                    }
-                }
-                if let Some(head) = head_seed {
-                    queue.push_back((head, limit));
-                }
-                while let Some((id, budget)) = queue.pop_front() {
-                    match best.get(&id) {
-                        Some(&b) if b >= budget => continue,
-                        _ => {
-                            best.insert(id, budget);
-                        }
-                    }
-                    if budget == 0 {
-                        continue;
-                    }
-                    let next = if budget == usize::MAX {
-                        usize::MAX
-                    } else {
-                        budget - 1
-                    };
-                    if let Ok(commit) = repo.find_commit(id) {
-                        for p in commit.parent_ids() {
-                            queue.push_back((p.detach(), next));
-                        }
-                    }
-                }
-                Some(best.into_keys().collect())
-            }
-        };
-        let mut commits = Vec::new();
-        let mut managed_ws_commits = HashSet::new();
-        for info in repo.rev_walk(seeds).all()? {
-            let id = info?.id;
-            if let Some(include) = &include
-                && !include.contains(&id)
-            {
-                continue;
-            }
-            let commit = repo.find_commit(id)?;
-            // Collapse EXACT duplicate parents (a GitButler workspace merge encodes empty lanes as
-            // repeated parents, e.g. `[base, base]`). Lanes are derived from workspace metadata here,
-            // so the repeated edge is pure redundancy — dropping it at the source avoids emitting
-            // duplicate connections downstream. Distinct parents (real merges) are preserved in order.
-            let mut parent_ids: Vec<gix::ObjectId> = Vec::new();
-            for p in commit.parent_ids() {
-                let p = p.detach();
-                // A limit-excluded parent is cut off entirely, like a shallow boundary.
-                if let Some(include) = &include
-                    && !include.contains(&p)
-                {
-                    continue;
-                }
-                if !parent_ids.contains(&p) {
-                    parent_ids.push(p);
-                }
-            }
-            let refs = refs_by_commit
-                .get(&id)
-                .into_iter()
-                .flatten()
-                .map(|ref_name| crate::RefInfo {
-                    ref_name: ref_name.clone(),
-                    commit_id: None,
-                    worktree: None,
-                })
-                .collect();
-            // A GitButler-managed workspace commit is recognised by its message; a workspace ref that
-            // has advanced past it points at a normal commit that is not in this set.
-            if let Ok(message) = commit.message_raw()
-                && crate::workspace::commit::is_managed_workspace_by_message(message)
-            {
-                managed_ws_commits.insert(id);
-            }
-            commits.push(crate::Commit {
-                id,
-                parent_ids,
-                flags: crate::CommitFlags::empty(),
-                refs,
-            });
-        }
-        let mut cg = CommitGraph::from_commits(commits, head_seed);
-        cg.managed_ws_commits = managed_ws_commits;
-
-        // Reachability flags (each seeded on a tip, propagated to its ancestors — a commit carries a
-        // flag iff it is an ancestor-or-self of a seed of that kind). See `CommitFlags`.
-        // InWorkspace: reachable from the workspace tip (managed checkout only).
-        if let Some(ws_commit) = ws_commit {
-            cg.mark_ancestors([ws_commit], crate::CommitFlags::InWorkspace);
-        }
-        // NotInRemote (negative): reachable from any NON-remote tip — the workspace/head commit and
-        // every local branch. A commit reachable only from remote-tracking tips stays remote-only.
-        let local_tips: Vec<gix::ObjectId> = refs_by_commit
-            .iter()
-            .filter(|(_, refs)| refs.iter().any(|r| is_plain_local_branch(r)))
-            .map(|(id, _)| *id)
-            .collect();
-        cg.mark_ancestors(
-            head_seed.into_iter().chain(local_tips),
-            crate::CommitFlags::NotInRemote,
-        );
-        // ShallowBoundary: the repository's shallow (grafted) commits.
-        if let Ok(shallow) = repo.shallow_commits()
-            && let Some(shallow) = shallow
-        {
-            for id in shallow.iter() {
-                cg.set_flag(*id, crate::CommitFlags::ShallowBoundary);
-            }
-        }
-        Ok(cg)
-    }
-
-    /// Set `flag` on every ancestor (inclusive) of any present `seed`, walking `parent_ids`.
-    fn mark_ancestors(
-        &mut self,
-        seeds: impl IntoIterator<Item = gix::ObjectId>,
-        flag: crate::CommitFlags,
-    ) {
-        let mut seen = std::collections::HashSet::new();
-        let mut stack: Vec<gix::ObjectId> = seeds.into_iter().collect();
-        while let Some(id) = stack.pop() {
-            let Some(&idx) = self.by_id.get(&id) else {
-                continue;
-            };
-            if !seen.insert(id) {
-                continue;
-            }
-            self.nodes[idx].commit.flags |= flag;
-            stack.extend(self.nodes[idx].commit.parent_ids.iter().copied());
-        }
-    }
-
-    /// Set `flag` on a single commit, if present.
-    fn set_flag(&mut self, id: gix::ObjectId, flag: crate::CommitFlags) {
-        if let Some(&idx) = self.by_id.get(&id) {
-            self.nodes[idx].commit.flags |= flag;
-        }
-    }
-
-    /// Mark commits `Integrated` — reachable from the target (e.g. `origin/main`). Separate from
-    /// [`Self::from_repository`] because the target comes from workspace metadata, not the repo alone.
-    pub fn mark_integrated(&mut self, target: Option<gix::ObjectId>) {
-        if let Some(target) = target {
-            self.mark_ancestors([target], crate::CommitFlags::Integrated);
-        }
-    }
-
-    /// Recompute `NotInRemote` from the given seeds only. The walk seeds it from its traversal TIPS
-    /// (workspace commit, metadata stack branches, tracked locals, the entrypoint) — a stray local
-    /// branch that is only reachable inside a remote's ahead region does NOT make those commits local.
-    pub fn remark_not_in_remote(&mut self, seeds: impl IntoIterator<Item = gix::ObjectId>) {
-        for node in &mut self.nodes {
-            node.commit.flags.remove(crate::CommitFlags::NotInRemote);
-        }
-        self.mark_ancestors(seeds, crate::CommitFlags::NotInRemote);
     }
 
     /// Where traversal/HEAD started (a checkout inside a stack), if any. The projection forces a
@@ -708,32 +487,6 @@ impl CommitGraph {
             .map(|n| n.commit.id)
     }
 }
-
-// ---------------------------------------------------------------------------------------------
-// Builder sketches (not implemented in this spike — they live in but-graph and but-rebase
-// respectively and would replace the segment-graph-based construction).
-//
-// Projection (in but-graph, replaces projection/workspace/init.rs's segment walk):
-//
-//   fn project(g: &CommitGraph, meta: &Workspace) -> Workspace {
-//       // 1. entrypoint = g.entrypoint; resolve workspace tip commit.
-//       // 2. stack tops = g.parents(workspace_commit) IN ORDER  ← stack order is free here.
-//       // 3. for each top: segments = repeatedly first_parent_run(...) down to lower_bound,
-//       //    splitting at is_segment_boundary plus projection stops (entrypoint, merge-base, target).
-//       // 4. StackSegment fields come straight off the run's commits + their refs; sibling /
-//       //    remote-tracking links are looked up by ref name instead of stored segment ids.
-//       // 5. enrich: prune integrated/archived, mark remote-reachable via flag walks.
-//   }
-//
-// StepGraph (in but-rebase, replaces graph_rebase/creation.rs's segment iteration):
-//
-//   fn build_steps(g: &CommitGraph, entry: ObjectId) -> StepGraph {
-//       // 1. walk reachable commits from entry via g.parents().
-//       // 2. one Pick node per commit, one Reference node per ref on it.
-//       // 3. edges: for each commit, connect to each parent with order = parent index — read
-//       //    directly off commit.parent_ids (no Connection.src_id/dst_id lookup needed).
-//   }
-// ---------------------------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

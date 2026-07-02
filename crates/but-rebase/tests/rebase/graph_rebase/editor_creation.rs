@@ -254,11 +254,11 @@ fn second_parent_leg_long() -> Result<()> {
         └── ·a6775ea (⌂|1)
             └── ►:1[1]:anon:
                 └── ·b85214b (⌂|1)
-                    ├── ►:2[2]:A
+                    ├── ►:3[2]:A
                     │   └── ·add59d2 (⌂|1)
                     │       └── ►:4[3]:main
                     │           └── 🏁·8f0d338 (⌂|1) ►tags/base
-                    └── ►:3[2]:B
+                    └── ►:2[2]:B
                         ├── ·f87f875 (⌂|1)
                         ├── ·cb181a0 (⌂|1)
                         └── ·984fd1c (⌂|1)
@@ -619,22 +619,22 @@ fn immutable_entrypoints_propogate_until_mutable_entrypoints() -> Result<()> {
 
     insta::assert_snapshot!(graph_tree(&graph), @"
 
-    ├── ►:0[0]:explicit-const
+    ├── ►:2[0]:explicit-const
     │   └── ·be4ae80 (⌂) ►main
     │       └── ►:3[1]:implicit-const
     │           └── ·120e3a9 (⌂)
-    │               └── ►:6[2]:explicit-mut
+    │               └── ►:4[2]:explicit-mut
     │                   └── ·a96434e (⌂)
-    │                       └── ►:5[3]:foo
+    │                       └── ►:1[3]:foo
     │                           ├── ·d591dfe (⌂|1)
     │                           └── 🏁·35b8235 (⌂|1)
-    └── ►:1[0]:explicit-const-2
+    └── ►:5[0]:explicit-const-2
         └── ·d9fa122 (⌂)
-            └── ►:4[1]:implicit-const-2
+            └── ►:6[1]:implicit-const-2
                 └── ·85bccf0 (⌂)
-                    └── 👉►:2[2]:implicit-mut
+                    └── 👉►:0[2]:implicit-mut
                         └── ·c8dd361 (⌂|1)
-                            └── →:5: (foo)
+                            └── →:1: (foo)
     ");
 
     let mut ws = graph.into_workspace()?;

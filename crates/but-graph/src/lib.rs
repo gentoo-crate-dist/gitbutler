@@ -219,17 +219,18 @@ mod segment_graph;
 /// The segment graph, where segments directly own their outgoing connections.
 pub use segment_graph::{Connection, Direction, SegmentGraph};
 
-/// SPIKE: a commit-first graph that the projection and StepGraph could be built from directly,
-/// so the segment graph can be removed. Not yet wired into traversal — see the module docs.
+/// The commit-first graph flattened out of the raw traversal — the substrate every graph build
+/// starts from. See the module docs.
 mod commit_graph;
 pub use commit_graph::{CommitGraph, CommitNode};
-/// SPIKE: build the display projection (stacks of segments) straight from a [`CommitGraph`], in a
-/// pure gather phase + a single build pass — no segment-graph mutation passes.
+/// Remote-tracking deduction for the graph builders, plus the historical commit-first display
+/// projection kept for the eventual but-graph/but-rebase unification.
 pub mod commit_graph_projection;
 
 mod commit_graph_to_segment_graph;
 pub use commit_graph_to_segment_graph::{
-    graph_from_commit_graph, graph_from_repository, graph_from_repository_unmanaged,
+    graph_from_commit_graph, graph_from_repository, graph_from_repository_tips,
+    graph_from_repository_unmanaged, graph_from_repository_unmanaged_with_overlay,
     graph_from_repository_with_overlay,
 };
 

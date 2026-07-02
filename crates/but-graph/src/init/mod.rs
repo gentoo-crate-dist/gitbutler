@@ -27,8 +27,8 @@ use crate::init::overlay::{OverlayMetadata, OverlayRepo};
 
 mod remotes;
 
-mod overlay;
-mod post;
+mod ad_hoc;
+pub(crate) mod overlay;
 
 pub(crate) type Entrypoint = Option<(gix::ObjectId, Option<gix::refs::FullName>)>;
 
@@ -478,11 +478,11 @@ pub struct Options {
     /// to extend the border of the workspace. Typically, it's a past position
     /// of an existing target, or a target chosen by the user.
     pub extra_target_commit_id: Option<gix::ObjectId>,
-    /// Enabling this will prevent the postprocessing step to run which is what makes the graph useful through clean-up
-    /// and to make it more amenable to a workspace project.
-    ///
-    /// This should only be used in case post-processing fails and one wants to preview the version before that.
-    pub dangerously_skip_postprocessing_for_debugging: bool,
+    /// Return the RAW traversal graph instead of building the derived one: the direct output of
+    /// the commit walk, without the CommitGraph-based assembly. This is the builders' own
+    /// substrate ([`CommitGraph::from_walk`](crate::CommitGraph::from_walk) sets it to avoid
+    /// recursing into themselves) and a debugging view (`but-debug graph --no-post`).
+    pub raw_traversal: bool,
 }
 
 /// Presets
@@ -557,11 +557,9 @@ impl Graph {
         options: Options,
     ) -> anyhow::Result<Self> {
         let head = repo.head()?;
-        // The flip dispatch lives in `from_commit_traversal` (which every case below
-        // delegates to): a checkout inside a managed workspace — including HEAD on the workspace
-        // ref itself — builds from a CommitGraph; everything else stays on the walk. The
-        // non-managed builder (`graph_from_repository_unmanaged`) is not parity-proven yet and is
-        // deliberately NOT routed to.
+        // The dispatch lives in `from_commit_traversal` (which every case below delegates to):
+        // a checkout inside a managed workspace — including HEAD on the workspace ref itself —
+        // builds via the managed builder, everything else via the non-managed one.
         let mut is_detached = false;
         let (tip, maybe_name) = match head.kind {
             gix::head::Kind::Unborn(ref_name) => {
@@ -686,14 +684,11 @@ impl Graph {
         let repo = tip.repo;
         let tip = tip.detach();
         let ref_name = ref_name.into();
-        // THE FLIP (default): if the entrypoint is inside a managed workspace, build from a CommitGraph
-        // (with an entrypoint split). Falls through to the walk for adhoc / outside entrypoints. A
-        // workspace-ref tip is the plain from_head case (no explicit entrypoint). NEVER for raw
-        // debugging graphs: the flip itself runs the raw walk underneath (`CommitGraph::from_walk`),
-        // which would recurse. BUT_GRAPH_NO_FLIP forces the legacy walk until it is deleted.
-        if std::env::var_os("BUT_GRAPH_NO_FLIP").is_none()
-            && !options.dangerously_skip_postprocessing_for_debugging
-        {
+        // Build from a CommitGraph: inside a managed workspace with an entrypoint split, else via
+        // the non-managed builder. A workspace-ref tip is the plain from_head case (no explicit
+        // entrypoint). NEVER for raw debugging graphs: the builders run the raw traversal
+        // underneath (`CommitGraph::from_walk`), which would recurse.
+        if !options.raw_traversal {
             let is_ws_tip = ref_name
                 .as_ref()
                 .is_some_and(|r| but_core::is_workspace_ref_name(r.as_ref()));
@@ -712,6 +707,15 @@ impl Graph {
             )? {
                 return Ok(graph);
             }
+            // No managed workspace, or the entrypoint is outside it: the non-managed builder.
+            return crate::graph_from_repository_unmanaged(
+                repo,
+                meta,
+                tip,
+                ref_name.clone(),
+                project_meta.clone(),
+                options.clone(),
+            );
         }
         Self::from_commit_traversal_with_overlay(
             repo,
@@ -775,7 +779,33 @@ impl Graph {
         options: Options,
     ) -> anyhow::Result<Self> {
         let tips: Vec<_> = tips.into_iter().collect();
-        let (overlay_repo, overlay_meta, _entrypoint) = Overlay::default().into_parts(repo, meta);
+        // Build from a CommitGraph derived from the same tips traversal. NEVER for raw debugging
+        // graphs — the builder runs the raw tips traversal underneath
+        // (`CommitGraph::from_walk_tips`), which would recurse.
+        if !options.raw_traversal {
+            return crate::graph_from_repository_tips(repo, meta, tips, project_meta, options);
+        }
+        Self::from_commit_traversal_tips_with_overlay(
+            repo,
+            tips,
+            meta,
+            project_meta,
+            options,
+            Overlay::default(),
+        )
+    }
+
+    /// Like [`Self::from_commit_traversal_tips()`], but with in-memory `overlay` refs and metadata,
+    /// and without the flip dispatch — this IS the walk, which the flip also runs underneath.
+    pub(crate) fn from_commit_traversal_tips_with_overlay(
+        repo: &gix::Repository,
+        tips: Vec<Tip>,
+        meta: &impl RefMetadata,
+        project_meta: ProjectMeta,
+        options: Options,
+        overlay: Overlay,
+    ) -> anyhow::Result<Self> {
+        let (overlay_repo, overlay_meta, _entrypoint) = overlay.into_parts(repo, meta);
         Graph::traverse_tips_with_overlay(
             &overlay_repo,
             tips,
@@ -821,7 +851,7 @@ impl Graph {
             commits_limit_hint: limit,
             commits_limit_recharge_location: mut max_commits_recharge_location,
             hard_limit,
-            dangerously_skip_postprocessing_for_debugging,
+            raw_traversal,
         } = options;
         let max_limit = Limit::new(limit);
         if ref_name
@@ -876,15 +906,12 @@ impl Graph {
         let worktree_by_branch =
             repo.worktree_branches(graph.entrypoint_ref.as_ref().map(|r| r.as_ref()))?;
 
-        let mut ctx = post::Context {
-            repo,
-            symbolic_remote_names: &initial_tips.symbolic_remote_names,
-            configured_remote_tracking_branches: &configured_remote_tracking_branches,
+        let mut ctx = TraversalContext {
             inserted_proxy_segments: Vec::new(),
             refs_by_id,
             hard_limit: false,
             detach_entrypoint,
-            dangerously_skip_postprocessing_for_debugging,
+            raw_traversal,
             worktree_by_branch,
         };
 
@@ -1066,7 +1093,7 @@ impl Graph {
         }
 
         ctx.hard_limit = next.hard_limit_hit();
-        graph.post_processed(meta, tip, ctx)
+        graph.finish_raw_traversal(tip, ctx)
     }
 
     /// Take the ref-info from a named segment and put it back onto the first commit
@@ -1075,7 +1102,7 @@ impl Graph {
     /// Graph traversal eagerly names segments from refs pointing at their
     /// first commit. Detached entrypoints keep those refs on the commit, but
     /// the entrypoint segment itself must stay anonymous.
-    fn detach_entrypoint_segment(&mut self) -> anyhow::Result<()> {
+    pub(crate) fn detach_entrypoint_segment(&mut self) -> anyhow::Result<()> {
         let sidx = self
             .entrypoint
             .context("BUG: entrypoint is set after first traversal")?
@@ -1136,12 +1163,9 @@ impl Graph {
                 (tip, ref_name)
             }
         };
-        // THE FLIP (default): the same dispatch as `from_commit_traversal`, with the overlay served
-        // from memory by the flip builder. Falls through to the walk when the entrypoint isn't
-        // inside a managed workspace. BUT_GRAPH_NO_FLIP forces the legacy walk.
-        if std::env::var_os("BUT_GRAPH_NO_FLIP").is_none()
-            && !self.options.dangerously_skip_postprocessing_for_debugging
-        {
+        // The same dispatch as `from_commit_traversal`, with the overlay served from memory by
+        // the builders.
+        if !self.options.raw_traversal {
             let is_ws_tip = ref_name
                 .as_ref()
                 .is_some_and(|r| but_core::is_workspace_ref_name(r.as_ref()));
@@ -1157,10 +1181,20 @@ impl Graph {
                 flip_ep_ref,
                 self.project_meta.clone(),
                 self.options.clone(),
-                overlay_for_flip,
+                overlay_for_flip.clone(),
             )? {
                 return Ok(graph);
             }
+            // No managed workspace, or the entrypoint is outside it: the non-managed flip builder.
+            return crate::graph_from_repository_unmanaged_with_overlay(
+                repo.for_attach_only(),
+                meta.for_inner_only(),
+                tip,
+                ref_name.clone(),
+                self.project_meta.clone(),
+                self.options.clone(),
+                overlay_for_flip,
+            );
         }
         let tips = initial_tips_from_workspace_metadata(
             &repo,
@@ -1922,7 +1956,7 @@ fn queue_initial_tips<T: RefMetadata>(
     commit_graph: Option<&gix::commitgraph::Graph>,
     repo: &OverlayRepo<'_>,
     meta: &OverlayMetadata<'_, T>,
-    ctx: &post::Context<'_>,
+    ctx: &TraversalContext,
     buf: &mut Vec<u8>,
 ) -> anyhow::Result<Vec<SegmentIndex>> {
     // `target_local_segments` holds the local side once its segment and goal
@@ -2289,5 +2323,49 @@ impl Graph {
                 .and_then(|dst| src_parents.iter().position(|p| *p == dst))
                 .unwrap_or(usize::MAX)
         });
+    }
+}
+
+/// State threaded through the raw traversal, consumed by [`Graph::finish_raw_traversal()`].
+pub(crate) struct TraversalContext {
+    pub inserted_proxy_segments: Vec<SegmentIndex>,
+    pub refs_by_id: RefsById,
+    pub hard_limit: bool,
+    pub detach_entrypoint: bool,
+    pub raw_traversal: bool,
+    pub worktree_by_branch: WorktreeByBranch,
+}
+
+/// Finishing
+impl Graph {
+    /// Finish the RAW traversal graph. The structural post-processing passes that used to run
+    /// here were replaced by the CommitGraph-derived builders; a raw graph only records the hard
+    /// limit, re-points the entrypoint commit, and detaches when asked to.
+    fn finish_raw_traversal(
+        mut self,
+        tip: gix::ObjectId,
+        TraversalContext {
+            hard_limit,
+            detach_entrypoint,
+            raw_traversal,
+            ..
+        }: TraversalContext,
+    ) -> anyhow::Result<Self> {
+        debug_assert!(
+            raw_traversal,
+            "the raw traversal only runs as the builders' substrate or for raw debugging graphs"
+        );
+        self.hard_limit_hit = hard_limit;
+
+        // Keep the original traversal tip available even if the entrypoint moved to a segment
+        // that doesn't contain it.
+        if let Some((_segment, ep_commit)) = self.entrypoint.as_mut() {
+            *ep_commit = EntryPointCommit::AtCommit(tip);
+        }
+
+        if detach_entrypoint {
+            self.detach_entrypoint_segment()?;
+        }
+        Ok(self)
     }
 }
