@@ -27,6 +27,7 @@ use crate::init::overlay::{OverlayMetadata, OverlayRepo};
 
 mod remotes;
 
+mod ad_hoc;
 mod overlay;
 mod post;
 
@@ -712,6 +713,15 @@ impl Graph {
             )? {
                 return Ok(graph);
             }
+            // No managed workspace, or the entrypoint is outside it: the non-managed flip builder.
+            return crate::graph_from_repository_unmanaged(
+                repo,
+                meta,
+                tip,
+                ref_name.clone(),
+                project_meta.clone(),
+                options.clone(),
+            );
         }
         let sweep_ref_name = ref_name.clone();
         let walk = Self::from_commit_traversal_with_overlay(
@@ -1201,10 +1211,20 @@ impl Graph {
                 flip_ep_ref,
                 self.project_meta.clone(),
                 self.options.clone(),
-                overlay_for_flip,
+                overlay_for_flip.clone(),
             )? {
                 return Ok(graph);
             }
+            // No managed workspace, or the entrypoint is outside it: the non-managed flip builder.
+            return crate::graph_from_repository_unmanaged_with_overlay(
+                repo.for_attach_only(),
+                meta.for_inner_only(),
+                tip,
+                ref_name.clone(),
+                self.project_meta.clone(),
+                self.options.clone(),
+                overlay_for_flip,
+            );
         }
         let tips = initial_tips_from_workspace_metadata(
             &repo,

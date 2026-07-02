@@ -1757,9 +1757,9 @@ fn apply_from_adhoc_checkout_rebuilds_around_current_and_applied() -> anyhow::Re
     )?
     .into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&ws), "direct checkout of C is an ad-hoc workspace next to the existing managed workspace", @"
-    ⌂:0:C[🌳] <> ✓refs/remotes/origin/main on 893d602
-    └── ≡:0:C[🌳] on 893d602 {1}
-        └── :0:C[🌳]
+    ⌂:5:C[🌳] <> ✓refs/remotes/origin/main on 893d602
+    └── ≡:5:C[🌳] on 893d602 {1}
+        └── :5:C[🌳]
             └── ·863775d
     ");
 

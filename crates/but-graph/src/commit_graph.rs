@@ -95,6 +95,9 @@ pub struct CommitGraph {
     /// commit first) and cannot be reproduced statically — carrying it over makes the derived
     /// segmentation name commits exactly like the walk.
     walk_names: HashMap<gix::ObjectId, gix::refs::FullName>,
+    /// When built [from the walk](Self::from_walk): whether the traversal stopped queueing after
+    /// hitting the hard limit. Derived graphs must carry it onto the final `Graph`.
+    pub(crate) hard_limit_hit: bool,
 }
 
 impl CommitGraph {
@@ -137,6 +140,7 @@ impl CommitGraph {
             managed_ws_commits: HashSet::new(),
             connected: None,
             walk_names: HashMap::new(),
+            hard_limit_hit: false,
         };
         graph.recompute_generations();
         graph
@@ -219,6 +223,7 @@ impl CommitGraph {
         cg.entrypoint_ref = entrypoint_ref;
         cg.walk_names = walk_names;
         cg.set_connected(connected);
+        cg.hard_limit_hit = graph.hard_limit_hit();
         cg
     }
 

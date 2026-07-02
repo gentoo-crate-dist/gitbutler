@@ -939,24 +939,24 @@ fn segment_on_each_incoming_connection() -> anyhow::Result<()> {
             .validated()?;
     insta::assert_snapshot!(graph_tree(&graph), @"
 
-    ├── 👉►:0[0]:entrypoint
-    │   ├── ·98c5aba (⌂|1)
-    │   ├── ·807b6ce (⌂|1)
-    │   └── ·6d05486 (⌂|1)
-    │       └── ►:3[2]:anon:
-    │           ├── ·b688f2d (⌂|🏘|1)
-    │           └── 🏁·fafd9d0 (⌂|🏘|1)
-    └── 📕►►►:1[0]:gitbutler/workspace[🌳]
-        └── ·b6917c7 (⌂|🏘)
-            └── ►:2[1]:main
-                └── ·f7fe830 (⌂|🏘)
-                    └── →:3:
+    ├── 📕►►►:0[0]:gitbutler/workspace[🌳]
+    │   └── ·b6917c7 (⌂|🏘)
+    │       └── ►:1[1]:main
+    │           └── ·f7fe830 (⌂|🏘)
+    │               └── ►:2[2]:anon:
+    │                   ├── ·b688f2d (⌂|🏘|1)
+    │                   └── 🏁·fafd9d0 (⌂|🏘|1)
+    └── 👉►:3[0]:entrypoint
+        ├── ·98c5aba (⌂|1)
+        ├── ·807b6ce (⌂|1)
+        └── ·6d05486 (⌂|1)
+            └── →:2:
     ");
     // This is an unmanaged workspace, even though commits from a workspace flow into it.
     insta::assert_snapshot!(graph_workspace(&graph.into_workspace()?), @"
-    ⌂:0:entrypoint <> ✓!
-    └── ≡:0:entrypoint {1}
-        └── :0:entrypoint
+    ⌂:3:entrypoint <> ✓!
+    └── ≡:3:entrypoint {1}
+        └── :3:entrypoint
             ├── ·98c5aba
             ├── ·807b6ce
             ├── ·6d05486
