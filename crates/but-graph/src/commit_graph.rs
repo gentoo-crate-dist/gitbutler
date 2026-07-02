@@ -244,6 +244,100 @@ impl CommitGraph {
             .is_none_or(|c| c.contains(&(child, parent)))
     }
 
+    /// Compare against `other` field-by-field, returning one human-readable line per
+    /// difference. The S1 native-walker oracle: the traversal's direct accumulation must equal
+    /// the segment-graph flattening exactly, including per-commit ref ORDER (it surfaces in
+    /// snapshots) and flags (goal bits included).
+    pub fn diff_against(&self, other: &CommitGraph) -> Vec<String> {
+        let mut out = Vec::new();
+        let ids: std::collections::BTreeSet<_> = self
+            .nodes
+            .iter()
+            .map(|n| n.commit.id)
+            .chain(other.nodes.iter().map(|n| n.commit.id))
+            .collect();
+        for id in ids {
+            match (self.node(id), other.node(id)) {
+                (Some(_), None) => out.push(format!("{id}: only in SELF")),
+                (None, Some(_)) => out.push(format!("{id}: only in OTHER")),
+                (Some(a), Some(b)) => {
+                    let (a, b) = (&a.commit, &b.commit);
+                    if a.parent_ids != b.parent_ids {
+                        out.push(format!(
+                            "{id}: parents {:?} != {:?}",
+                            a.parent_ids, b.parent_ids
+                        ));
+                    }
+                    if a.flags != b.flags {
+                        out.push(format!(
+                            "{id}: flags {} != {}",
+                            a.flags.debug_string(None),
+                            b.flags.debug_string(None)
+                        ));
+                    }
+                    let (ra, rb): (Vec<_>, Vec<_>) = (
+                        a.refs.iter().map(|r| r.ref_name.to_string()).collect(),
+                        b.refs.iter().map(|r| r.ref_name.to_string()).collect(),
+                    );
+                    if ra != rb {
+                        out.push(format!("{id}: refs {ra:?} != {rb:?}"));
+                    }
+                }
+                (None, None) => unreachable!(),
+            }
+        }
+        if self.entrypoint != other.entrypoint {
+            out.push(format!(
+                "entrypoint {:?} != {:?}",
+                self.entrypoint, other.entrypoint
+            ));
+        }
+        if self.entrypoint_ref != other.entrypoint_ref {
+            out.push(format!(
+                "entrypoint_ref {:?} != {:?}",
+                self.entrypoint_ref.as_ref().map(|r| r.as_bstr()),
+                other.entrypoint_ref.as_ref().map(|r| r.as_bstr())
+            ));
+        }
+        if self.connected != other.connected {
+            let (a, b) = (
+                self.connected.clone().unwrap_or_default(),
+                other.connected.clone().unwrap_or_default(),
+            );
+            for pair in a.difference(&b) {
+                out.push(format!("connected only in SELF: {pair:?}"));
+            }
+            for pair in b.difference(&a) {
+                out.push(format!("connected only in OTHER: {pair:?}"));
+            }
+        }
+        if self.hard_limit_hit != other.hard_limit_hit {
+            out.push(format!(
+                "hard_limit_hit {} != {}",
+                self.hard_limit_hit, other.hard_limit_hit
+            ));
+        }
+        if format!("{:?}", self.traversal_tips) != format!("{:?}", other.traversal_tips) {
+            out.push(format!(
+                "traversal_tips {:?} != {:?}",
+                self.traversal_tips, other.traversal_tips
+            ));
+        }
+        if self.explicit_tips != other.explicit_tips {
+            out.push(format!(
+                "explicit_tips {} != {}",
+                self.explicit_tips, other.explicit_tips
+            ));
+        }
+        if self.managed_ws_commits != other.managed_ws_commits {
+            out.push(format!(
+                "managed_ws_commits {:?} != {:?}",
+                self.managed_ws_commits, other.managed_ws_commits
+            ));
+        }
+        out
+    }
+
     /// Build by running the WALK's real traversal (queue, goals, limits, flag propagation) with
     /// post-processing skipped, flattening the raw traversal segments into commits. This keeps the
     /// battle-tested traversal semantics — extents (limit cuts, integrated stop-early) and flags are
