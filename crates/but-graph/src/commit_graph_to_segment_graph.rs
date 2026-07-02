@@ -1,14 +1,9 @@
-//! SPIKE (commit-graph-experiment): build the segment [`Graph`] from a [`CommitGraph`] — Route B
-//! toward deleting the segment graph. Rather than reproduce the projection's simplified stacks, this
-//! reconstructs the FULL segment graph (workspace / branch / anonymous / target / remote segments,
-//! their first-parent connections, generations, and remote↔local sibling links) so that everything
-//! downstream (projection, renderer, consumers) is unchanged.
-//!
-//! Verified structurally via `graph_structure` (a commit-id-keyed fingerprint) rather than by segment
-//! index, since the id numbering necessarily differs from the walk's. First milestone: the clean linear
-//! `single-stack` case (each commit its own segment + a co-located remote root).
-
-#![allow(dead_code)]
+//! The graph builders: every [`Graph`](crate::Graph) is assembled here from a [`CommitGraph`]
+//! flattened out of the raw traversal ([`CommitGraph::from_walk`]). The builders reconstruct the
+//! FULL segment graph (workspace / branch / anonymous / target / remote segments, their
+//! first-parent connections, generations, and remote↔local sibling links) so that everything
+//! downstream — projection, renderer, consumers — sees one graph shape regardless of how the
+//! build was entered (managed workspace, non-managed checkout, explicit tips, overlays).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -17,6 +12,7 @@ use gix::reference::Category;
 
 use crate::{
     Commit, CommitGraph, RefInfo, Segment, SegmentIndex,
+    init::overlay::{OverlayMetadata, OverlayRepo},
     segment_graph::{Connection, SegmentGraph},
 };
 
@@ -56,7 +52,7 @@ pub fn graph_from_repository_with_overlay<T: but_core::RefMetadata>(
     let (overlay_repo, overlay_meta, _overlay_entrypoint) = overlay.clone().into_parts(repo, meta);
     let ws_ref: gix::refs::FullName = but_core::WORKSPACE_REF_NAME.try_into()?;
     // No (usable) workspace ref means no managed workspace — signal fall-through, don't fail:
-    // callers route any repository through here when the flip is enabled.
+    // the dispatch routes any repository through here and builds non-managed on `Ok(None)`.
     let Some(ws_commit) = overlay_repo
         .try_find_reference(ws_ref.as_ref())?
         .and_then(|mut r| r.peel_to_commit().ok())
@@ -87,72 +83,23 @@ pub fn graph_from_repository_with_overlay<T: but_core::RefMetadata>(
         options.clone(),
         overlay,
     )?;
-    cg.mark_managed_ws_commit_by_message(repo, ws_commit);
-
-    // From here on every ref and metadata read goes through the overlay views, so in-memory
-    // previews (apply/unapply) enrich from the future state, not the on-disk one.
-    let meta = &overlay_meta;
-    let ws_meta = meta.workspace(ws_ref.as_ref())?;
-    // Integration marks and `NotInRemote` come from the walk's traversal — no re-flagging needed. The
-    // target commit is still resolved from the CALLER's project meta for the builder's boundaries; a
-    // default `ProjectMeta` means no target (no hard-coded `origin/main` fallback), like the walk.
-    let target = project_meta.target_ref.clone().and_then(|tr| {
-        Some(
-            overlay_repo
-                .try_find_reference(tr.as_ref())
-                .ok()??
-                .peel_to_commit()
-                .ok()?
-                .id()
-                .detach(),
-        )
-    });
-    // Only IN-WORKSPACE stacks form lanes. An inactive/outside stack's branches never splice as
-    // empty segments (`unapplied_branch_on_base`: "This will be an empty workspace") — they
-    // contribute only branch METADATA, which names commit-holding segments via the metadata tier
-    // of disambiguation. A branch listed in SEVERAL stacks counts once, like the walk, which
-    // ignores duplicate stack branch tips.
-    let mut seen_branches = HashSet::new();
-    let stack_branches: Vec<Vec<gix::refs::FullName>> = ws_meta
-        .stacks
-        .iter()
-        .filter(|s| s.is_in_workspace())
-        .map(|s| {
-            s.branches
-                .iter()
-                .map(|b| b.ref_name.clone())
-                .filter(|b| seen_branches.insert(b.clone()))
-                .collect()
-        })
-        .collect();
-    // Remote-tracking relationships come from git CONFIG plus the caller's project meta — overlay
-    // refs don't reshape them.
-    let (remote_tracking, symbolic_remotes) =
-        crate::commit_graph_projection::remote_tracking_from_repository(repo, &project_meta)?;
-    // The main-HEAD referent is the TRAVERSAL ref (like the walk's `graph.entrypoint_ref`): an
-    // overlay may override HEAD onto the workspace ref for a future-state preview, which the
-    // dispatched `entrypoint_ref` (None for workspace tips) would lose.
-    let worktree_by_branch =
-        overlay_repo.worktree_branches(walk_ref.as_ref().map(|r| r.as_ref()))?;
-
     let ep = entrypoint.unwrap_or(ws_commit);
-    let graph = graph_from_commit_graph(
-        &cg,
+    let graph = assemble_managed(
+        &mut cg,
+        repo,
+        &overlay_repo,
+        &overlay_meta,
+        &ws_ref,
         ws_commit,
         ep,
         entrypoint_ref,
-        target,
-        &remote_tracking,
-        &symbolic_remotes,
-        Some(&stack_branches),
-        true,
-        &worktree_by_branch,
-        meta,
+        walk_ref.as_ref(),
         project_meta,
         options,
-    );
-    // The entrypoint wasn't part of the managed workspace (an adhoc / outside checkout) — this builder
-    // doesn't cover that yet, so signal a fall-through to the walk.
+    )?;
+    // The entrypoint never made it into a segment — it wasn't reached by the traversal at all
+    // (outside entrypoints ARE covered, via their own region). Signal fall-through so the
+    // dispatch builds the non-managed view instead of returning an unusable graph.
     if graph.entrypoint.is_none() {
         return Ok(None);
     }
@@ -198,7 +145,7 @@ pub fn graph_from_repository_unmanaged_with_overlay<T: but_core::RefMetadata>(
             entrypoint_ref.as_ref().map(|r| r.as_bstr()),
         );
     }
-    // The walk's real traversal, exactly like the managed flip: extents, limits, flags, and
+    // The walk's real traversal, exactly like the managed builder: extents, limits, flags, and
     // overlay handling are the walk's by construction.
     let cg = CommitGraph::from_walk(
         repo,
@@ -210,43 +157,16 @@ pub fn graph_from_repository_unmanaged_with_overlay<T: but_core::RefMetadata>(
         overlay.clone(),
     )?;
     let (overlay_repo, overlay_meta, _overlay_entrypoint) = overlay.into_parts(repo, meta);
-    // A non-managed view still honors a configured target — an outside checkout in a repository
-    // that has a workspace shows target context (integration marks, pruning below the trunk).
-    let target = project_meta.target_ref.clone().and_then(|tr| {
-        Some(
-            overlay_repo
-                .try_find_reference(tr.as_ref())
-                .ok()??
-                .peel_to_commit()
-                .ok()?
-                .id()
-                .detach(),
-        )
-    });
-    let (remote_tracking, symbolic_remotes) =
-        crate::commit_graph_projection::remote_tracking_from_repository(repo, &project_meta)?;
-    let worktree_by_branch =
-        overlay_repo.worktree_branches(entrypoint_ref.as_ref().map(|r| r.as_ref()))?;
-    let mut graph = graph_from_commit_graph(
+    assemble_unmanaged(
         &cg,
-        head_tip,
+        repo,
+        &overlay_repo,
+        &overlay_meta,
         head_tip,
         entrypoint_ref,
-        target,
-        &remote_tracking,
-        &symbolic_remotes,
-        None,
-        false,
-        &worktree_by_branch,
-        &overlay_meta,
         project_meta,
         options,
-    );
-    // Persisted single-branch ordering, like the walk's post-processing — which also recomputes
-    // generations after the rebuilt chain.
-    graph.ad_hoc_branch_stack_upgrades(&overlay_repo, &overlay_meta, &worktree_by_branch)?;
-    graph.compute_generation_numbers();
-    Ok(graph)
+    )
 }
 
 /// Like [`graph_from_repository`], but seeded from explicit `tips` — the flip counterpart of
@@ -275,21 +195,6 @@ pub fn graph_from_repository_tips<T: but_core::RefMetadata>(
         .ok_or_else(|| anyhow::anyhow!("explicit tips always contain an entrypoint"))?;
     let entrypoint_ref = cg.entrypoint_ref().cloned();
     let carried_tips = cg.traversal_tips.clone();
-    let (remote_tracking, symbolic_remotes) =
-        crate::commit_graph_projection::remote_tracking_from_repository(repo, &project_meta)?;
-    let worktree_by_branch =
-        overlay_repo.worktree_branches(entrypoint_ref.as_ref().map(|r| r.as_ref()))?;
-    let target = project_meta.target_ref.clone().and_then(|tr| {
-        Some(
-            overlay_repo
-                .try_find_reference(tr.as_ref())
-                .ok()??
-                .peel_to_commit()
-                .ok()?
-                .id()
-                .detach(),
-        )
-    });
 
     // Managed only when the workspace ref resolves AND the tips traversal actually reached its
     // commit — explicit tips define the graph's extent, they don't discover a workspace on their
@@ -302,60 +207,34 @@ pub fn graph_from_repository_tips<T: but_core::RefMetadata>(
         .filter(|c| cg.node(*c).is_some());
 
     let mut graph = if let Some(ws_commit) = ws_commit {
-        cg.mark_managed_ws_commit_by_message(repo, ws_commit);
-        let meta = &overlay_meta;
-        let ws_meta = meta.workspace(ws_ref.as_ref())?;
-        let mut seen_branches = HashSet::new();
-        let stack_branches: Vec<Vec<gix::refs::FullName>> = ws_meta
-            .stacks
-            .iter()
-            .filter(|s| s.is_in_workspace())
-            .map(|s| {
-                s.branches
-                    .iter()
-                    .map(|b| b.ref_name.clone())
-                    .filter(|b| seen_branches.insert(b.clone()))
-                    .collect()
-            })
-            .collect();
         // A workspace-ref entrypoint is the plain from_head case: no explicit entrypoint ref.
         let ep_ref = entrypoint_ref
             .clone()
             .filter(|r| !but_core::is_workspace_ref_name(r.as_ref()));
-        graph_from_commit_graph(
-            &cg,
+        assemble_managed(
+            &mut cg,
+            repo,
+            &overlay_repo,
+            &overlay_meta,
+            &ws_ref,
             ws_commit,
             entrypoint,
             ep_ref,
-            target,
-            &remote_tracking,
-            &symbolic_remotes,
-            Some(&stack_branches),
-            true,
-            &worktree_by_branch,
-            meta,
+            entrypoint_ref.as_ref(),
             project_meta,
             options,
-        )
+        )?
     } else {
-        let mut graph = graph_from_commit_graph(
+        assemble_unmanaged(
             &cg,
-            entrypoint,
+            repo,
+            &overlay_repo,
+            &overlay_meta,
             entrypoint,
             entrypoint_ref,
-            target,
-            &remote_tracking,
-            &symbolic_remotes,
-            None,
-            false,
-            &worktree_by_branch,
-            &overlay_meta,
             project_meta,
             options,
-        );
-        graph.ad_hoc_branch_stack_upgrades(&overlay_repo, &overlay_meta, &worktree_by_branch)?;
-        graph.compute_generation_numbers();
-        graph
+        )?
     };
     // Tips-built graphs carry their seeds' ROLES — the projection reads them (e.g. integrated
     // tips), unlike graphs discovered from a workspace.
@@ -368,6 +247,149 @@ pub fn graph_from_repository_tips<T: but_core::RefMetadata>(
     {
         graph.detach_entrypoint_segment()?;
     }
+    Ok(graph)
+}
+
+/// The enrichment inputs every builder entry derives from `(repo, project_meta)` and the overlay
+/// views.
+struct EnrichmentInputs {
+    /// Integration marks and `NotInRemote` come from the walk's traversal — no re-flagging
+    /// needed. The target commit is resolved from the CALLER's project meta for the builder's
+    /// boundaries; a default `ProjectMeta` means no target (no hard-coded `origin/main`
+    /// fallback), like the walk.
+    target: Option<gix::ObjectId>,
+    /// Remote-tracking relationships come from git CONFIG plus the caller's project meta —
+    /// overlay refs don't reshape them.
+    remote_tracking: HashMap<gix::refs::FullName, gix::refs::FullName>,
+    symbolic_remotes: Vec<String>,
+    /// Which worktree (if any) checks out each ref — the main worktree `[🌳]` and any linked
+    /// worktrees `[📁]`, keyed by ref name.
+    worktree_by_branch: BTreeMap<gix::refs::FullName, Vec<crate::Worktree>>,
+}
+
+fn enrichment_inputs(
+    repo: &gix::Repository,
+    overlay_repo: &OverlayRepo<'_>,
+    project_meta: &but_core::ref_metadata::ProjectMeta,
+    // The main-HEAD referent (like the walk's `graph.entrypoint_ref`): an overlay may override
+    // HEAD onto the workspace ref for a future-state preview, which the dispatched
+    // `entrypoint_ref` (None for workspace tips) would lose.
+    main_head_ref: Option<&gix::refs::FullName>,
+) -> anyhow::Result<EnrichmentInputs> {
+    let target = project_meta.target_ref.clone().and_then(|tr| {
+        Some(
+            overlay_repo
+                .try_find_reference(tr.as_ref())
+                .ok()??
+                .peel_to_commit()
+                .ok()?
+                .id()
+                .detach(),
+        )
+    });
+    let (remote_tracking, symbolic_remotes) =
+        crate::commit_graph_projection::remote_tracking_from_repository(repo, project_meta)?;
+    let worktree_by_branch = overlay_repo.worktree_branches(main_head_ref.map(|r| r.as_ref()))?;
+    Ok(EnrichmentInputs {
+        target,
+        remote_tracking,
+        symbolic_remotes,
+        worktree_by_branch,
+    })
+}
+
+/// Only IN-WORKSPACE stacks form lanes. An inactive/outside stack's branches never splice as
+/// empty segments (`unapplied_branch_on_base`: "This will be an empty workspace") — they
+/// contribute only branch METADATA, which names commit-holding segments via the metadata tier
+/// of disambiguation. A branch listed in SEVERAL stacks counts once, like the walk, which
+/// ignores duplicate stack branch tips.
+fn in_workspace_stack_branches(
+    ws: &but_core::ref_metadata::Workspace,
+) -> Vec<Vec<gix::refs::FullName>> {
+    let mut seen_branches = HashSet::new();
+    ws.stacks
+        .iter()
+        .filter(|s| s.is_in_workspace())
+        .map(|s| {
+            s.branches
+                .iter()
+                .map(|b| b.ref_name.clone())
+                .filter(|b| seen_branches.insert(b.clone()))
+                .collect()
+        })
+        .collect()
+}
+
+/// Assemble the MANAGED-workspace graph from `cg`: workspace metadata defines the lanes, and the
+/// enrichment reads go through the overlay views so in-memory previews (apply/unapply) see the
+/// future state, not the on-disk one.
+#[allow(clippy::too_many_arguments)]
+fn assemble_managed<T: but_core::RefMetadata>(
+    cg: &mut CommitGraph,
+    repo: &gix::Repository,
+    overlay_repo: &OverlayRepo<'_>,
+    overlay_meta: &OverlayMetadata<'_, T>,
+    ws_ref: &gix::refs::FullName,
+    ws_commit: gix::ObjectId,
+    entrypoint: gix::ObjectId,
+    entrypoint_ref: Option<gix::refs::FullName>,
+    main_head_ref: Option<&gix::refs::FullName>,
+    project_meta: but_core::ref_metadata::ProjectMeta,
+    options: crate::init::Options,
+) -> anyhow::Result<crate::Graph> {
+    cg.mark_managed_ws_commit_by_message(repo, ws_commit);
+    let ws_meta = overlay_meta.workspace(ws_ref.as_ref())?;
+    let stack_branches = in_workspace_stack_branches(&ws_meta);
+    let inputs = enrichment_inputs(repo, overlay_repo, &project_meta, main_head_ref)?;
+    Ok(graph_from_commit_graph(
+        cg,
+        ws_commit,
+        entrypoint,
+        entrypoint_ref,
+        inputs.target,
+        &inputs.remote_tracking,
+        &inputs.symbolic_remotes,
+        Some(&stack_branches),
+        true,
+        &inputs.worktree_by_branch,
+        overlay_meta,
+        project_meta,
+        options,
+    ))
+}
+
+/// Assemble the NON-managed graph from `cg`: no stack or workspace-ref passes, plus the
+/// persisted single-branch ordering — like the walk's post-processing, which also recomputes
+/// generations after the rebuilt chain.
+#[allow(clippy::too_many_arguments)]
+fn assemble_unmanaged<T: but_core::RefMetadata>(
+    cg: &CommitGraph,
+    repo: &gix::Repository,
+    overlay_repo: &OverlayRepo<'_>,
+    overlay_meta: &OverlayMetadata<'_, T>,
+    head_tip: gix::ObjectId,
+    entrypoint_ref: Option<gix::refs::FullName>,
+    project_meta: but_core::ref_metadata::ProjectMeta,
+    options: crate::init::Options,
+) -> anyhow::Result<crate::Graph> {
+    let inputs = enrichment_inputs(repo, overlay_repo, &project_meta, entrypoint_ref.as_ref())?;
+    let mut graph = graph_from_commit_graph(
+        cg,
+        head_tip,
+        head_tip,
+        entrypoint_ref,
+        inputs.target,
+        &inputs.remote_tracking,
+        &inputs.symbolic_remotes,
+        None,
+        false,
+        &inputs.worktree_by_branch,
+        overlay_meta,
+        project_meta,
+        options,
+    );
+    graph.ad_hoc_branch_stack_upgrades(overlay_repo, overlay_meta, &inputs.worktree_by_branch)?;
+    graph.compute_generation_numbers();
     Ok(graph)
 }
 

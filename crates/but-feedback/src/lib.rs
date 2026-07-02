@@ -48,7 +48,7 @@ impl Archival {
                         project_meta,
                         but_graph::init::Options {
                             // Assume it fails because of post-processing, try again without.
-                            dangerously_skip_postprocessing_for_debugging: true,
+                            raw_traversal: true,
                             ..Default::default()
                         },
                     )

@@ -69,7 +69,7 @@ pub(crate) fn run(
                     .expect("the prefix is unambiguous")
             })
             .collect(),
-        dangerously_skip_postprocessing_for_debugging: graph_args.no_post,
+        raw_traversal: graph_args.no_post,
     };
 
     let graph = match graph_args.ref_name.as_deref() {

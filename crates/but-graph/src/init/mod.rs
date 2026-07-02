@@ -28,8 +28,7 @@ use crate::init::overlay::{OverlayMetadata, OverlayRepo};
 mod remotes;
 
 mod ad_hoc;
-mod overlay;
-mod post;
+pub(crate) mod overlay;
 
 pub(crate) type Entrypoint = Option<(gix::ObjectId, Option<gix::refs::FullName>)>;
 
@@ -479,11 +478,11 @@ pub struct Options {
     /// to extend the border of the workspace. Typically, it's a past position
     /// of an existing target, or a target chosen by the user.
     pub extra_target_commit_id: Option<gix::ObjectId>,
-    /// Enabling this will prevent the postprocessing step to run which is what makes the graph useful through clean-up
-    /// and to make it more amenable to a workspace project.
-    ///
-    /// This should only be used in case post-processing fails and one wants to preview the version before that.
-    pub dangerously_skip_postprocessing_for_debugging: bool,
+    /// Return the RAW traversal graph instead of building the derived one: the direct output of
+    /// the commit walk, without the CommitGraph-based assembly. This is the builders' own
+    /// substrate ([`CommitGraph::from_walk`](crate::CommitGraph::from_walk) sets it to avoid
+    /// recursing into themselves) and a debugging view (`but-debug graph --no-post`).
+    pub raw_traversal: bool,
 }
 
 /// Presets
@@ -689,7 +688,7 @@ impl Graph {
         // the non-managed builder. A workspace-ref tip is the plain from_head case (no explicit
         // entrypoint). NEVER for raw debugging graphs: the builders run the raw traversal
         // underneath (`CommitGraph::from_walk`), which would recurse.
-        if !options.dangerously_skip_postprocessing_for_debugging {
+        if !options.raw_traversal {
             let is_ws_tip = ref_name
                 .as_ref()
                 .is_some_and(|r| but_core::is_workspace_ref_name(r.as_ref()));
@@ -783,7 +782,7 @@ impl Graph {
         // Build from a CommitGraph derived from the same tips traversal. NEVER for raw debugging
         // graphs — the builder runs the raw tips traversal underneath
         // (`CommitGraph::from_walk_tips`), which would recurse.
-        if !options.dangerously_skip_postprocessing_for_debugging {
+        if !options.raw_traversal {
             return crate::graph_from_repository_tips(repo, meta, tips, project_meta, options);
         }
         Self::from_commit_traversal_tips_with_overlay(
@@ -852,7 +851,7 @@ impl Graph {
             commits_limit_hint: limit,
             commits_limit_recharge_location: mut max_commits_recharge_location,
             hard_limit,
-            dangerously_skip_postprocessing_for_debugging,
+            raw_traversal,
         } = options;
         let max_limit = Limit::new(limit);
         if ref_name
@@ -907,12 +906,12 @@ impl Graph {
         let worktree_by_branch =
             repo.worktree_branches(graph.entrypoint_ref.as_ref().map(|r| r.as_ref()))?;
 
-        let mut ctx = post::Context {
+        let mut ctx = TraversalContext {
             inserted_proxy_segments: Vec::new(),
             refs_by_id,
             hard_limit: false,
             detach_entrypoint,
-            dangerously_skip_postprocessing_for_debugging,
+            raw_traversal,
             worktree_by_branch,
         };
 
@@ -1094,7 +1093,7 @@ impl Graph {
         }
 
         ctx.hard_limit = next.hard_limit_hit();
-        graph.post_processed(meta, tip, ctx)
+        graph.finish_raw_traversal(tip, ctx)
     }
 
     /// Take the ref-info from a named segment and put it back onto the first commit
@@ -1166,7 +1165,7 @@ impl Graph {
         };
         // The same dispatch as `from_commit_traversal`, with the overlay served from memory by
         // the builders.
-        if !self.options.dangerously_skip_postprocessing_for_debugging {
+        if !self.options.raw_traversal {
             let is_ws_tip = ref_name
                 .as_ref()
                 .is_some_and(|r| but_core::is_workspace_ref_name(r.as_ref()));
@@ -1957,7 +1956,7 @@ fn queue_initial_tips<T: RefMetadata>(
     commit_graph: Option<&gix::commitgraph::Graph>,
     repo: &OverlayRepo<'_>,
     meta: &OverlayMetadata<'_, T>,
-    ctx: &post::Context,
+    ctx: &TraversalContext,
     buf: &mut Vec<u8>,
 ) -> anyhow::Result<Vec<SegmentIndex>> {
     // `target_local_segments` holds the local side once its segment and goal
@@ -2324,5 +2323,49 @@ impl Graph {
                 .and_then(|dst| src_parents.iter().position(|p| *p == dst))
                 .unwrap_or(usize::MAX)
         });
+    }
+}
+
+/// State threaded through the raw traversal, consumed by [`Graph::finish_raw_traversal()`].
+pub(crate) struct TraversalContext {
+    pub inserted_proxy_segments: Vec<SegmentIndex>,
+    pub refs_by_id: RefsById,
+    pub hard_limit: bool,
+    pub detach_entrypoint: bool,
+    pub raw_traversal: bool,
+    pub worktree_by_branch: WorktreeByBranch,
+}
+
+/// Finishing
+impl Graph {
+    /// Finish the RAW traversal graph. The structural post-processing passes that used to run
+    /// here were replaced by the CommitGraph-derived builders; a raw graph only records the hard
+    /// limit, re-points the entrypoint commit, and detaches when asked to.
+    fn finish_raw_traversal(
+        mut self,
+        tip: gix::ObjectId,
+        TraversalContext {
+            hard_limit,
+            detach_entrypoint,
+            raw_traversal,
+            ..
+        }: TraversalContext,
+    ) -> anyhow::Result<Self> {
+        debug_assert!(
+            raw_traversal,
+            "the raw traversal only runs as the builders' substrate or for raw debugging graphs"
+        );
+        self.hard_limit_hit = hard_limit;
+
+        // Keep the original traversal tip available even if the entrypoint moved to a segment
+        // that doesn't contain it.
+        if let Some((_segment, ep_commit)) = self.entrypoint.as_mut() {
+            *ep_commit = EntryPointCommit::AtCommit(tip);
+        }
+
+        if detach_entrypoint {
+            self.detach_entrypoint_segment()?;
+        }
+        Ok(self)
     }
 }

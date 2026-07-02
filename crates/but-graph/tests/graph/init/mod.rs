@@ -58,7 +58,7 @@ fn unborn() -> anyhow::Result<()> {
             commits_limit_recharge_location: [],
             hard_limit: None,
             extra_target_commit_id: None,
-            dangerously_skip_postprocessing_for_debugging: false,
+            raw_traversal: false,
         },
         project_meta: ProjectMeta {
             target_ref: None,
@@ -176,7 +176,7 @@ fn detached() -> anyhow::Result<()> {
             commits_limit_recharge_location: [],
             hard_limit: None,
             extra_target_commit_id: None,
-            dangerously_skip_postprocessing_for_debugging: false,
+            raw_traversal: false,
         },
         project_meta: ProjectMeta {
             target_ref: None,

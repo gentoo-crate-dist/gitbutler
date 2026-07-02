@@ -1,5 +1,5 @@
-//! SPIKE (commit-graph-experiment): a commit-first graph that both the display projection and
-//! but-rebase's `StepGraph` could be built from directly, so the segment graph can be deleted.
+//! A commit-first graph flattened out of the raw traversal — the substrate every
+//! [`Graph`](crate::Graph) is built from (see `commit_graph_to_segment_graph`).
 //!
 //! # Why
 //!
@@ -33,28 +33,17 @@
 //! order-stacks machinery ([`crate::Graph`] post-pass) disappears — the order is read straight off
 //! the merge commit's parents.
 //!
-//! This module is a standalone spike: it is not wired into traversal or the projection yet. It
-//! defines the structure and proves the load-bearing derivation (first-parent segmentation) so we
-//! can validate the shape before swapping any behavior.
-
-#![allow(dead_code)]
+//! Historically this was a standalone spike toward deleting the segment graph outright; today the
+//! production builders source it from the REAL traversal ([`CommitGraph::from_walk`]) and rebuild
+//! the full segment graph on top, so downstream consumers are unchanged. The commit-first model
+//! remains the intended shape for the eventual but-graph/but-rebase unification.
 
 use std::collections::{HashMap, HashSet};
-
-use bstr::ByteSlice;
-use gix::reference::Category;
 
 use crate::{Commit, CommitFlags};
 
 /// An index into a [`CommitGraph`]'s node arena.
 pub type CommitIdx = usize;
-
-/// A plain (non-`gitbutler/*`) local branch ref — a "non-remote" tip for flag seeding.
-fn is_plain_local_branch(rn: &gix::refs::FullName) -> bool {
-    let rn = rn.as_ref();
-    rn.category() == Some(Category::LocalBranch)
-        && !rn.as_bstr().starts_with_str("refs/heads/gitbutler/")
-}
 
 /// A node in the commit graph: a commit, plus where it sits topologically.
 #[derive(Debug, Clone)]
@@ -156,7 +145,7 @@ impl CommitGraph {
         graph
     }
 
-    /// Bridge (spike): build a commit graph from the existing segment graph, so the StepGraph and
+    /// Bridge: build a commit graph from the existing segment graph, so the StepGraph and
     /// projection builders can be exercised against it without first rewriting traversal. Every
     /// segment's commits become nodes; their `parent_ids` are the edges, and the entrypoint commit
     /// carries over.
@@ -292,7 +281,7 @@ impl CommitGraph {
             meta,
             project_meta,
             crate::init::Options {
-                dangerously_skip_postprocessing_for_debugging: true,
+                raw_traversal: true,
                 ..options
             },
             overlay,
@@ -302,7 +291,7 @@ impl CommitGraph {
 
     /// Like [`Self::from_walk`], but seeded from explicit `tips` — the REAL
     /// [`Graph::from_commit_traversal_tips`](crate::Graph::from_commit_traversal_tips) traversal
-    /// with `dangerously_skip_postprocessing_for_debugging`, flattened.
+    /// with `raw_traversal`, flattened.
     pub fn from_walk_tips<T: but_core::RefMetadata>(
         repo: &gix::Repository,
         meta: &T,
@@ -317,7 +306,7 @@ impl CommitGraph {
             meta,
             project_meta,
             crate::init::Options {
-                dangerously_skip_postprocessing_for_debugging: true,
+                raw_traversal: true,
                 ..options
             },
             overlay,
@@ -334,33 +323,6 @@ impl CommitGraph {
             && crate::workspace::commit::is_managed_workspace_by_message(message)
         {
             self.managed_ws_commits.insert(id);
-        }
-    }
-
-    /// Set `flag` on every ancestor (inclusive) of any present `seed`, walking `parent_ids`.
-    fn mark_ancestors(
-        &mut self,
-        seeds: impl IntoIterator<Item = gix::ObjectId>,
-        flag: crate::CommitFlags,
-    ) {
-        let mut seen = std::collections::HashSet::new();
-        let mut stack: Vec<gix::ObjectId> = seeds.into_iter().collect();
-        while let Some(id) = stack.pop() {
-            let Some(&idx) = self.by_id.get(&id) else {
-                continue;
-            };
-            if !seen.insert(id) {
-                continue;
-            }
-            self.nodes[idx].commit.flags |= flag;
-            stack.extend(self.nodes[idx].commit.parent_ids.iter().copied());
-        }
-    }
-
-    /// Set `flag` on a single commit, if present.
-    fn set_flag(&mut self, id: gix::ObjectId, flag: crate::CommitFlags) {
-        if let Some(&idx) = self.by_id.get(&id) {
-            self.nodes[idx].commit.flags |= flag;
         }
     }
 
@@ -542,32 +504,6 @@ impl CommitGraph {
             .map(|n| n.commit.id)
     }
 }
-
-// ---------------------------------------------------------------------------------------------
-// Builder sketches (not implemented in this spike — they live in but-graph and but-rebase
-// respectively and would replace the segment-graph-based construction).
-//
-// Projection (in but-graph, replaces projection/workspace/init.rs's segment walk):
-//
-//   fn project(g: &CommitGraph, meta: &Workspace) -> Workspace {
-//       // 1. entrypoint = g.entrypoint; resolve workspace tip commit.
-//       // 2. stack tops = g.parents(workspace_commit) IN ORDER  ← stack order is free here.
-//       // 3. for each top: segments = repeatedly first_parent_run(...) down to lower_bound,
-//       //    splitting at is_segment_boundary plus projection stops (entrypoint, merge-base, target).
-//       // 4. StackSegment fields come straight off the run's commits + their refs; sibling /
-//       //    remote-tracking links are looked up by ref name instead of stored segment ids.
-//       // 5. enrich: prune integrated/archived, mark remote-reachable via flag walks.
-//   }
-//
-// StepGraph (in but-rebase, replaces graph_rebase/creation.rs's segment iteration):
-//
-//   fn build_steps(g: &CommitGraph, entry: ObjectId) -> StepGraph {
-//       // 1. walk reachable commits from entry via g.parents().
-//       // 2. one Pick node per commit, one Reference node per ref on it.
-//       // 3. edges: for each commit, connect to each parent with order = parent index — read
-//       //    directly off commit.parent_ids (no Connection.src_id/dst_id lookup needed).
-//   }
-// ---------------------------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

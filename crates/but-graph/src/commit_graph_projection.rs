@@ -1,23 +1,8 @@
-//! SPIKE (commit-graph-experiment): build the display projection — stacks of segments — straight
-//! from a [`CommitGraph`], in two clean phases:
-//!
-//! 1. [`gather`] — a *pure* read of the commit graph that produces immutable [`ProjectionData`]:
-//!    the workspace commit, the stack tops (its parents, **in order** — the stack order for free),
-//!    the base where they converge, and each stack's first-parent spine sliced into segments.
-//! 2. [`build`] — a *single pass* that assembles the output from that data.
-//!
-//! This deliberately replaces the segment graph's collect → enrich → prune → mark *mutation* passes:
-//! every fact the build needs is computed up front as data, then the stacks are constructed once.
-//! Enrichment that today runs as extra passes (remote reachability, integrated/archived pruning,
-//! target/lower-bound) becomes additional *fields gathered in phase 1*, not passes in phase 2.
-//!
-//! Scope of this spike: the core stack/segment grouping for a managed, multi-stack workspace.
-//! Boundary rules mirrored from the real projection: a stack top is a workspace-commit parent;
-//! a new segment begins at a commit carrying a non-special local-branch ref (`refs/heads/gitbutler/*`
-//! continues through); the spine stops at the base. The entrypoint/sibling-segment splits and the
-//! enrichment passes are intentionally out of scope here.
-
-#![allow(dead_code)]
+//! Remote-tracking deduction shared by the graph builders, plus a HISTORICAL commit-graph
+//! projection ([`project`]): a gather-then-build derivation of display stacks straight from a
+//! [`CommitGraph`]. The projection is exercised only by the bridge parity tests today — the
+//! production display projection still runs on the segment graph — but it documents the
+//! commit-first model intended for the eventual but-graph/but-rebase unification, so it is kept.
 
 use std::collections::{HashMap, HashSet};
 
@@ -560,13 +545,6 @@ fn segment_runs(
     }
     runs.push(current);
     runs
-}
-
-/// The first non-special local-branch ref pointing at `c`, if any.
-fn local_branch_ref(cg: &CommitGraph, c: gix::ObjectId) -> Option<gix::refs::FullName> {
-    cg.refs_at(c)
-        .into_iter()
-        .find(|rn| is_plain_local_branch(rn))
 }
 
 /// The unambiguous local-branch name at `c`, mirroring the segment graph's disambiguation: prefer the

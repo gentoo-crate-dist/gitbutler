@@ -1413,7 +1413,7 @@ fn just_init_with_branches() -> anyhow::Result<()> {
         &*meta,
         project_meta(&*meta),
         but_graph::init::Options {
-            dangerously_skip_postprocessing_for_debugging: true,
+            raw_traversal: true,
             ..standard_options()
         },
     )?
