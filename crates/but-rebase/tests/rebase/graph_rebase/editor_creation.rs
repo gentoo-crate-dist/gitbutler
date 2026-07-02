@@ -619,22 +619,22 @@ fn immutable_entrypoints_propogate_until_mutable_entrypoints() -> Result<()> {
 
     insta::assert_snapshot!(graph_tree(&graph), @"
 
-    ├── ►:0[0]:explicit-const
+    ├── ►:2[0]:explicit-const
     │   └── ·be4ae80 (⌂) ►main
     │       └── ►:3[1]:implicit-const
     │           └── ·120e3a9 (⌂)
-    │               └── ►:6[2]:explicit-mut
+    │               └── ►:4[2]:explicit-mut
     │                   └── ·a96434e (⌂)
-    │                       └── ►:5[3]:foo
+    │                       └── ►:1[3]:foo
     │                           ├── ·d591dfe (⌂|1)
     │                           └── 🏁·35b8235 (⌂|1)
-    └── ►:1[0]:explicit-const-2
+    └── ►:5[0]:explicit-const-2
         └── ·d9fa122 (⌂)
-            └── ►:4[1]:implicit-const-2
+            └── ►:6[1]:implicit-const-2
                 └── ·85bccf0 (⌂)
-                    └── 👉►:2[2]:implicit-mut
+                    └── 👉►:0[2]:implicit-mut
                         └── ·c8dd361 (⌂|1)
-                            └── →:5: (foo)
+                            └── →:1: (foo)
     ");
 
     let mut ws = graph.into_workspace()?;

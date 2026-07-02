@@ -1554,8 +1554,8 @@ fn tips_equivalent_to_workspace_metadata_are_order_independent() -> anyhow::Resu
     let _ = (head_baseline_tree, head_baseline_workspace);
     insta::assert_snapshot!(graph_workspace(&graph.into_workspace()?), @"
     ⌂:0:main[🌳] <> ✓refs/remotes/origin/main
-    └── ≡:0:main[🌳] <> origin/main →:2: {1}
-        └── :0:main[🌳] <> origin/main →:2:
+    └── ≡:0:main[🌳] <> origin/main →:1: {1}
+        └── :0:main[🌳] <> origin/main →:1:
     ");
 
     let graph = Graph::from_commit_traversal_tips(
@@ -1569,15 +1569,15 @@ fn tips_equivalent_to_workspace_metadata_are_order_independent() -> anyhow::Resu
     let _ = workspace_baseline_tree;
     let explicit_workspace = graph_workspace(&graph.into_workspace()?);
     insta::assert_snapshot!(explicit_workspace, @"
-    📕🏘️⚠️:0:gitbutler/workspace <> ✓refs/remotes/origin/main on fafd9d0
-    ├── ≡📙:3:C on fafd9d0 {0}
-    │   ├── 📙:3:C
-    │   ├── 📙:4:B
-    │   └── 📙:5:A
-    └── ≡📙:6:D on fafd9d0 {1}
-        ├── 📙:6:D
-        ├── 📙:7:E
-        └── 📙:8:F
+    📕🏘️⚠️:3:gitbutler/workspace <> ✓refs/remotes/origin/main on fafd9d0
+    ├── ≡📙:4:C on fafd9d0 {0}
+    │   ├── 📙:4:C
+    │   ├── 📙:5:B
+    │   └── 📙:6:A
+    └── ≡📙:7:D on fafd9d0 {1}
+        ├── 📙:7:D
+        ├── 📙:8:E
+        └── 📙:9:F
     ");
     let _ = (explicit_workspace, workspace_baseline_workspace);
 

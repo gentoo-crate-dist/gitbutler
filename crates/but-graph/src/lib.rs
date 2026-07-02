@@ -229,8 +229,9 @@ pub mod commit_graph_projection;
 
 mod commit_graph_to_segment_graph;
 pub use commit_graph_to_segment_graph::{
-    graph_from_commit_graph, graph_from_repository, graph_from_repository_unmanaged,
-    graph_from_repository_unmanaged_with_overlay, graph_from_repository_with_overlay,
+    graph_from_commit_graph, graph_from_repository, graph_from_repository_tips,
+    graph_from_repository_unmanaged, graph_from_repository_unmanaged_with_overlay,
+    graph_from_repository_with_overlay,
 };
 
 mod statistics;

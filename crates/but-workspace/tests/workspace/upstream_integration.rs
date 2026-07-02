@@ -388,11 +388,11 @@ fn integrated_bottom_branch_no_workspace_rebase() -> Result<()> {
 
     let mut workspace = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&workspace), @"
-    ⌂:1:A[🌳] <> ✓refs/remotes/origin/main⇣2 on 3183e43
-    └── ≡:1:A[🌳] on 3183e43 {1}
-        ├── :1:A[🌳]
+    ⌂:0:A[🌳] <> ✓refs/remotes/origin/main⇣2 on 3183e43
+    └── ≡:0:A[🌳] on 3183e43 {1}
+        ├── :0:A[🌳]
         │   └── ·e792f40
-        └── :3:B
+        └── :1:B
             └── ·b38b04b (✓)
     ");
     let project_meta = workspace.graph.project_meta.clone();
@@ -535,11 +535,11 @@ fn integrated_bottom_branch_no_workspace_merge() -> Result<()> {
 
     let mut workspace = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&workspace), @"
-    ⌂:1:A[🌳] <> ✓refs/remotes/origin/main⇣2 on 3183e43
-    └── ≡:1:A[🌳] on 3183e43 {1}
-        ├── :1:A[🌳]
+    ⌂:0:A[🌳] <> ✓refs/remotes/origin/main⇣2 on 3183e43
+    └── ≡:0:A[🌳] on 3183e43 {1}
+        ├── :0:A[🌳]
         │   └── ·e792f40
-        └── :3:B
+        └── :1:B
             └── ·b38b04b (✓)
     ");
     let project_meta = workspace.graph.project_meta.clone();
@@ -2452,9 +2452,9 @@ fn review_hint_integrates_squashed_two_commit_direct_checkout_branch() -> Result
 
     let mut workspace = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&workspace), @"
-    ⌂:1:A[🌳] <> ✓refs/remotes/origin/main⇣1 on 3183e43
-    └── ≡:1:A[🌳] on 3183e43 {1}
-        └── :1:A[🌳]
+    ⌂:0:A[🌳] <> ✓refs/remotes/origin/main⇣1 on 3183e43
+    └── ≡:0:A[🌳] on 3183e43 {1}
+        └── :0:A[🌳]
             ├── ·ad1d22b
             └── ·fe98e29
     ");
@@ -2622,9 +2622,9 @@ fn review_hint_integrates_squashed_prefix_and_keeps_extra_commit_in_direct_check
 
     let mut workspace = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&workspace), @"
-    ⌂:1:A[🌳] <> ✓refs/remotes/origin/main⇣1 on 3183e43
-    └── ≡:1:A[🌳] on 3183e43 {1}
-        └── :1:A[🌳]
+    ⌂:0:A[🌳] <> ✓refs/remotes/origin/main⇣1 on 3183e43
+    └── ≡:0:A[🌳] on 3183e43 {1}
+        └── :0:A[🌳]
             ├── ·f015e95
             ├── ·ad1d22b
             └── ·fe98e29
@@ -2665,9 +2665,9 @@ fn review_hint_integrates_squashed_prefix_and_keeps_extra_commit_in_direct_check
     )?;
     let workspace = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&workspace), @"
-    ⌂:1:A[🌳] <> ✓refs/remotes/origin/main on e2f5892
-    └── ≡:1:A[🌳] on e2f5892 {1}
-        └── :1:A[🌳]
+    ⌂:0:A[🌳] <> ✓refs/remotes/origin/main on e2f5892
+    └── ≡:0:A[🌳] on e2f5892 {1}
+        └── :0:A[🌳]
             └── ·92f1780
     ");
     insta::assert_snapshot!(visualize_commit_graph_all(&repo)?, @"

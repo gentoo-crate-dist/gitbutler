@@ -660,10 +660,10 @@ fn explicit_traversal_tips_allow_overlapping_commit_ids() -> anyhow::Result<()> 
 
     insta::assert_snapshot!(graph_tree(&graph), @"
 
-    └── ►:0[0]:tags/release/v1
-        └── 👉►:1[1]:main
-            └── ·541396b (⌂|1) ►tags/annotated, ►tags/release/v1
-                └── ►:2[2]:other
+    └── ►:2[0]:tags/release/v1
+        └── 👉►:0[1]:main
+            └── ·541396b (⌂|1) ►tags/annotated
+                └── ►:1[2]:other
                     └── 🏁·fafd9d0 (⌂|1)
     ");
     Ok(())
@@ -708,25 +708,25 @@ fn explicit_traversal_tips_allow_named_and_anonymous_integrated_targets_on_same_
 
     insta::assert_snapshot!(graph_tree(&graph), "anonymous target context with the same commit collapses into the named target ref", @"
 
-    └── 👉►:1[0]:merged[🌳]
+    └── 👉►:0[0]:merged[🌳]
         └── ·8a6c109 (⌂|1)
-            ├── ►:2[1]:A
+            ├── ►:1[1]:A
             │   └── ·62b409a (⌂|1)
             │       ├── ►:4[2]:anon:
             │       │   └── ·592abec (⌂|1)
-            │       │       └── ►:0[3]:main
+            │       │       └── ►:7[3]:main
             │       │           └── 🏁·965998b (⌂|✓|1)
-            │       └── ►:5[2]:B
+            │       └── ►:6[2]:B
             │           └── ·f16dddf (⌂|1)
-            │               └── →:0: (main)
-            └── ►:3[1]:C
+            │               └── →:7: (main)
+            └── ►:2[1]:C
                 └── ·7ed512a (⌂|1)
-                    ├── ►:6[2]:anon:
+                    ├── ►:3[2]:anon:
                     │   └── ·35ee481 (⌂|1)
-                    │       └── →:0: (main)
-                    └── ►:7[2]:D
+                    │       └── →:7: (main)
+                    └── ►:5[2]:D
                         └── ·ecb1877 (⌂|1)
-                            └── →:0: (main)
+                            └── →:7: (main)
     ");
     Ok(())
 }
@@ -890,25 +890,25 @@ fn explicit_traversal_tips_use_integrated_tip_as_workspace_target_commit() -> an
     .validated()?;
     insta::assert_snapshot!(graph_tree(&graph), @"
 
-    └── 👉►:2[0]:merged[🌳]
+    └── 👉►:0[0]:merged[🌳]
         └── ·8a6c109 (⌂|1)
-            ├── ►:0[1]:A
+            ├── ►:1[1]:A
             │   └── ·62b409a (⌂|✓|1)
-            │       ├── ►:3[2]:anon:
+            │       ├── ►:4[2]:anon:
             │       │   └── ·592abec (⌂|✓|1)
-            │       │       └── ►:1[3]:main
+            │       │       └── ►:7[3]:main
             │       │           └── 🏁·965998b (⌂|✓|1)
-            │       └── ►:4[2]:B
+            │       └── ►:6[2]:B
             │           └── ·f16dddf (⌂|✓|1)
-            │               └── →:1: (main)
-            └── ►:5[1]:C
+            │               └── →:7: (main)
+            └── ►:2[1]:C
                 └── ·7ed512a (⌂|1)
-                    ├── ►:6[2]:anon:
+                    ├── ►:3[2]:anon:
                     │   └── ·35ee481 (⌂|1)
-                    │       └── →:1: (main)
-                    └── ►:7[2]:D
+                    │       └── →:7: (main)
+                    └── ►:5[2]:D
                         └── ·ecb1877 (⌂|1)
-                            └── →:1: (main)
+                            └── →:7: (main)
     ");
 
     let target_segment = graph.segment_by_commit_id(target_commit_id)?;
@@ -920,11 +920,11 @@ fn explicit_traversal_tips_use_integrated_tip_as_workspace_target_commit() -> an
 
     let ws = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&ws), @"
-    ⌂:2:merged[🌳] <> ✓refs/heads/A⇣3 on 965998b
-    └── ≡:2:merged[🌳] on 965998b {1}
-        ├── :2:merged[🌳]
+    ⌂:0:merged[🌳] <> ✓refs/heads/A⇣3 on 965998b
+    └── ≡:0:merged[🌳] on 965998b {1}
+        ├── :0:merged[🌳]
         │   └── ·8a6c109
-        └── :0:A
+        └── :1:A
             ├── ·62b409a (✓)
             └── ·592abec (✓)
     ");

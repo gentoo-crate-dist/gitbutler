@@ -829,7 +829,36 @@ impl Graph {
         options: Options,
     ) -> anyhow::Result<Self> {
         let tips: Vec<_> = tips.into_iter().collect();
-        let (overlay_repo, overlay_meta, _entrypoint) = Overlay::default().into_parts(repo, meta);
+        // THE FLIP (default): build from a CommitGraph derived from the same tips traversal.
+        // NEVER for raw debugging graphs — the flip runs the raw tips walk underneath
+        // (`CommitGraph::from_walk_tips`), which would recurse. BUT_GRAPH_NO_FLIP forces the
+        // legacy walk until it is deleted.
+        if std::env::var_os("BUT_GRAPH_NO_FLIP").is_none()
+            && !options.dangerously_skip_postprocessing_for_debugging
+        {
+            return crate::graph_from_repository_tips(repo, meta, tips, project_meta, options);
+        }
+        Self::from_commit_traversal_tips_with_overlay(
+            repo,
+            tips,
+            meta,
+            project_meta,
+            options,
+            Overlay::default(),
+        )
+    }
+
+    /// Like [`Self::from_commit_traversal_tips()`], but with in-memory `overlay` refs and metadata,
+    /// and without the flip dispatch — this IS the walk, which the flip also runs underneath.
+    pub(crate) fn from_commit_traversal_tips_with_overlay(
+        repo: &gix::Repository,
+        tips: Vec<Tip>,
+        meta: &impl RefMetadata,
+        project_meta: ProjectMeta,
+        options: Options,
+        overlay: Overlay,
+    ) -> anyhow::Result<Self> {
+        let (overlay_repo, overlay_meta, _entrypoint) = overlay.into_parts(repo, meta);
         Graph::traverse_tips_with_overlay(
             &overlay_repo,
             tips,
@@ -1129,7 +1158,7 @@ impl Graph {
     /// Graph traversal eagerly names segments from refs pointing at their
     /// first commit. Detached entrypoints keep those refs on the commit, but
     /// the entrypoint segment itself must stay anonymous.
-    fn detach_entrypoint_segment(&mut self) -> anyhow::Result<()> {
+    pub(crate) fn detach_entrypoint_segment(&mut self) -> anyhow::Result<()> {
         let sidx = self
             .entrypoint
             .context("BUG: entrypoint is set after first traversal")?

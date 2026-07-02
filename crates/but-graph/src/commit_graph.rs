@@ -98,6 +98,14 @@ pub struct CommitGraph {
     /// When built [from the walk](Self::from_walk): whether the traversal stopped queueing after
     /// hitting the hard limit. Derived graphs must carry it onto the final `Graph`.
     pub(crate) hard_limit_hit: bool,
+    /// When built [from the walk](Self::from_walk): the traversal's normalized seed tips. Graphs
+    /// built from EXPLICIT tips must carry them onto the final `Graph` — the projection reads tip
+    /// roles (e.g. integrated tips) for such graphs.
+    pub(crate) traversal_tips: Vec<crate::init::Tip>,
+    /// Built from EXPLICIT tips ([`Self::from_walk_tips`]): every tip must start (or get) its own
+    /// segment. Workspace-discovered builds must NOT carve boundaries at their normalized tips —
+    /// the walk merges tip-seeded segments back in post-processing.
+    pub(crate) explicit_tips: bool,
 }
 
 impl CommitGraph {
@@ -141,6 +149,8 @@ impl CommitGraph {
             connected: None,
             walk_names: HashMap::new(),
             hard_limit_hit: false,
+            traversal_tips: Vec::new(),
+            explicit_tips: false,
         };
         graph.recompute_generations();
         graph
@@ -224,6 +234,7 @@ impl CommitGraph {
         cg.walk_names = walk_names;
         cg.set_connected(connected);
         cg.hard_limit_hit = graph.hard_limit_hit();
+        cg.traversal_tips = graph.traversal_tips.clone();
         cg
     }
 
@@ -298,6 +309,33 @@ impl CommitGraph {
             overlay,
         )?;
         Ok(Self::from_segment_graph(&raw))
+    }
+
+    /// Like [`Self::from_walk`], but seeded from explicit `tips` — the REAL
+    /// [`Graph::from_commit_traversal_tips`](crate::Graph::from_commit_traversal_tips) traversal
+    /// with `dangerously_skip_postprocessing_for_debugging`, flattened.
+    pub fn from_walk_tips<T: but_core::RefMetadata>(
+        repo: &gix::Repository,
+        meta: &T,
+        tips: Vec<crate::init::Tip>,
+        project_meta: but_core::ref_metadata::ProjectMeta,
+        options: crate::init::Options,
+        overlay: crate::init::Overlay,
+    ) -> anyhow::Result<Self> {
+        let raw = crate::Graph::from_commit_traversal_tips_with_overlay(
+            repo,
+            tips,
+            meta,
+            project_meta,
+            crate::init::Options {
+                dangerously_skip_postprocessing_for_debugging: true,
+                ..options
+            },
+            overlay,
+        )?;
+        let mut cg = Self::from_segment_graph(&raw);
+        cg.explicit_tips = true;
+        Ok(cg)
     }
 
     /// Mark `id` as a GitButler-managed workspace commit when its message says so.
