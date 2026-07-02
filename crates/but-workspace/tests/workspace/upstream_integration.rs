@@ -937,8 +937,8 @@ fn non_bottom_update_selector_does_not_prune_fully_integrated_stack() -> Result<
     let workspace = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&workspace), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on 8d5739f
-    └── ≡📙:3:A on 8d5739f {1}
-        └── 📙:3:A
+    └── ≡📙:1:A on 8d5739f {1}
+        └── 📙:1:A
             ├── ·ffde79e (🏘️|✓)
             └── ·86b55e6 (🏘️|✓)
     ");
@@ -1926,8 +1926,8 @@ fn empty_branch_with_integrated_remote_tip_is_removed() -> Result<()> {
     let mut workspace = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&workspace), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on 563a7fc
-    └── ≡📙:4:topic <> origin/topic →:5: on 563a7fc {1}
-        └── 📙:4:topic <> origin/topic →:5:
+    └── ≡📙:2:topic <> origin/topic →:5: on 563a7fc {1}
+        └── 📙:2:topic <> origin/topic →:5:
             └── ❄️6ba217e (🏘️|✓)
     ");
 
@@ -1957,8 +1957,8 @@ fn empty_branch_with_integrated_remote_tip_is_removed() -> Result<()> {
     let workspace = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&workspace), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 563a7fc
-    └── ≡:2:main <> origin/main →:1: on 563a7fc
-        └── :2:main <> origin/main →:1:
+    └── ≡:1:main <> origin/main →:4: on 563a7fc
+        └── :1:main <> origin/main →:4:
             └── ❄️364a08f (🏘️|✓)
     ");
     insta::assert_snapshot!(visualize_commit_graph_all(&repo)?, @r"
@@ -2011,8 +2011,8 @@ fn non_empty_branch_with_integrated_remote_tip_keeps_local_work() -> Result<()> 
     let mut workspace = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&workspace), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on 563a7fc
-    └── ≡📙:4:topic <> origin/topic →:5:⇡1 on 563a7fc {1}
-        └── 📙:4:topic <> origin/topic →:5:⇡1
+    └── ≡📙:2:topic <> origin/topic →:3:⇡1 on 563a7fc {1}
+        └── 📙:2:topic <> origin/topic →:3:⇡1
             ├── ·f1a3cba (🏘️)
             └── ❄️6ba217e (🏘️|✓)
     ");
@@ -2043,10 +2043,10 @@ fn non_empty_branch_with_integrated_remote_tip_keeps_local_work() -> Result<()> 
     let workspace = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&workspace), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 563a7fc
-    └── ≡📙:4:topic <> origin/topic →:5:⇡1 on 563a7fc {1}
-        ├── 📙:4:topic <> origin/topic →:5:⇡1
+    └── ≡📙:1:topic <> origin/topic →:3:⇡1 on 563a7fc {1}
+        ├── 📙:1:topic <> origin/topic →:3:⇡1
         │   └── ·f3ceb3d (🏘️)
-        └── :2:main <> origin/main →:1:
+        └── :2:main <> origin/main →:5:
             └── ❄️364a08f (🏘️|✓)
     ");
     insta::assert_snapshot!(visualize_commit_graph_all(&repo)?, @r"
@@ -2100,7 +2100,7 @@ fn empty_branch_above_integrated_branch_is_preserved() -> Result<()> {
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on 563a7fc
     └── ≡📙:7:top <> origin/top →:6: on 563a7fc {1}
         ├── 📙:7:top <> origin/top →:6:
-        └── 📙:8:bottom <> origin/bottom →:5:
+        └── 📙:2:bottom <> origin/bottom →:5:
             └── ❄️141de4f (🏘️|✓)
     ");
 
@@ -2138,9 +2138,9 @@ fn empty_branch_above_integrated_branch_is_preserved() -> Result<()> {
     let workspace = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&workspace), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 563a7fc
-    └── ≡📙:2:top <> origin/top →:4: on 563a7fc {1}
-        └── 📙:2:top <> origin/top →:4:
-            └── ·334227d (🏘️|✓)
+    └── ≡📙:1:top <> origin/top →:2: on 563a7fc {1}
+        └── 📙:1:top <> origin/top →:2:
+            └── ·334227d (🏘️|✓) ►main
     ");
     insta::assert_snapshot!(visualize_commit_graph_all(&repo)?, @r"
     * f381153 (HEAD -> gitbutler/workspace) GitButler Workspace Commit

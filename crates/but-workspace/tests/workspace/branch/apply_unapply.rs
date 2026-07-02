@@ -1561,10 +1561,10 @@ fn apply_from_enclosed_adhoc_workspace_rebuilds_around_current_and_applied() -> 
             },
         )?;
     insta::assert_snapshot!(visualize_commit_graph_all(&repo)?, "initial workspace has A and B applied", @r"
-    *   4fce3a1 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+    *   0a752d2 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
     |\  
-    | * ccf539c (A) A
-    * | 53c254d (B) B
+    | * 53c254d (B) B
+    * | ccf539c (A) A
     |/  
     * 893d602 (origin/main, main) M
     ");
@@ -1588,12 +1588,12 @@ fn apply_from_enclosed_adhoc_workspace_rebuilds_around_current_and_applied() -> 
     git(&repo).args(["checkout", "B"]).run();
     insta::assert_snapshot!(visualize_commit_graph_all(&repo)?, "direct checkout of B leaves C outside the workspace", @r"
     * 863775d (C) add C
-    | *   4fce3a1 (gitbutler/workspace) GitButler Workspace Commit
+    | *   0a752d2 (gitbutler/workspace) GitButler Workspace Commit
     | |\  
-    | | * ccf539c (A) A
+    | | * 53c254d (HEAD -> B) B
     | |/  
     |/|   
-    | * 53c254d (HEAD -> B) B
+    | * ccf539c (A) A
     |/  
     * 893d602 (origin/main, main) M
     ");
@@ -1621,12 +1621,12 @@ fn apply_from_enclosed_adhoc_workspace_rebuilds_around_current_and_applied() -> 
         "direct checkout of B can still project as a managed workspace"
     );
     insta::assert_snapshot!(graph_workspace(&ws), "direct checkout of B is still enclosed by the existing workspace", @"
-    📕🏘️:1:gitbutler/workspace <> ✓refs/remotes/origin/main on 893d602
-    ├── ≡📙:4:A on 893d602 {1}
-    │   └── 📙:4:A
+    📕🏘️:0:gitbutler/workspace <> ✓refs/remotes/origin/main on 893d602
+    ├── ≡📙:2:A on 893d602 {1}
+    │   └── 📙:2:A
     │       └── ·ccf539c (🏘️)
-    └── ≡👉📙:0:B[🌳] on 893d602 {2}
-        └── 👉📙:0:B[🌳]
+    └── ≡👉📙:1:B[🌳] on 893d602 {2}
+        └── 👉📙:1:B[🌳]
             └── ·53c254d (🏘️)
     ");
 
@@ -1702,10 +1702,10 @@ fn apply_from_adhoc_checkout_rebuilds_around_current_and_applied() -> anyhow::Re
             },
         )?;
     insta::assert_snapshot!(visualize_commit_graph_all(&repo)?, "initial workspace has A and B applied", @r"
-    *   4fce3a1 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+    *   0a752d2 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
     |\  
-    | * ccf539c (A) A
-    * | 53c254d (B) B
+    | * 53c254d (B) B
+    * | ccf539c (A) A
     |/  
     * 893d602 (origin/main, main) M
     ");
@@ -1728,12 +1728,12 @@ fn apply_from_adhoc_checkout_rebuilds_around_current_and_applied() -> anyhow::Re
     git(&repo).args(["commit", "-m", "add C"]).run();
     insta::assert_snapshot!(visualize_commit_graph_all(&repo)?, "direct checkout of C leaves A and B in the old workspace", @r"
     * 863775d (HEAD -> C) add C
-    | *   4fce3a1 (gitbutler/workspace) GitButler Workspace Commit
+    | *   0a752d2 (gitbutler/workspace) GitButler Workspace Commit
     | |\  
-    | | * ccf539c (A) A
+    | | * 53c254d (B) B
     | |/  
     |/|   
-    | * 53c254d (B) B
+    | * ccf539c (A) A
     |/  
     * 893d602 (origin/main, main) M
     ");

@@ -12,7 +12,6 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use bstr::ByteSlice;
 use but_core::RefMetadata;
 use gix::reference::Category;
 
