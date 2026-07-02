@@ -1023,6 +1023,13 @@ impl Graph {
             for tip in &self.traversal_tips {
                 self.check_traversal_tip_points_to_first_commit(tip)?;
             }
+            // Builder invariants — a RAW traversal graph legitimately violates them (refs are
+            // kept everywhere; naming/cleanup are builder passes).
+            if !self.options.raw_traversal {
+                self.check_ref_names_unique_and_unannotated()?;
+                self.check_first_commits_unique()?;
+                self.check_remote_links()?;
+            }
         }
         for edge in self.inner.edge_references() {
             Self::check_edge(&self.inner, edge, false)?;
@@ -1078,6 +1085,11 @@ impl Graph {
                     .iter()
                     .filter_map(|tip| self.check_traversal_tip_points_to_first_commit(tip).err()),
             );
+            if !self.options.raw_traversal {
+                out.extend(self.check_ref_names_unique_and_unannotated().err());
+                out.extend(self.check_first_commits_unique().err());
+                out.extend(self.check_remote_links().err());
+            }
         }
         out.extend(
             self.inner
@@ -1268,6 +1280,95 @@ impl Graph {
             self[owner_segment_index].commit_index_of(tip.id) == Some(0),
             "{tip:?}: resolved tip owner {owner_segment_index:?} must contain the tip id as its first commit"
         );
+        Ok(())
+    }
+
+    /// A ref names at most ONE segment — `segment_by_ref_name` and every naming pass assume
+    /// it — and a segment-naming ref must not also be annotated on a commit (it would show
+    /// twice; the builder strips it).
+    fn check_ref_names_unique_and_unannotated(&self) -> anyhow::Result<()> {
+        let mut seen: std::collections::HashMap<&gix::refs::FullNameRef, SegmentIndex> =
+            std::collections::HashMap::new();
+        for sidx in self.inner.node_indices() {
+            if let Some(name) = self.inner[sidx].ref_name() {
+                if let Some(prev) = seen.insert(name, sidx) {
+                    bail!(
+                        "ref {name} names two segments: {prev:?} and {sidx:?}",
+                        name = name.as_bstr()
+                    );
+                }
+            }
+        }
+        for sidx in self.inner.node_indices() {
+            for commit in &self.inner[sidx].commits {
+                for r in &commit.refs {
+                    ensure!(
+                        !seen.contains_key(&r.ref_name.as_ref()),
+                        "ref {name} names segment {owner:?} but is also annotated on commit {id} in {sidx:?}",
+                        name = r.ref_name.as_bstr(),
+                        owner = seen[&r.ref_name.as_ref()],
+                        id = commit.id,
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// No two segments may START at the same LOCAL commit: connections resolve to first
+    /// commits, so a duplicate twin is unreachable-by-endpoint and dangles (the
+    /// overlapping-region class). Remote-only commits are exempt — every remote segment shows
+    /// its own copy of a shared remote-ahead commit by design.
+    fn check_first_commits_unique(&self) -> anyhow::Result<()> {
+        let mut seen: std::collections::HashMap<gix::ObjectId, SegmentIndex> =
+            std::collections::HashMap::new();
+        for sidx in self.inner.node_indices() {
+            if let Some(first) = self.inner[sidx]
+                .commits
+                .first()
+                .filter(|c| c.flags.contains(crate::CommitFlags::NotInRemote))
+                .map(|c| c.id)
+            {
+                if let Some(prev) = seen.insert(first, sidx) {
+                    bail!(
+                        "commit {first} is the first commit of two segments: {prev:?} and {sidx:?}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A local segment's remote-tracking link is bidirectional and name-consistent: the linked
+    /// remote segment is named by the local's remote-tracking ref and points back via its
+    /// sibling link (the reconcile class — naming passes used to break these silently).
+    fn check_remote_links(&self) -> anyhow::Result<()> {
+        for sidx in self.inner.node_indices() {
+            let s = &self.inner[sidx];
+            let Some(remote_sidx) = s.remote_tracking_branch_segment_id else {
+                continue;
+            };
+            let Some(remote) = self.inner.node_weight(remote_sidx) else {
+                bail!(
+                    "segment {sidx:?} links remote-tracking segment {remote_sidx:?} which does not exist"
+                );
+            };
+            if let (Some(expected), Some(actual)) =
+                (s.remote_tracking_ref_name.as_ref(), remote.ref_name())
+            {
+                ensure!(
+                    expected.as_ref() == actual,
+                    "segment {sidx:?} tracks {expected} but its linked remote segment {remote_sidx:?} is named {actual}",
+                    expected = expected.as_bstr(),
+                    actual = actual.as_bstr(),
+                );
+            }
+            ensure!(
+                remote.sibling_segment_id == Some(sidx),
+                "remote segment {remote_sidx:?} must point back at {sidx:?} via its sibling link, points at {:?}",
+                remote.sibling_segment_id,
+            );
+        }
         Ok(())
     }
 

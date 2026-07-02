@@ -890,6 +890,11 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
                 let Some(ref_name) = t.ref_name.clone() else {
                     continue;
                 };
+                // Workspace refs are the managed machinery's territory — it names or splices the
+                // workspace segment itself (a second one here would violate name uniqueness).
+                if but_core::is_workspace_ref_name(ref_name.as_ref()) {
+                    continue;
+                }
                 if segment_by_ref(&sg, &ref_name).is_some()
                     || sg.node(owner_sidx).is_some_and(|s| {
                         s.ref_info
