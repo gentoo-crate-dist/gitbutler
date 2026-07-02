@@ -558,11 +558,9 @@ impl Graph {
         options: Options,
     ) -> anyhow::Result<Self> {
         let head = repo.head()?;
-        // The flip dispatch lives in `from_commit_traversal` (which every case below
-        // delegates to): a checkout inside a managed workspace — including HEAD on the workspace
-        // ref itself — builds from a CommitGraph; everything else stays on the walk. The
-        // non-managed builder (`graph_from_repository_unmanaged`) is not parity-proven yet and is
-        // deliberately NOT routed to.
+        // The dispatch lives in `from_commit_traversal` (which every case below delegates to):
+        // a checkout inside a managed workspace — including HEAD on the workspace ref itself —
+        // builds via the managed builder, everything else via the non-managed one.
         let mut is_detached = false;
         let (tip, maybe_name) = match head.kind {
             gix::head::Kind::Unborn(ref_name) => {
@@ -687,14 +685,11 @@ impl Graph {
         let repo = tip.repo;
         let tip = tip.detach();
         let ref_name = ref_name.into();
-        // THE FLIP (default): if the entrypoint is inside a managed workspace, build from a CommitGraph
-        // (with an entrypoint split). Falls through to the walk for adhoc / outside entrypoints. A
-        // workspace-ref tip is the plain from_head case (no explicit entrypoint). NEVER for raw
-        // debugging graphs: the flip itself runs the raw walk underneath (`CommitGraph::from_walk`),
-        // which would recurse. BUT_GRAPH_NO_FLIP forces the legacy walk until it is deleted.
-        if std::env::var_os("BUT_GRAPH_NO_FLIP").is_none()
-            && !options.dangerously_skip_postprocessing_for_debugging
-        {
+        // Build from a CommitGraph: inside a managed workspace with an entrypoint split, else via
+        // the non-managed builder. A workspace-ref tip is the plain from_head case (no explicit
+        // entrypoint). NEVER for raw debugging graphs: the builders run the raw traversal
+        // underneath (`CommitGraph::from_walk`), which would recurse.
+        if !options.dangerously_skip_postprocessing_for_debugging {
             let is_ws_tip = ref_name
                 .as_ref()
                 .is_some_and(|r| but_core::is_workspace_ref_name(r.as_ref()));
@@ -713,7 +708,7 @@ impl Graph {
             )? {
                 return Ok(graph);
             }
-            // No managed workspace, or the entrypoint is outside it: the non-managed flip builder.
+            // No managed workspace, or the entrypoint is outside it: the non-managed builder.
             return crate::graph_from_repository_unmanaged(
                 repo,
                 meta,
@@ -723,59 +718,15 @@ impl Graph {
                 options.clone(),
             );
         }
-        let sweep_ref_name = ref_name.clone();
-        let walk = Self::from_commit_traversal_with_overlay(
+        Self::from_commit_traversal_with_overlay(
             repo,
             tip,
             ref_name,
             meta,
-            project_meta.clone(),
-            options.clone(),
+            project_meta,
+            options,
             Overlay::default(),
-        )?;
-        // TEMPORARY (flip PROJECTION-parity sweep — REMOVE before finalizing): panic on projection
-        // divergence so cargo names the test. Dormant unless BUT_GRAPH_PARITY is set.
-        // Mirror the production flip dispatch: a workspace-ref tip is the plain from_head case
-        // (no explicit entrypoint); anything else is a checkout inside the workspace whose
-        // entrypoint must be forwarded for a like-for-like comparison.
-        let is_ws_tip = sweep_ref_name
-            .as_ref()
-            .is_some_and(|r| but_core::is_workspace_ref_name(r.as_ref()));
-        let (sweep_ep, sweep_ep_ref) = if is_ws_tip {
-            (None, None)
-        } else {
-            (Some(tip), sweep_ref_name.clone())
-        };
-        if std::env::var_os("BUT_GRAPH_PARITY").is_some()
-            // A debugging graph without post-processing is not an app-visible shape — skip it.
-            && !options.dangerously_skip_postprocessing_for_debugging
-            && let Ok(Some(flip)) = crate::graph_from_repository(
-                repo,
-                meta,
-                sweep_ep,
-                sweep_ep_ref.clone(),
-                project_meta.clone(),
-                options.clone(),
-            )
-            && let (Ok(wp), Ok(fp)) = (
-                walk.clone().validated().and_then(|g| g.into_workspace()),
-                flip.validated().and_then(|g| g.into_workspace()),
-            )
-        {
-            let (w, f) = (wp.projection_fingerprint(), fp.projection_fingerprint());
-            if w != f {
-                let ow: Vec<_> = w.iter().filter(|l| !f.contains(l)).cloned().collect();
-                let of: Vec<_> = f.iter().filter(|l| !w.contains(l)).cloned().collect();
-                panic!(
-                    "FLIP_PROJECTION_DIVERGENCE tip={tip} ep={sweep_ep:?} ep_ref={ep_ref:?} extra={extra:?}\n  WALK-only:\n    {}\n  FLIP-only:\n    {}",
-                    ow.join("\n    "),
-                    of.join("\n    "),
-                    ep_ref = sweep_ep_ref.as_ref().map(|r| r.as_bstr()),
-                    extra = options.extra_target_commit_id,
-                );
-            }
-        }
-        Ok(walk)
+        )
     }
 
     /// Like [`Self::from_commit_traversal()`], but with in-memory `overlay` refs and metadata, and
@@ -829,13 +780,10 @@ impl Graph {
         options: Options,
     ) -> anyhow::Result<Self> {
         let tips: Vec<_> = tips.into_iter().collect();
-        // THE FLIP (default): build from a CommitGraph derived from the same tips traversal.
-        // NEVER for raw debugging graphs — the flip runs the raw tips walk underneath
-        // (`CommitGraph::from_walk_tips`), which would recurse. BUT_GRAPH_NO_FLIP forces the
-        // legacy walk until it is deleted.
-        if std::env::var_os("BUT_GRAPH_NO_FLIP").is_none()
-            && !options.dangerously_skip_postprocessing_for_debugging
-        {
+        // Build from a CommitGraph derived from the same tips traversal. NEVER for raw debugging
+        // graphs — the builder runs the raw tips traversal underneath
+        // (`CommitGraph::from_walk_tips`), which would recurse.
+        if !options.dangerously_skip_postprocessing_for_debugging {
             return crate::graph_from_repository_tips(repo, meta, tips, project_meta, options);
         }
         Self::from_commit_traversal_tips_with_overlay(
@@ -1219,12 +1167,9 @@ impl Graph {
                 (tip, ref_name)
             }
         };
-        // THE FLIP (default): the same dispatch as `from_commit_traversal`, with the overlay served
-        // from memory by the flip builder. Falls through to the walk when the entrypoint isn't
-        // inside a managed workspace. BUT_GRAPH_NO_FLIP forces the legacy walk.
-        if std::env::var_os("BUT_GRAPH_NO_FLIP").is_none()
-            && !self.options.dangerously_skip_postprocessing_for_debugging
-        {
+        // The same dispatch as `from_commit_traversal`, with the overlay served from memory by
+        // the builders.
+        if !self.options.dangerously_skip_postprocessing_for_debugging {
             let is_ws_tip = ref_name
                 .as_ref()
                 .is_some_and(|r| but_core::is_workspace_ref_name(r.as_ref()));
