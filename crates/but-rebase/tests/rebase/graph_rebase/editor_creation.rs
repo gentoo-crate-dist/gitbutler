@@ -431,10 +431,8 @@ fn commit_with_two_parents() -> Result<()> {
     insta::assert_snapshot!(graph_tree(&graph), @"
 
     └── 👉►:0[0]:main[🌳]
-        └── ·d70d863 (⌂|1)
-            ├── ►:1[1]:anon:
-            │   └── 🏁·35b8235 (⌂|1)
-            └── →:1:
+        ├── ·d70d863 (⌂|1)
+        └── 🏁·35b8235 (⌂|1)
     ");
 
     let mut ws = graph.into_workspace()?;
