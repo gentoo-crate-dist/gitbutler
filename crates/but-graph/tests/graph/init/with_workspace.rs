@@ -1569,15 +1569,15 @@ fn tips_equivalent_to_workspace_metadata_are_order_independent() -> anyhow::Resu
     let _ = workspace_baseline_tree;
     let explicit_workspace = graph_workspace(&graph.into_workspace()?);
     insta::assert_snapshot!(explicit_workspace, @"
-    📕🏘️⚠️:3:gitbutler/workspace <> ✓refs/remotes/origin/main on fafd9d0
-    ├── ≡📙:4:C on fafd9d0 {0}
-    │   ├── 📙:4:C
-    │   ├── 📙:5:B
-    │   └── 📙:6:A
-    └── ≡📙:7:D on fafd9d0 {1}
-        ├── 📙:7:D
-        ├── 📙:8:E
-        └── 📙:9:F
+    📕🏘️⚠️:2:gitbutler/workspace <> ✓refs/remotes/origin/main on fafd9d0
+    ├── ≡📙:3:C on fafd9d0 {0}
+    │   ├── 📙:3:C
+    │   ├── 📙:4:B
+    │   └── 📙:5:A
+    └── ≡📙:6:D on fafd9d0 {1}
+        ├── 📙:6:D
+        ├── 📙:7:E
+        └── 📙:8:F
     ");
     let _ = (explicit_workspace, workspace_baseline_workspace);
 
@@ -6654,7 +6654,7 @@ fn shared_target_base_keeps_exact_target_segment_with_inactive_unapplied_branch(
     │           ├── ·4ca0966 (⌂|🏘|01)
     │           └── ·a3b180e (⌂|🏘|01)
     │               └── ►:2[2]:main <> origin/main →:3:
-    │                   ├── ·ce09734 (⌂|🏘|✓|11) ►unapplied, ►base-peer, ►base-peer-1, ►base-peer-2, ►base-peer-3, ►base-peer-4, ►base-peer-5, ►base-peer-6, ►base-peer-7, ►base-peer-8
+    │                   ├── ·ce09734 (⌂|🏘|✓|11) ►base-peer, ►base-peer-1, ►base-peer-2, ►base-peer-3, ►base-peer-4, ►base-peer-5, ►base-peer-6, ►base-peer-7, ►base-peer-8, ►unapplied
     │                   └── 🏁·fafd9d0 (⌂|🏘|✓|11)
     └── ►:3[0]:origin/main →:2:
         └── →:2: (main →:3:)

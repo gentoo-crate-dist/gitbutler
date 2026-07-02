@@ -17,7 +17,7 @@ use crate::{
         Goals, PetGraph,
         overlay::{OverlayMetadata, OverlayRepo},
         remotes,
-        types::{EdgeOwned, Instruction, Limit, Queue, QueueItem},
+        types::{EdgeOwned, Instruction, Limit, Queue},
     },
 };
 
@@ -514,7 +514,7 @@ fn unambiguous_local_branch_and_segment_data<T: RefMetadata>(
     })
 }
 
-fn disambiguate_refs_by_branch_metadata_with_lookup<T: RefMetadata>(
+pub(crate) fn disambiguate_refs_by_branch_metadata_with_lookup<T: RefMetadata>(
     refs_by_id_lookup: (&RefsById, gix::ObjectId),
     meta: &OverlayMetadata<'_, T>,
 ) -> Option<(gix::refs::FullName, Option<SegmentMetadata>)> {
@@ -897,9 +897,9 @@ pub fn propagate_flags_downward(
     leafs.filter(|v| !v.is_empty())
 }
 
-pub(crate) struct RemoteQueueOutcome {
+pub(crate) struct RemoteQueueOutcome<I = Instruction> {
     /// The new tips to queue officially later.
-    pub items_to_queue_later: Vec<QueueItem>,
+    pub items_to_queue_later: Vec<super::types::QueueItemT<I>>,
     /// A way for the remote to find the local tracking branch.
     pub maybe_make_id_a_goal_so_remote_can_find_local: CommitFlags,
     /// A way for the local tracking branch to find the remote.

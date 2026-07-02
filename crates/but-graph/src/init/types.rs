@@ -74,7 +74,7 @@ impl Limit {
     ///
     /// `flags` are used to selectively decrement this limit.
     /// Thanks to flag-propagation there can be no runaways.
-    pub fn is_exhausted_or_decrement(&mut self, flags: CommitFlags, next: &Queue) -> bool {
+    pub fn is_exhausted_or_decrement<I>(&mut self, flags: CommitFlags, next: &Queue<I>) -> bool {
         // Keep going if the goal wasn't seen yet, unlimited gas.
         if let Some(maybe_goal) = self.goal_reachable(flags)
             && (maybe_goal.is_empty() || self.set_single_goal_reached_keep_searching(maybe_goal))
@@ -159,7 +159,7 @@ impl Limit {
 }
 
 /// Lifecycle
-impl Queue {
+impl<I> Queue<I> {
     pub fn new_with_limit(limit: Option<usize>) -> Self {
         Queue {
             inner: Default::default(),
@@ -173,9 +173,12 @@ impl Queue {
 }
 
 /// A queue to keep track of tips, which additionally counts how much was queued over time.
+/// Generic over the per-item payload `I` (the segment-addressed [`Instruction`] for the legacy
+/// traversal, the native walker's queued-by record otherwise) so the limit/exhaustion semantics
+/// are shared bit-for-bit.
 #[derive(Debug)]
-pub struct Queue {
-    pub inner: VecDeque<QueueItem>,
+pub struct Queue<I = Instruction> {
+    pub inner: VecDeque<QueueItemT<I>>,
     /// The current number of queued items.
     count: usize,
     /// The maximum number of queuing operations, each representing one commit.
@@ -189,7 +192,7 @@ pub struct Queue {
 }
 
 /// Counted queuing
-impl Queue {
+impl<I> Queue<I> {
     /// Sort the queue items so that young commits come first. This way, the traversal goes
     /// back in time continuously, which helps to avoid having too many graph traversals
     /// in disjoint regions happen at the same time.
@@ -207,14 +210,14 @@ impl Queue {
         }
     }
     #[must_use]
-    pub fn push_back_exhausted(&mut self, item: QueueItem) -> bool {
+    pub fn push_back_exhausted(&mut self, item: QueueItemT<I>) -> bool {
         if self.exhausted || self.record_hard_limit_if_exhausted() {
             return true;
         }
         self.push_back_even_if_exhausted(item)
     }
 
-    pub(crate) fn push_back_even_if_exhausted(&mut self, item: QueueItem) -> bool {
+    pub(crate) fn push_back_even_if_exhausted(&mut self, item: QueueItemT<I>) -> bool {
         if self.sorted {
             self.insert_sorted(item);
         } else {
@@ -223,7 +226,7 @@ impl Queue {
         self.is_exhausted_after_increment()
     }
     #[must_use]
-    pub fn push_front_exhausted(&mut self, item: QueueItem) -> bool {
+    pub fn push_front_exhausted(&mut self, item: QueueItemT<I>) -> bool {
         if self.exhausted || self.record_hard_limit_if_exhausted() {
             return true;
         }
@@ -235,7 +238,7 @@ impl Queue {
         self.is_exhausted_after_increment()
     }
 
-    fn insert_sorted(&mut self, item: QueueItem) {
+    fn insert_sorted(&mut self, item: QueueItemT<I>) {
         let index = self
             .inner
             .partition_point(|existing| existing.0.gen_then_time <= item.0.gen_then_time);
@@ -282,14 +285,14 @@ impl Queue {
 }
 
 /// Various other - good to know what we need though.
-impl Queue {
-    pub fn pop_front(&mut self) -> Option<QueueItem> {
+impl<I> Queue<I> {
+    pub fn pop_front(&mut self) -> Option<QueueItemT<I>> {
         self.inner.pop_front()
     }
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut QueueItem> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut QueueItemT<I>> {
         self.inner.iter_mut()
     }
-    pub fn iter(&self) -> impl Iterator<Item = &QueueItem> {
+    pub fn iter(&self) -> impl Iterator<Item = &QueueItemT<I>> {
         self.inner.iter()
     }
 }
@@ -362,7 +365,8 @@ impl Instruction {
     }
 }
 
-pub type QueueItem = (super::walk::TraverseInfo, CommitFlags, Instruction, Limit);
+/// A queue item generic over the traversal's per-item payload.
+pub type QueueItemT<I> = (super::walk::TraverseInfo, CommitFlags, I, Limit);
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EdgeOwned {
@@ -564,7 +568,7 @@ mod tests {
 
     #[test]
     fn explicit_exhaustion_does_not_count_as_hard_limit_hit() {
-        let mut queue = Queue::new_with_limit(Some(1));
+        let mut queue: Queue = Queue::new_with_limit(Some(1));
 
         queue.exhaust();
 
@@ -581,7 +585,7 @@ mod tests {
 
     #[test]
     fn hard_limit_exhaustion_records_hard_limit_hit() {
-        let mut queue = Queue::new_with_limit(Some(0));
+        let mut queue: Queue = Queue::new_with_limit(Some(0));
 
         assert!(
             queue.record_hard_limit_if_exhausted(),

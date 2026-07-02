@@ -118,8 +118,79 @@ impl Graph {
         ws.mark_remote_reachability(self)?;
         ws.add_commits_on_remote(self);
         ws.truncate_single_stack_to_match_base();
+        self.debug_assert_applied_stacks_have_lanes(&ws);
         Ok(ws)
     }
+
+    /// Test-build tripwire for the most dangerous projection failure: an APPLIED metadata stack
+    /// silently disappearing from `stacks`. Operations rebuild the workspace merge and metadata
+    /// heads from the projection, so a vanished lane does not just render wrong — it gets
+    /// PERSISTED by the next write. Scoped to managed workspaces; a stack counts only when at
+    /// least one non-archived branch of it actually names a segment in this graph.
+    #[cfg(debug_assertions)]
+    fn debug_assert_applied_stacks_have_lanes(&self, ws: &WorkspaceState) {
+        use but_core::ref_metadata::StackKind::Applied;
+        if !matches!(ws.kind, WorkspaceKind::Managed { .. }) {
+            return;
+        }
+        let Some(meta) = ws.metadata.as_ref() else {
+            return;
+        };
+        let projected: std::collections::HashSet<_> = ws
+            .stacks
+            .iter()
+            .flat_map(|s| s.segments.iter())
+            .filter_map(|s| s.ref_name().map(|r| r.to_owned()))
+            .collect();
+        // Only segments REACHABLE from the workspace tip count: metadata is the DESIRED state
+        // and legitimately runs ahead of the graph mid-operation (apply writes metadata before
+        // the workspace merge is rebuilt). The failure class is a branch that IS in the
+        // workspace's reach and still lost its lane.
+        let mut reachable = std::collections::HashSet::new();
+        self.visit_all_segments_including_start_until(ws.id, crate::Direction::Outgoing, |s| {
+            reachable.insert(s.id);
+            false
+        });
+        for stack in meta.stacks(Applied) {
+            let represented_branches: Vec<_> = stack
+                .branches
+                .iter()
+                .filter(|b| !b.archived)
+                .filter(|b| {
+                    self.segment_by_ref_name(b.ref_name.as_ref())
+                        .is_some_and(|s| {
+                            reachable.contains(&s.id)
+                            // A stack anchored on INTEGRATED territory away from the workspace
+                            // lower bound is deliberately not overzealously materialized; one
+                            // resting ON the lower bound (or holding live commits, or empty)
+                            // must keep its lane.
+                            && s.commits.first().is_none_or(|c| {
+                                !c.flags.contains(crate::CommitFlags::Integrated)
+                                    || Some(c.id) == ws.lower_bound
+                            })
+                        })
+                })
+                .map(|b| b.ref_name.clone())
+                .collect();
+            if represented_branches.is_empty() {
+                continue;
+            }
+            debug_assert!(
+                represented_branches
+                    .iter()
+                    .any(|b| projected.contains(b.as_ref())),
+                "applied metadata stack {:?} (branches {:?}) vanished from the projection —                  operations writing from this projection would drop the lane on disk",
+                stack.id,
+                represented_branches
+                    .iter()
+                    .map(|b| b.as_bstr().to_string())
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn debug_assert_applied_stacks_have_lanes(&self, _ws: &WorkspaceState) {}
 
     fn workspace_frame(&self, downgrade: Downgrade) -> anyhow::Result<WorkspaceFrame> {
         let (

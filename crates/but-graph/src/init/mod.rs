@@ -28,6 +28,7 @@ use crate::init::overlay::{OverlayMetadata, OverlayRepo};
 mod remotes;
 
 mod ad_hoc;
+pub(crate) mod native_walk;
 pub(crate) mod overlay;
 
 pub(crate) type Entrypoint = Option<(gix::ObjectId, Option<gix::refs::FullName>)>;
@@ -792,6 +793,56 @@ impl Graph {
             project_meta,
             options,
             Overlay::default(),
+        )
+    }
+
+    /// NATIVE twin of [`Self::from_commit_traversal_with_overlay`]: same seeding, commits
+    /// accumulated directly (see `native_walk`).
+    pub(crate) fn native_from_commit_traversal_with_overlay(
+        repo: &gix::Repository,
+        tip: gix::ObjectId,
+        ref_name: Option<gix::refs::FullName>,
+        meta: &impl RefMetadata,
+        project_meta: ProjectMeta,
+        options: Options,
+        overlay: Overlay,
+    ) -> anyhow::Result<native_walk::NativeOutcome> {
+        let (overlay_repo, overlay_meta, _entrypoint) = overlay.into_parts(repo, meta);
+        let tips = initial_tips_from_workspace_metadata(
+            &overlay_repo,
+            &overlay_meta,
+            tip,
+            ref_name.as_ref(),
+            &project_meta,
+            options.extra_target_commit_id,
+        )?;
+        native_walk::traverse(
+            &overlay_repo,
+            tips,
+            &overlay_meta,
+            project_meta,
+            options,
+            ref_name,
+        )
+    }
+
+    /// NATIVE twin of [`Self::from_commit_traversal_tips_with_overlay`].
+    pub(crate) fn native_from_commit_traversal_tips_with_overlay(
+        repo: &gix::Repository,
+        tips: Vec<Tip>,
+        meta: &impl RefMetadata,
+        project_meta: ProjectMeta,
+        options: Options,
+        overlay: Overlay,
+    ) -> anyhow::Result<native_walk::NativeOutcome> {
+        let (overlay_repo, overlay_meta, _entrypoint) = overlay.into_parts(repo, meta);
+        native_walk::traverse(
+            &overlay_repo,
+            tips,
+            &overlay_meta,
+            project_meta,
+            options,
+            None,
         )
     }
 
