@@ -45,6 +45,18 @@ use crate::{Commit, CommitFlags};
 /// An index into a [`CommitGraph`]'s node arena.
 pub type CommitIdx = usize;
 
+/// A run of empty named segments resting above `below` (see
+/// [`CommitGraph::resting_chains`]).
+#[derive(Debug, Clone)]
+pub struct RestingChain {
+    /// The first commit below the run, if any.
+    pub below: Option<gix::ObjectId>,
+    /// The run's ref names, topmost first.
+    pub refs: Vec<gix::refs::FullName>,
+    /// Whether anything feeds the run's head (an incoming connection exists).
+    pub fed: bool,
+}
+
 /// A node in the commit graph: a commit, plus where it sits topologically.
 #[derive(Debug, Clone)]
 pub struct CommitNode {
@@ -74,6 +86,15 @@ pub struct CommitGraph {
     /// [`CommitFlags`](crate::CommitFlags) so it neither perturbs the walk's goal bits nor the
     /// segment fingerprint; used to tell a real managed merge from a ws ref advanced past it.
     managed_ws_commits: HashSet<gix::ObjectId>,
+    /// Chains of refs that REST above a commit through empty spliced segments (an empty branch
+    /// run in a lane, a spine-spliced remote) rather than pointing at it directly — set by
+    /// [`Self::from_segment_graph`]. One entry per maximal empty run.
+    resting_chains: Vec<RestingChain>,
+    /// Commits some empty NAMED segment points at (fed or dangling) — set by
+    /// [`Self::from_segment_graph`]. A merge edge into such a commit must land on its PICK, not
+    /// its ref chain: those refs must stay unreachable from the merge, or upstream-integration
+    /// reachability would classify them as integrated history.
+    merge_bypass_commits: HashSet<gix::ObjectId>,
     /// `(child, parent)` pairs the traversal actually CONNECTED, when built
     /// [from the walk](Self::from_walk). A commit's raw `parent_ids` can point past a traversal
     /// cut (limit, integrated stop-early); connectivity accessors must not rejoin what the walk
@@ -130,6 +151,8 @@ impl CommitGraph {
             entrypoint,
             entrypoint_ref: None,
             managed_ws_commits: HashSet::new(),
+            resting_chains: Vec::new(),
+            merge_bypass_commits: HashSet::new(),
             connected: None,
             hard_limit_hit: false,
             traversal_tips: Vec::new(),
@@ -154,7 +177,8 @@ impl CommitGraph {
             .as_ref()
             .and_then(|ep| ep.commit_and_owner)
             .and_then(|(_, owner)| owner.ref_info.as_ref().map(|ri| ri.ref_name.clone()));
-        let mut commits = Vec::new();
+        let mut commits: Vec<crate::Commit> = Vec::new();
+        let mut commit_pos: HashMap<gix::ObjectId, usize> = HashMap::new();
         for s in graph.node_weights() {
             for (i, c) in s.commits.iter().enumerate() {
                 let mut c = c.clone();
@@ -166,7 +190,32 @@ impl CommitGraph {
                 {
                     c.refs.insert(0, ri.clone());
                 }
-                commits.push(c);
+                // Remote segments show COPIES of shared commits, sometimes with truncated
+                // parents. One node per id: merge refs, prefer the local (NotInRemote) copy's
+                // data, and never trade parents away for a truncated copy.
+                match commit_pos.entry(c.id) {
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(commits.len());
+                        commits.push(c);
+                    }
+                    std::collections::hash_map::Entry::Occupied(e) => {
+                        let existing = &mut commits[*e.get()];
+
+                        for ri in c.refs {
+                            if !existing.refs.iter().any(|r| r.ref_name == ri.ref_name) {
+                                existing.refs.push(ri);
+                            }
+                        }
+                        let take_this = (c.flags.contains(crate::CommitFlags::NotInRemote)
+                            && !existing.flags.contains(crate::CommitFlags::NotInRemote)
+                            && (!c.parent_ids.is_empty() || existing.parent_ids.is_empty()))
+                            || (existing.parent_ids.is_empty() && !c.parent_ids.is_empty());
+                        if take_this {
+                            existing.parent_ids = c.parent_ids;
+                            existing.flags = c.flags;
+                        }
+                    }
+                }
             }
         }
         // The traversal's ACTUAL connectivity: consecutive commits within a segment, plus each
@@ -207,7 +256,56 @@ impl CommitGraph {
                 }
             }
         }
+        // An EMPTY named segment's ref would be lost — record it as a RESTING CHAIN above the
+        // first commit reachable below it, one chain per maximal run of empty segments. A run's
+        // head is an empty named segment not fed by another empty named segment.
+        let is_empty_named = |sidx: crate::SegmentIndex| {
+            let s = &graph[sidx];
+            s.commits.is_empty() && s.ref_info.is_some()
+        };
+        let mut resting_chains: Vec<RestingChain> = Vec::new();
+        let mut merge_bypass_commits: HashSet<gix::ObjectId> = HashSet::new();
+        for s in graph.node_weights() {
+            if !is_empty_named(s.id)
+                || graph
+                    .neighbors_directed(s.id, crate::Direction::Incoming)
+                    .any(is_empty_named)
+            {
+                continue;
+            }
+            let fed = graph
+                .neighbors_directed(s.id, crate::Direction::Incoming)
+                .next()
+                .is_some();
+            let mut refs = Vec::new();
+            let mut below = None;
+            let mut sidx = s.id;
+            for _ in 0..graph.num_segments() {
+                let t = &graph[sidx];
+                if let Some(c) = t.commits.first() {
+                    below = Some(c.id);
+                    break;
+                }
+                if let Some(ri) = &t.ref_info {
+                    refs.push(ri.ref_name.clone());
+                }
+                let Some(next) = t.connections.first() else {
+                    break;
+                };
+                if let Some(dst) = next.dst_id {
+                    below = Some(dst);
+                    break;
+                }
+                sidx = next.target;
+            }
+            if let Some(below) = below {
+                merge_bypass_commits.insert(below);
+            }
+            resting_chains.push(RestingChain { below, refs, fed });
+        }
         let mut cg = CommitGraph::from_commits(commits, entrypoint);
+        cg.resting_chains = resting_chains;
+        cg.merge_bypass_commits = merge_bypass_commits;
         cg.entrypoint_ref = entrypoint_ref;
         cg.set_connected(connected);
         cg.hard_limit_hit = graph.hard_limit_hit();
@@ -338,8 +436,20 @@ impl CommitGraph {
         self.nodes.iter().map(|n| n.commit.id)
     }
 
-    /// The commit's full parent list, first-parent first, INCLUDING parents not present in this
-    /// graph (a partial traversal) — callers preserve those rather than re-pointing them.
+    /// Whether the traversal connected `child -> parent` (present and not severed).
+    pub fn is_connected_pair(&self, child: gix::ObjectId, parent: gix::ObjectId) -> bool {
+        self.by_id.contains_key(&parent) && self.is_connected(child, parent)
+    }
+
+    /// Every parent id the COMMIT asserts, verbatim — present or not, connected or not.
+    pub fn raw_parent_ids(&self, id: gix::ObjectId) -> Vec<gix::ObjectId> {
+        self.node(id)
+            .map(|n| n.commit.parent_ids.to_vec())
+            .unwrap_or_default()
+    }
+
+    /// The commit's CONNECTED parent list, first-parent first — parents the traversal severed
+    /// (limits, integrated stop-early, display cuts) are omitted.
     pub fn all_parent_ids(&self, id: gix::ObjectId) -> Vec<gix::ObjectId> {
         self.node(id)
             .map(|n| {
@@ -379,6 +489,28 @@ impl CommitGraph {
             .into_iter()
             .flat_map(|n| n.commit.parent_ids.iter().copied())
             .filter(|p| self.by_id.contains_key(p))
+    }
+
+    /// The chains of refs resting above commits through empty spliced segments (see
+    /// `resting_chains`).
+    pub fn resting_chains(&self) -> &[RestingChain] {
+        &self.resting_chains
+    }
+
+    /// Whether a merge edge into `id` must land on its pick rather than its ref chain (see
+    /// `merge_bypass_commits`).
+    pub fn is_merge_bypass_commit(&self, id: gix::ObjectId) -> bool {
+        self.merge_bypass_commits.contains(&id)
+    }
+
+    /// The parents of `id` the traversal actually CONNECTED - present in the graph and not
+    /// severed by a traversal cut (limits, integrated stop-early). The parent-walking sibling
+    /// of [`Self::children`].
+    pub fn connected_parents(
+        &self,
+        id: gix::ObjectId,
+    ) -> impl Iterator<Item = gix::ObjectId> + use<'_> {
+        self.parents(id).filter(move |p| self.is_connected(id, *p))
     }
 
     /// The first parent of `id` (the next commit walking down first-parent), if present.

@@ -376,6 +376,62 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
             }
         }
 
+        // Transitional oracle: BUT_REBASE_NATIVE=assert also builds the editor graph from the
+        // CommitGraph + projection (native_creation) and panics with precise diffs if the two
+        // disagree in canonical form (see canonical.rs).
+        if std::env::var("BUT_REBASE_NATIVE").ok().as_deref() == Some("assert") {
+            let native = super::native_creation::create_native(workspace, repo, options, meta)?;
+            let old_c = super::canonical::canonical_form(&graph);
+            let new_c = super::canonical::canonical_form(&native.graph);
+            let mut diffs = new_c.diff_against(&old_c);
+            let sorted = |v: &[gix::refs::FullName]| {
+                let mut v: Vec<_> = v.iter().map(|r| r.to_string()).collect();
+                v.sort();
+                v
+            };
+            if sorted(&native.references) != sorted(&references) {
+                diffs.push(format!(
+                    "references {:?} != {:?}",
+                    sorted(&native.references),
+                    sorted(&references)
+                ));
+            }
+            let selector_labels = |g: &StepGraph, sels: &[Selector]| {
+                let mut v: Vec<String> = sels
+                    .iter()
+                    .map(|s| match &g[s.id] {
+                        Step::Reference { refname } => refname.to_string(),
+                        other => format!("{other:?}"),
+                    })
+                    .collect();
+                v.sort();
+                v
+            };
+            let old_sel = selector_labels(&graph, &head_selectors);
+            let new_sel = selector_labels(&native.graph, &native.head_selectors);
+            if new_sel != old_sel {
+                diffs.push(format!("head_selectors {new_sel:?} != {old_sel:?}"));
+            }
+            let mut imm_old: Vec<_> = immutable_references.iter().map(|r| r.to_string()).collect();
+            let mut imm_new: Vec<_> = native
+                .immutable_references
+                .iter()
+                .map(|r| r.to_string())
+                .collect();
+            imm_old.sort();
+            imm_new.sort();
+            if imm_new != imm_old {
+                diffs.push(format!("immutable {imm_new:?} != {imm_old:?}"));
+            }
+            if !diffs.is_empty() {
+                panic!(
+                    "NATIVE_EDITOR_DIVERGENCE ({} lines):\n{}",
+                    diffs.len(),
+                    diffs.join("\n")
+                );
+            }
+        }
+
         Ok(Self {
             graph,
             initial_references: references,
