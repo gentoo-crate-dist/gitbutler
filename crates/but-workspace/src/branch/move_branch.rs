@@ -92,11 +92,7 @@ pub(super) mod function {
             .select_commit(workspace_head)
             .context("Failed to find the workspace head in the graph.")?;
 
-        let Some(lower_bound_ref) = workspace
-            .lower_bound_segment_id
-            .map(|segment_id| &workspace.graph[segment_id])
-            .and_then(|segment| segment.ref_name())
-        else {
+        let Some(lower_bound_ref) = workspace.lower_bound_ref_name() else {
             bail!("Tearing off a branch requires a workspace common base");
         };
 

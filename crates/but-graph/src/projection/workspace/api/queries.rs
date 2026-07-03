@@ -15,6 +15,13 @@ pub mod legacy;
 
 /// # Points of Interest
 impl Workspace {
+    /// The name of the segment owning the workspace's lower bound — the ref marking the
+    /// common base all stacks converge on (e.g. the target's local `main`), if the bound
+    /// exists and its segment is named.
+    pub fn lower_bound_ref_name(&self) -> Option<&gix::refs::FullNameRef> {
+        self.graph[self.lower_bound_segment_id?].ref_name()
+    }
+
     /// Return the `commit` at the tip of the workspace, or that the tip reference
     /// was pointing to in Git.
     ///
