@@ -865,6 +865,31 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
     // (materialization names plus the passes' own renames), so the lane reorder cannot change
     // their decisions.
     let mut pre_lane_names: HashMap<gix::ObjectId, gix::refs::FullName> = plan.base_name_of.clone();
+    // Remote refs some creator will consume as a segment name: the region builder cuts its run
+    // at interior remote refs only when unclaimed. Plan-modeled names (`remote_used` covers the
+    // walk seeds) plus the ahead-case remotes of EVERY boundary-tip local (`add_remote_segments`
+    // regions all of them, mirroring its gates) plus explicit-tip remote names.
+    let mut claimed_remote_names: HashSet<gix::refs::FullName> = plan.remote_used.clone();
+    claimed_remote_names.extend(pre_lane_names.values().filter_map(|name| {
+        let rt = remote_tracking.get(name)?;
+        let rt_tip = cg.commit_by_ref(rt.as_ref())?;
+        let is_meta_stack_branch = stack_branches
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|b| b == rt);
+        (!in_set.contains(&rt_tip)
+            && remote_name_in_play(rt, symbolic_remotes)
+            && !is_meta_stack_branch)
+            .then(|| rt.clone())
+    }));
+    if cg.explicit_tips {
+        claimed_remote_names.extend(cg.traversal_tips.iter().filter_map(|t| {
+            t.ref_name
+                .clone()
+                .filter(|r| r.as_ref().category() == Some(Category::RemoteBranch))
+        }));
+    }
     add_remote_segments(
         cg,
         &mut sg,
@@ -876,6 +901,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
         &pinned_commits,
         remote_tracking,
         &mut pre_lane_names,
+        &claimed_remote_names,
     );
     add_untracked_remote_segments(
         cg,
@@ -943,6 +969,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
                 remote_tracking,
                 None,
                 &pinned_commits,
+                &claimed_remote_names,
             );
             // The target's LOCAL tracking branch can sit on the region's tip (a fully disjoint
             // target only reached via the target tip itself). The local owns the commit — remotes
@@ -1013,6 +1040,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
             remote_tracking,
             None,
             &pinned_commits,
+            &claimed_remote_names,
         );
     }
 
@@ -1036,6 +1064,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
             remote_tracking,
             None,
             &pinned_commits,
+            &claimed_remote_names,
         );
     }
 
@@ -1061,6 +1090,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
                 remote_tracking,
                 None,
                 &pinned_commits,
+                &claimed_remote_names,
             ),
             Some(owner_sidx) => {
                 let Some(ref_name) = t.ref_name.clone() else {
@@ -1133,9 +1163,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
         link_remote_to_local(&mut sg, tr_sidx, &tr, remote_tracking);
     }
 
-    // A remote's ahead-run may absorb a lower remote's ref (e.g. `origin/split-segment` sitting inside
-    // `origin/main`'s ahead commits): split it out into its own named segment first.
-    split_remote_interior_refs(&mut sg, remote_tracking);
+    add_co_located_remote_empties(&mut sg, remote_tracking);
     // Stacked remotes: a remote whose spine passes through another remote's tip stops there and
     // connects into it, rather than absorbing the lower remote's commits.
     split_stacked_remotes(&mut sg);
@@ -1550,16 +1578,7 @@ fn lane_plan<T: but_core::RefMetadata>(
     // anonymous in-set segment names it), in materialization order like the pass. Every remote
     // name the pass consumes — a rename, an empty root, an ahead region — is tracked, because
     // the target block only runs when nothing already used the target ref.
-    let in_play = |rt: &gix::refs::FullName| {
-        rt.as_bstr()
-            .strip_prefix(b"refs/remotes/".as_ref())
-            .is_some_and(|rest| {
-                symbolic_remotes.iter().any(|r| {
-                    rest.strip_prefix(r.as_bytes())
-                        .is_some_and(|s| s.first() == Some(&b'/'))
-                })
-            })
-    };
+    let in_play = |rt: &gix::refs::FullName| remote_name_in_play(rt, symbolic_remotes);
     let is_meta_stack_branch = |r: &gix::refs::FullName| {
         stack_branches
             .into_iter()
@@ -2034,6 +2053,7 @@ fn add_remote_segments(
     pinned_commits: &HashSet<gix::ObjectId>,
     remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
     pre_lane_names: &mut HashMap<gix::ObjectId, gix::refs::FullName>,
+    claimed_remote_names: &HashSet<gix::refs::FullName>,
 ) {
     // Locals are keyed on the PRE-LANE names: this pass historically ran before the lane shape
     // was applied and saw every build-time name. The LINKS however belong to whichever segment
@@ -2089,21 +2109,13 @@ fn add_remote_segments(
         // configuration implies (target/push remote, or a git-configured tracking branch) — and never
         // when the remote ref is ITSELF a workspace-metadata stack branch: then it lives in the
         // workspace as a stack, its commits are the user's own, not an upstream.
-        let remote_name_in_play = remote_ref
-            .as_bstr()
-            .strip_prefix(b"refs/remotes/")
-            .is_some_and(|rest| {
-                symbolic_remotes.iter().any(|r| {
-                    rest.strip_prefix(r.as_bytes())
-                        .is_some_and(|s| s.first() == Some(&b'/'))
-                })
-            });
+        let in_play = remote_name_in_play(&remote_ref, symbolic_remotes);
         let is_metadata_stack_branch = stack_branches
             .into_iter()
             .flatten()
             .flatten()
             .any(|b| *b == remote_ref);
-        if !remote_name_in_play || is_metadata_stack_branch {
+        if !in_play || is_metadata_stack_branch {
             continue;
         }
         segment_ahead_region(
@@ -2117,6 +2129,7 @@ fn add_remote_segments(
             remote_tracking,
             Some(local_sidx),
             pinned_commits,
+            claimed_remote_names,
         );
     }
 }
@@ -2146,6 +2159,10 @@ fn segment_ahead_region(
     // region — the projection's `TargetCommit::from_commit` ignores one that sits mid-segment,
     // silently disabling integration checks against it.
     pinned_commits: &HashSet<gix::ObjectId>,
+    // Remote refs some creator will consume as a segment name (tracked roots, untracked
+    // surfacing, the target, explicit tips): an interior remote ref cuts the root run only
+    // when unclaimed — a claimed one stays absorbed until the stacked-remote pass repoints it.
+    claimed_remote_names: &HashSet<gix::refs::FullName>,
 ) {
     // Commits the remote is ahead by: ancestors of the tip that stop at the in-set boundary.
     let mut ahead_set: HashSet<gix::ObjectId> = HashSet::new();
@@ -2185,6 +2202,32 @@ fn segment_ahead_region(
                         .any(|&k| cg.first_parent(k) != Some(c) && ahead_set.contains(&k))
             }
     };
+
+    // An UNCLAIMED remote-branch ref riding a non-boundary commit of a remote-named root's run
+    // cuts it at creation: the commit starts its own segment named by that ref (formerly
+    // `split_remote_interior_refs`'s post-hoc surgery).
+    let root_is_remote =
+        remote_ref.is_some_and(|r| r.as_ref().category() == Some(Category::RemoteBranch));
+    let mut interior_cuts: HashMap<gix::ObjectId, gix::refs::FullName> = HashMap::new();
+    if root_is_remote {
+        let mut id = cg
+            .first_parent(remote_tip)
+            .filter(|p| ahead_set.contains(p));
+        while let Some(c) = id {
+            if is_boundary(c) {
+                break;
+            }
+            if let Some(r) = cg.refs_at(c).into_iter().find(|r| {
+                r.as_ref().category() == Some(Category::RemoteBranch)
+                    && !claimed_remote_names.contains(r)
+                    && segment_by_ref(sg, r).is_none()
+            }) {
+                interior_cuts.insert(c, r);
+            }
+            id = cg.first_parent(c).filter(|p| ahead_set.contains(p));
+        }
+    }
+    let is_boundary = |c: gix::ObjectId| is_boundary(c) || interior_cuts.contains_key(&c);
 
     let mut tips: Vec<gix::ObjectId> = ahead_set
         .iter()
@@ -2231,11 +2274,14 @@ fn segment_ahead_region(
                 it.next().filter(|_| it.next().is_none())
             })
         };
-        // Interior segments are named by the unique plain local branch at their boundary,
-        // like the local graph's ref-driven segmentation; ambiguity keeps them anonymous.
+        // Interior segments are named by the cutting remote ref, else by the unique plain local
+        // branch at their boundary, like the local graph's ref-driven segmentation; ambiguity
+        // keeps them anonymous.
         let interior_name = || {
-            let mut it = cg.refs_at(tip).into_iter().filter(is_plain_local_branch);
-            it.next().filter(|_| it.next().is_none())
+            interior_cuts.get(&tip).cloned().or_else(|| {
+                let mut it = cg.refs_at(tip).into_iter().filter(is_plain_local_branch);
+                it.next().filter(|_| it.next().is_none())
+            })
         };
         let ref_info = if is_root {
             root_name().map(|ref_name| RefInfo {
@@ -2271,6 +2317,11 @@ fn segment_ahead_region(
             sg.node_mut(local_sidx)
                 .expect("present")
                 .remote_tracking_branch_segment_id = Some(sidx);
+        }
+        // A cut segment is remote-named: link it to its tracking local like every remote creator.
+        if let Some(cut_ref) = interior_cuts.get(&tip) {
+            let cut_ref = cut_ref.clone();
+            link_remote_to_local(sg, sidx, &cut_ref, remote_tracking);
         }
     }
 
@@ -2379,10 +2430,11 @@ fn add_untracked_remote_segments(
     }
 }
 
-/// Split a remote segment at any INTERIOR commit carrying its own remote branch ref. When a stacked
-/// remote (`origin/split-segment`) sits inside a tracked remote's ahead-run (`origin/main`), the lower
-/// part becomes a new segment named by that ref, connected from above. Repeats down the chain.
-fn split_remote_interior_refs(
+/// Several remote refs can share ONE commit (e.g. `origin/A`+`origin/B`+`origin/C` after squash
+/// merges rewrote their locals) — the first named the commit-holding remote segment; every other
+/// becomes an EMPTY segment pointing at it, so each remote ref resolves to a segment. A pure
+/// creator over final names: adds empties + links, mutates nothing existing.
+fn add_co_located_remote_empties(
     sg: &mut SegmentGraph,
     remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
 ) {
@@ -2391,59 +2443,6 @@ fn split_remote_interior_refs(
             .and_then(|s| s.ref_info.as_ref())
             .is_some_and(|ri| ri.ref_name.as_ref().category() == Some(Category::RemoteBranch))
     };
-    let mut work: Vec<SegmentIndex> = sg.node_indices().filter(|&s| is_remote(sg, s)).collect();
-    while let Some(sidx) = work.pop() {
-        let commits = sg.node(sidx).map(|s| s.commits.clone()).unwrap_or_default();
-        let cut = commits.iter().enumerate().skip(1).find_map(|(i, c)| {
-            c.refs
-                .iter()
-                .find(|ri| {
-                    ri.ref_name.as_ref().category() == Some(Category::RemoteBranch)
-                        // A ref that already names a segment is handled by `split_stacked_remotes`
-                        // (re-point into it); only create a segment for one that has none yet.
-                        && segment_by_ref(sg, &ri.ref_name).is_none()
-                })
-                .map(|ri| (i, c.id, ri.ref_name.clone()))
-        });
-        let Some((i, cut_id, ref_name)) = cut else {
-            continue;
-        };
-        let lower = sg.node_mut(sidx).expect("present").commits.split_off(i);
-        let moved = std::mem::take(&mut sg.node_mut(sidx).expect("present").connections);
-        let new = sg.add_node(Segment {
-            id: 0,
-            generation: 0,
-            ref_info: Some(RefInfo {
-                ref_name,
-                commit_id: Some(cut_id),
-                worktree: None,
-            }),
-            remote_tracking_ref_name: None,
-            sibling_segment_id: None,
-            remote_tracking_branch_segment_id: None,
-            commits: lower,
-            metadata: None,
-            connections: moved,
-        });
-        sg.node_mut(new).expect("just added").id = new;
-        let new_ref = sg
-            .node(new)
-            .and_then(|seg| seg.ref_info.as_ref())
-            .map(|ri| ri.ref_name.clone());
-        if let Some(new_ref) = new_ref {
-            link_remote_to_local(sg, new, &new_ref, remote_tracking);
-        }
-        let src_last = sg.node(sidx).and_then(|s| s.commits.last().map(|c| c.id));
-        sg.add_edge(
-            sidx,
-            Connection::new(new, None, src_last, None, Some(cut_id)),
-        );
-        // The new lower segment may itself carry further interior remote refs.
-        work.push(new);
-    }
-    // Several remote refs can share ONE commit (e.g. `origin/A`+`origin/B`+`origin/C` after squash
-    // merges rewrote their locals) — the first named the commit-holding segment above; every other
-    // becomes an EMPTY segment pointing at it, so each remote ref resolves to a segment.
     for sidx in sg.node_indices().collect::<Vec<_>>() {
         if !is_remote(sg, sidx) {
             continue;
@@ -2511,6 +2510,11 @@ fn split_stacked_remotes(sg: &mut SegmentGraph) {
                 .map(|&t| (i, c.id, t))
         });
         if let Some((i, cut_id, target_sidx)) = cut {
+            if noop_assert("stacked") {
+                panic!(
+                    "NOOP_VIOLATION split_stacked_remotes: cut at {cut_id} into {target_sidx:?}"
+                );
+            }
             let s = sg.node_mut(sidx).expect("present");
             s.commits.truncate(i);
             s.connections.clear();
@@ -3087,7 +3091,15 @@ fn insert_empty_chain_above(
 
 /// Re-normalize each connection's endpoints against the final segments (src = source's last commit,
 /// dst = target's first), matching what `check_edge` validates.
+/// Assert-mode gate for the transitional repair passes: `BUT_GRAPH_NOOP_ASSERT=1` arms all,
+/// a keyword (`interior`/`stacked`/`normalize`) arms one.
+fn noop_assert(pass: &str) -> bool {
+    std::env::var("BUT_GRAPH_NOOP_ASSERT").is_ok_and(|v| v == "1" || v.contains(pass))
+}
+
 fn normalize_connections(sg: &mut SegmentGraph) {
+    let census = noop_assert("normalize");
+    let mut violations: Vec<String> = Vec::new();
     let mut updates: Vec<(SegmentIndex, usize, Connection)> = Vec::new();
     for src in sg.node_indices().collect::<Vec<_>>() {
         let conns = sg
@@ -3096,8 +3108,24 @@ fn normalize_connections(sg: &mut SegmentGraph) {
             .unwrap_or_default();
         for (i, c) in conns.into_iter().enumerate() {
             let target = c.target;
-            updates.push((src, i, c.adjusted_for(src, target, sg)));
+            let adj = c.adjusted_for(src, target, sg);
+            if adj != c && census {
+                let class = if adj.src_id != c.src_id || adj.dst_id != c.dst_id {
+                    "id"
+                } else {
+                    "idx"
+                };
+                let src_name = sg.node(src).and_then(|s| s.ref_info.as_ref());
+                let dst_name = sg.node(target).and_then(|s| s.ref_info.as_ref());
+                violations.push(format!(
+                    "NOOP_VIOLATION normalize_connections [{class}]: {src}{src_name:?} -> {target}{dst_name:?} was {c:?} now {adj:?}"
+                ));
+            }
+            updates.push((src, i, adj));
         }
+    }
+    if !violations.is_empty() {
+        panic!("{}", violations.join("\n"));
     }
     for (src, i, adj) in updates {
         if let Some(s) = sg.node_mut(src) {
@@ -3204,6 +3232,20 @@ fn is_plain_local_branch(rn: &gix::refs::FullName) -> bool {
     // Only the workspace ref itself is special; other `gitbutler/*` refs (e.g. `gitbutler/target`)
     // name segments like any branch, matching the walk.
     rn.category() == Some(Category::LocalBranch) && !but_core::is_workspace_ref_name(rn)
+}
+
+/// Is `remote_ref` on a remote the workspace configuration implies (target/push remote, or a
+/// git-configured tracking branch)? Only such remotes' ahead regions are traversed.
+fn remote_name_in_play(remote_ref: &gix::refs::FullName, symbolic_remotes: &[String]) -> bool {
+    remote_ref
+        .as_bstr()
+        .strip_prefix(b"refs/remotes/".as_ref())
+        .is_some_and(|rest| {
+            symbolic_remotes.iter().any(|r| {
+                rest.strip_prefix(r.as_bytes())
+                    .is_some_and(|s| s.first() == Some(&b'/'))
+            })
+        })
 }
 
 /// The segment metadata for a ref: `Branch` for a tracked branch, `Workspace` for the workspace ref,

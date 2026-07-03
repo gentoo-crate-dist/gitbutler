@@ -4708,21 +4708,21 @@ fn two_dependent_branches_rebased_with_remotes_squash_merge_remote_ambiguous() -
     │   └── ·1109eb2 (⌂|🏘|0001)
     │       └── 📙►:1[1]:D <> origin/D →:4:
     │           └── ·624e118 (⌂|🏘|0101)
-    │               └── ►:2[2]:main <> origin/main →:5:
+    │               └── ►:2[2]:main <> origin/main →:6:
     │                   └── ·0b6b861 (⌂|🏘|✓|0111)
     │                       └── ►:3[3]:anon:
     │                           └── 🏁·281456a (⌂|🏘|✓|1111)
     ├── ►:4[0]:origin/D →:1:
     │   └── 🟣3045ea6 (0x0|1000)
-    │       └── ►:6[1]:origin/A
+    │       └── ►:5[1]:origin/A
     │           └── 🟣1818c17 (0x0|1000)
     │               └── →:3:
-    ├── ►:5[0]:origin/main →:2:
-    │   └── →:2: (main →:5:)
+    ├── ►:6[0]:origin/main →:2:
+    │   └── →:2: (main →:6:)
     ├── ►:7[0]:origin/B
-    │   └── →:6: (origin/A)
+    │   └── →:5: (origin/A)
     └── ►:8[0]:origin/C
-        └── →:6: (origin/A)
+        └── →:5: (origin/A)
     ");
 
     let ambiguous_remote_tip = repo.rev_parse_single("origin/A")?.detach();
@@ -4787,21 +4787,21 @@ fn two_dependent_branches_rebased_with_remotes_squash_merge_remote() -> anyhow::
     │           ├── ·353471f (⌂|🏘|0101)
     │           ├── ·8a4b945 (⌂|🏘|0101)
     │           └── ·e0bd0a7 (⌂|🏘|0101)
-    │               └── ►:2[2]:main <> origin/main →:5:
+    │               └── ►:2[2]:main <> origin/main →:8:
     │                   └── ·0b6b861 (⌂|🏘|✓|0111)
     │                       └── ►:3[4]:anon:
     │                           └── 🏁·281456a (⌂|🏘|✓|1111)
     ├── ►:4[0]:origin/D →:1:
     │   └── 🟣bbd4ff6 (0x0|1000)
-    │       └── ►:6[1]:origin/C
+    │       └── ►:5[1]:origin/C
     │           └── 🟣e5f5a87 (0x0|1000)
-    │               └── ►:7[2]:origin/B
+    │               └── ►:6[2]:origin/B
     │                   └── 🟣da597e8 (0x0|1000)
-    │                       └── ►:8[3]:origin/A
+    │                       └── ►:7[3]:origin/A
     │                           └── 🟣1818c17 (0x0|1000)
     │                               └── →:3:
-    └── ►:5[0]:origin/main →:2:
-        └── →:2: (main →:5:)
+    └── ►:8[0]:origin/main →:2:
+        └── →:2: (main →:8:)
     ");
 
     // We let each remote on the path down own a commit so we only see one remote commit here,
