@@ -1023,13 +1023,9 @@ impl Graph {
             for tip in &self.traversal_tips {
                 self.check_traversal_tip_points_to_first_commit(tip)?;
             }
-            // Builder invariants — a RAW traversal graph legitimately violates them (refs are
-            // kept everywhere; naming/cleanup are builder passes).
-            if !self.options.raw_traversal {
-                self.check_ref_names_unique_and_unannotated()?;
-                self.check_first_commits_unique()?;
-                self.check_remote_links()?;
-            }
+            self.check_ref_names_unique_and_unannotated()?;
+            self.check_first_commits_unique()?;
+            self.check_remote_links()?;
         }
         for edge in self.inner.edge_references() {
             Self::check_edge(&self.inner, edge, false)?;
@@ -1085,11 +1081,9 @@ impl Graph {
                     .iter()
                     .filter_map(|tip| self.check_traversal_tip_points_to_first_commit(tip).err()),
             );
-            if !self.options.raw_traversal {
-                out.extend(self.check_ref_names_unique_and_unannotated().err());
-                out.extend(self.check_first_commits_unique().err());
-                out.extend(self.check_remote_links().err());
-            }
+            out.extend(self.check_ref_names_unique_and_unannotated().err());
+            out.extend(self.check_first_commits_unique().err());
+            out.extend(self.check_remote_links().err());
         }
         out.extend(
             self.inner

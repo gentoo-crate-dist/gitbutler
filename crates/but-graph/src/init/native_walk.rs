@@ -1,8 +1,7 @@
-//! The NATIVE walker: the raw traversal accumulating a [`CommitGraph`](crate::CommitGraph)
-//! directly — no segment minting. Developed beside the legacy raw walk and held to
-//! field-exact equality via [`CommitGraph::diff_against`](crate::CommitGraph::diff_against)
-//! (per-commit refs compare as sorted sets: ref ORDER is canonicalized here, see
-//! native-walker-design.md).
+//! The walker: the traversal accumulating a [`CommitGraph`](crate::CommitGraph) directly — no
+//! segment minting. Developed beside the legacy raw walk (S1) and held to field-exact equality
+//! with its flattening across the whole corpus before that walk was deleted; per-commit ref
+//! ORDER is canonicalized (sorted by name).
 //!
 //! Fidelity strategy: everything order- and limit-relevant is REUSED (Queue, Limit, Goals,
 //! `initial_tips_*`, `find`), and naming/metadata decisions delegate to
@@ -18,25 +17,10 @@ use gix::reference::Category;
 use super::{
     InitialTips, Options, Tip, TipRole,
     overlay::{OverlayMetadata, OverlayRepo},
-    types::{Goals, Limit, Queue, QueueItemT},
+    types::{Goals, Instruction, Limit, Queue, QueueItem},
     walk::{RemoteQueueOutcome, WorktreeByBranch, branch_segment_from_name_and_meta, find},
 };
 use crate::{Commit, CommitFlags, Segment};
-
-/// The per-item payload of the native queue: which stored commit queued this one (edges are
-/// recorded at the PARENT's dequeue, so pruned items leave no edge), and which seed-table entry
-/// it belongs to (initial tips and remote tips; used for the initial sort, workspace-ownership
-/// shuffles, and remote dedupe).
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct NativeInstr {
-    pub queued_by: Option<gix::ObjectId>,
-    pub seed: Option<usize>,
-    /// Queued as one of ≥2 parents: starts a new segment (`Instruction::ConnectNewSegment`).
-    pub new_segment: bool,
-}
-
-type NativeQueue = Queue<NativeInstr>;
-type NativeItem = QueueItemT<NativeInstr>;
 
 /// What the native traversal produces; [`CommitGraph`](crate::CommitGraph) assembly input.
 pub(crate) struct NativeOutcome {
@@ -173,7 +157,7 @@ impl Segs {
     /// The segment a queue item collects into — seeds into their seed segment, parents into the
     /// queuing commit's CURRENT segment (splits and swaps are picked up live, which is what the
     /// walk's queue-rewriting on split achieves).
-    fn landing(&self, instr: &NativeInstr, seed_seg: &[usize]) -> Option<usize> {
+    fn landing(&self, instr: &Instruction, seed_seg: &[usize]) -> Option<usize> {
         instr
             .seed
             .map(|ix| seed_seg[ix])
@@ -219,7 +203,6 @@ pub(crate) fn traverse<T: RefMetadata>(
         commits_limit_hint: limit,
         commits_limit_recharge_location: mut max_commits_recharge_location,
         hard_limit,
-        raw_traversal: _,
     } = options;
     let max_limit = Limit::new(limit);
     if ref_name
@@ -260,7 +243,7 @@ pub(crate) fn traverse<T: RefMetadata>(
 
     let mut store = Store::default();
     let mut seen = gix::hashtable::HashSet::default();
-    let mut next: NativeQueue = Queue::new_with_limit(hard_limit);
+    let mut next: Queue = Queue::new_with_limit(hard_limit);
     let mut seeds: Vec<Segment> = Vec::new();
     let mut segs = Segs::default();
     let mut seed_seg: Vec<usize> = Vec::new();
@@ -545,7 +528,7 @@ pub(crate) fn traverse<T: RefMetadata>(
 /// Native `queue_parents`: identical queue semantics; the payload carries the queuing commit.
 #[allow(clippy::too_many_arguments)]
 fn queue_parents_native(
-    next: &mut NativeQueue,
+    next: &mut Queue,
     parent_ids: &[gix::ObjectId],
     flags: CommitFlags,
     current: gix::ObjectId,
@@ -566,7 +549,7 @@ fn queue_parents_native(
     }
     let mut queue_is_exhausted = false;
     if parent_ids.len() > 1 {
-        let instr = NativeInstr {
+        let instr = Instruction {
             queued_by: Some(current),
             seed: None,
             new_segment: true,
@@ -578,7 +561,7 @@ fn queue_parents_native(
                 next.push_back_even_if_exhausted((info, flags, instr, limit_per_parent));
         }
     } else if !parent_ids.is_empty() {
-        let instr = NativeInstr {
+        let instr = Instruction {
             queued_by: Some(current),
             seed: None,
             new_segment: false,
@@ -604,7 +587,7 @@ fn ep_first_commit_flags(
 
 /// Native `prune_integrated_tips`: queue logic identical; the entrypoint-integrated check gets
 /// the entrypoint segment's first-commit flags from [`ep_first_commit_flags`].
-fn prune_integrated_tips_native(next: &mut NativeQueue, ep_first_flags: Option<CommitFlags>) {
+fn prune_integrated_tips_native(next: &mut Queue, ep_first_flags: Option<CommitFlags>) {
     if next.is_exhausted() {
         return;
     }
@@ -624,7 +607,7 @@ fn prune_integrated_tips_native(next: &mut NativeQueue, ep_first_flags: Option<C
 /// throwaway seed records (created by the SAME `branch_segment_from_name_and_meta`).
 #[allow(clippy::too_many_arguments)]
 fn queue_initial_tips_native<T: RefMetadata>(
-    next: &mut NativeQueue,
+    next: &mut Queue,
     seeds: &mut Vec<Segment>,
     ep_seed: &mut Option<usize>,
     initial_tips: &InitialTips,
@@ -652,7 +635,7 @@ fn queue_initial_tips_native<T: RefMetadata>(
 
     #[allow(clippy::too_many_arguments)]
     fn queue_pending(
-        next: &mut NativeQueue,
+        next: &mut Queue,
         seeds: &[Segment],
         pending: PendingNative,
         local_goal: CommitFlags,
@@ -663,10 +646,10 @@ fn queue_initial_tips_native<T: RefMetadata>(
     ) -> anyhow::Result<()> {
         let _ = seeds;
         let tip_info = find(commit_graph, repo.for_find_only(), pending.id, buf)?;
-        let item: NativeItem = (
+        let item: QueueItem = (
             tip_info,
             CommitFlags::Integrated,
-            NativeInstr {
+            Instruction {
                 queued_by: None,
                 seed: Some(pending.seed),
                 new_segment: false,
@@ -823,10 +806,10 @@ fn queue_initial_tips_native<T: RefMetadata>(
             ),
         };
         let tip_info = find(commit_graph, repo.for_find_only(), tip.id, buf)?;
-        let item: NativeItem = (
+        let item: QueueItem = (
             tip_info,
             flags,
-            NativeInstr {
+            Instruction {
                 queued_by: None,
                 seed: Some(seed),
                 new_segment: false,
@@ -900,7 +883,7 @@ fn queue_initial_tips_native<T: RefMetadata>(
 /// Native port of `prioritize_initial_tips_and_assure_ws_commit_ownership`, running the same
 /// sort and swap logic against the seed table.
 fn prioritize_and_assure_ws_ownership_native<T: RefMetadata>(
-    next: &mut NativeQueue,
+    next: &mut Queue,
     seeds: &mut Vec<Segment>,
     ep_seed: &mut Option<usize>,
     (ws_tips, repo, meta): (
@@ -999,7 +982,7 @@ fn prioritize_and_assure_ws_ownership_native<T: RefMetadata>(
             _ = next.push_front_exhausted((
                 info,
                 flags,
-                NativeInstr {
+                Instruction {
                     queued_by: None,
                     seed: Some(seed),
                     new_segment: false,
@@ -1019,7 +1002,7 @@ fn try_queue_remote_tracking_branches_native<T: RefMetadata>(
     refs: &[gix::refs::FullName],
     seeds: &mut Vec<Segment>,
     ep_seed: &mut Option<usize>,
-    next: &NativeQueue,
+    next: &Queue,
     target_symbolic_remote_names: &[String],
     configured_remote_tracking_branches: &std::collections::BTreeSet<gix::refs::FullName>,
     target_refs: &[gix::refs::FullName],
@@ -1031,7 +1014,7 @@ fn try_queue_remote_tracking_branches_native<T: RefMetadata>(
     commit_graph: Option<&gix::commitgraph::Graph>,
     objects: &impl gix::objs::Find,
     buf: &mut Vec<u8>,
-) -> anyhow::Result<RemoteQueueOutcome<NativeInstr>> {
+) -> anyhow::Result<RemoteQueueOutcome> {
     let mut goal_flags = CommitFlags::empty();
     let mut limit_flags = CommitFlags::empty();
     let mut queue = Vec::new();
@@ -1083,7 +1066,7 @@ fn try_queue_remote_tracking_branches_native<T: RefMetadata>(
         queue.push((
             remote_tip_info,
             self_flags,
-            NativeInstr {
+            Instruction {
                 queued_by: None,
                 seed: Some(seed),
                 new_segment: false,

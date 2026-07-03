@@ -243,103 +243,6 @@ impl CommitGraph {
             .is_none_or(|c| c.contains(&(child, parent)))
     }
 
-    /// Compare against `other` field-by-field, returning one human-readable line per
-    /// difference. The S1 native-walker oracle: the traversal's direct accumulation must equal
-    /// the segment-graph flattening exactly, including per-commit ref ORDER (it surfaces in
-    /// snapshots) and flags (goal bits included).
-    pub fn diff_against(&self, other: &CommitGraph) -> Vec<String> {
-        let mut out = Vec::new();
-        let ids: std::collections::BTreeSet<_> = self
-            .nodes
-            .iter()
-            .map(|n| n.commit.id)
-            .chain(other.nodes.iter().map(|n| n.commit.id))
-            .collect();
-        for id in ids {
-            match (self.node(id), other.node(id)) {
-                (Some(_), None) => out.push(format!("{id}: only in SELF")),
-                (None, Some(_)) => out.push(format!("{id}: only in OTHER")),
-                (Some(a), Some(b)) => {
-                    let (a, b) = (&a.commit, &b.commit);
-                    if a.parent_ids != b.parent_ids {
-                        out.push(format!(
-                            "{id}: parents {:?} != {:?}",
-                            a.parent_ids, b.parent_ids
-                        ));
-                    }
-                    if a.flags != b.flags {
-                        out.push(format!(
-                            "{id}: flags {} != {}",
-                            a.flags.debug_string(None),
-                            b.flags.debug_string(None)
-                        ));
-                    }
-                    let (mut ra, mut rb): (Vec<_>, Vec<_>) = (
-                        a.refs.iter().map(|r| r.ref_name.to_string()).collect(),
-                        b.refs.iter().map(|r| r.ref_name.to_string()).collect(),
-                    );
-                    // Ref ORDER is canonicalized by the native walker; compare as sets.
-                    ra.sort();
-                    rb.sort();
-                    if ra != rb {
-                        out.push(format!("{id}: refs {ra:?} != {rb:?}"));
-                    }
-                }
-                (None, None) => unreachable!(),
-            }
-        }
-        if self.entrypoint != other.entrypoint {
-            out.push(format!(
-                "entrypoint {:?} != {:?}",
-                self.entrypoint, other.entrypoint
-            ));
-        }
-        if self.entrypoint_ref != other.entrypoint_ref {
-            out.push(format!(
-                "entrypoint_ref {:?} != {:?}",
-                self.entrypoint_ref.as_ref().map(|r| r.as_bstr()),
-                other.entrypoint_ref.as_ref().map(|r| r.as_bstr())
-            ));
-        }
-        if self.connected != other.connected {
-            let (a, b) = (
-                self.connected.clone().unwrap_or_default(),
-                other.connected.clone().unwrap_or_default(),
-            );
-            for pair in a.difference(&b) {
-                out.push(format!("connected only in SELF: {pair:?}"));
-            }
-            for pair in b.difference(&a) {
-                out.push(format!("connected only in OTHER: {pair:?}"));
-            }
-        }
-        if self.hard_limit_hit != other.hard_limit_hit {
-            out.push(format!(
-                "hard_limit_hit {} != {}",
-                self.hard_limit_hit, other.hard_limit_hit
-            ));
-        }
-        if format!("{:?}", self.traversal_tips) != format!("{:?}", other.traversal_tips) {
-            out.push(format!(
-                "traversal_tips {:?} != {:?}",
-                self.traversal_tips, other.traversal_tips
-            ));
-        }
-        if self.explicit_tips != other.explicit_tips {
-            out.push(format!(
-                "explicit_tips {} != {}",
-                self.explicit_tips, other.explicit_tips
-            ));
-        }
-        if self.managed_ws_commits != other.managed_ws_commits {
-            out.push(format!(
-                "managed_ws_commits {:?} != {:?}",
-                self.managed_ws_commits, other.managed_ws_commits
-            ));
-        }
-        out
-    }
-
     /// Assemble from the NATIVE traversal outcome (see `init::native_walk`).
     pub(crate) fn from_native_outcome(o: crate::init::native_walk::NativeOutcome) -> Self {
         let mut cg = CommitGraph::from_commits(o.commits, o.entrypoint);
@@ -370,42 +273,13 @@ impl CommitGraph {
                 ref_name.clone(),
                 meta,
                 project_meta.clone(),
-                crate::init::Options {
-                    raw_traversal: true,
-                    ..options.clone()
-                },
-                overlay.clone(),
-            )?);
-        // Transitional oracle: BUT_GRAPH_NATIVE=assert also runs the legacy raw walk and panics
-        // with precise diffs if its flattening disagrees with the native walker.
-        if std::env::var("BUT_GRAPH_NATIVE").ok().as_deref() == Some("assert") {
-            let raw = crate::Graph::from_commit_traversal_with_overlay(
-                repo,
-                tip,
-                ref_name,
-                meta,
-                project_meta,
-                crate::init::Options {
-                    raw_traversal: true,
-                    ..options
-                },
+                options,
                 overlay,
-            )?;
-            let diffs = native.diff_against(&Self::from_segment_graph(&raw));
-            if !diffs.is_empty() {
-                panic!(
-                    "NATIVE_WALK_DIVERGENCE ({} lines):\n{}",
-                    diffs.len(),
-                    diffs.join("\n")
-                );
-            }
-        }
+            )?);
         Ok(native)
     }
 
-    /// Like [`Self::from_walk`], but seeded from explicit `tips` — the REAL
-    /// [`Graph::from_commit_traversal_tips`](crate::Graph::from_commit_traversal_tips) traversal
-    /// with `raw_traversal`, flattened.
+    /// Like [`Self::from_walk`], but seeded from explicit `tips`.
     pub fn from_walk_tips<T: but_core::RefMetadata>(
         repo: &gix::Repository,
         meta: &T,
@@ -420,38 +294,11 @@ impl CommitGraph {
                 tips.clone(),
                 meta,
                 project_meta.clone(),
-                crate::init::Options {
-                    raw_traversal: true,
-                    ..options.clone()
-                },
-                overlay.clone(),
+                options,
+                overlay,
             )?,
         );
         native.explicit_tips = true;
-        // Transitional oracle, like `from_walk`.
-        if std::env::var("BUT_GRAPH_NATIVE").ok().as_deref() == Some("assert") {
-            let raw = crate::Graph::from_commit_traversal_tips_with_overlay(
-                repo,
-                tips,
-                meta,
-                project_meta,
-                crate::init::Options {
-                    raw_traversal: true,
-                    ..options
-                },
-                overlay,
-            )?;
-            let mut cg = Self::from_segment_graph(&raw);
-            cg.explicit_tips = true;
-            let diffs = native.diff_against(&cg);
-            if !diffs.is_empty() {
-                panic!(
-                    "NATIVE_WALK_DIVERGENCE tips ({} lines):\n{}",
-                    diffs.len(),
-                    diffs.join("\n")
-                );
-            }
-        }
         Ok(native)
     }
 

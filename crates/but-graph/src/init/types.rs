@@ -74,7 +74,7 @@ impl Limit {
     ///
     /// `flags` are used to selectively decrement this limit.
     /// Thanks to flag-propagation there can be no runaways.
-    pub fn is_exhausted_or_decrement<I>(&mut self, flags: CommitFlags, next: &Queue<I>) -> bool {
+    pub fn is_exhausted_or_decrement(&mut self, flags: CommitFlags, next: &Queue) -> bool {
         // Keep going if the goal wasn't seen yet, unlimited gas.
         if let Some(maybe_goal) = self.goal_reachable(flags)
             && (maybe_goal.is_empty() || self.set_single_goal_reached_keep_searching(maybe_goal))
@@ -159,7 +159,7 @@ impl Limit {
 }
 
 /// Lifecycle
-impl<I> Queue<I> {
+impl Queue {
     pub fn new_with_limit(limit: Option<usize>) -> Self {
         Queue {
             inner: Default::default(),
@@ -177,8 +177,8 @@ impl<I> Queue<I> {
 /// traversal, the native walker's queued-by record otherwise) so the limit/exhaustion semantics
 /// are shared bit-for-bit.
 #[derive(Debug)]
-pub struct Queue<I = Instruction> {
-    pub inner: VecDeque<QueueItemT<I>>,
+pub struct Queue {
+    pub inner: VecDeque<QueueItem>,
     /// The current number of queued items.
     count: usize,
     /// The maximum number of queuing operations, each representing one commit.
@@ -192,7 +192,7 @@ pub struct Queue<I = Instruction> {
 }
 
 /// Counted queuing
-impl<I> Queue<I> {
+impl Queue {
     /// Sort the queue items so that young commits come first. This way, the traversal goes
     /// back in time continuously, which helps to avoid having too many graph traversals
     /// in disjoint regions happen at the same time.
@@ -210,14 +210,14 @@ impl<I> Queue<I> {
         }
     }
     #[must_use]
-    pub fn push_back_exhausted(&mut self, item: QueueItemT<I>) -> bool {
+    pub fn push_back_exhausted(&mut self, item: QueueItem) -> bool {
         if self.exhausted || self.record_hard_limit_if_exhausted() {
             return true;
         }
         self.push_back_even_if_exhausted(item)
     }
 
-    pub(crate) fn push_back_even_if_exhausted(&mut self, item: QueueItemT<I>) -> bool {
+    pub(crate) fn push_back_even_if_exhausted(&mut self, item: QueueItem) -> bool {
         if self.sorted {
             self.insert_sorted(item);
         } else {
@@ -226,7 +226,7 @@ impl<I> Queue<I> {
         self.is_exhausted_after_increment()
     }
     #[must_use]
-    pub fn push_front_exhausted(&mut self, item: QueueItemT<I>) -> bool {
+    pub fn push_front_exhausted(&mut self, item: QueueItem) -> bool {
         if self.exhausted || self.record_hard_limit_if_exhausted() {
             return true;
         }
@@ -238,7 +238,7 @@ impl<I> Queue<I> {
         self.is_exhausted_after_increment()
     }
 
-    fn insert_sorted(&mut self, item: QueueItemT<I>) {
+    fn insert_sorted(&mut self, item: QueueItem) {
         let index = self
             .inner
             .partition_point(|existing| existing.0.gen_then_time <= item.0.gen_then_time);
@@ -285,14 +285,14 @@ impl<I> Queue<I> {
 }
 
 /// Various other - good to know what we need though.
-impl<I> Queue<I> {
-    pub fn pop_front(&mut self) -> Option<QueueItemT<I>> {
+impl Queue {
+    pub fn pop_front(&mut self) -> Option<QueueItem> {
         self.inner.pop_front()
     }
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut QueueItemT<I>> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut QueueItem> {
         self.inner.iter_mut()
     }
-    pub fn iter(&self) -> impl Iterator<Item = &QueueItemT<I>> {
+    pub fn iter(&self) -> impl Iterator<Item = &QueueItem> {
         self.inner.iter()
     }
 }
@@ -326,52 +326,24 @@ impl Goals {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-pub enum Instruction {
-    /// Contains the segment into which to place this commit.
-    CollectCommit { into: SegmentIndex },
-    /// This is the first commit in a new segment which is below `parent_above` and which should be placed
-    /// at the last commit (at the time) via `at_commit`.
-    ConnectNewSegment {
-        parent_above: SegmentIndex,
-        /// Deliberately not [`CommitIndex`]/`usize`: this instruction is stored in
-        /// the traversal queue, and widening it increases the hot `QueueItem` size.
-        ///
-        /// This limit should never be reached either unless there is a repository with a trunk of 4.3 billion commits.
-        at_commit: u32,
-    },
+/// The traversal queue's per-item payload: which stored commit queued this one (edges are
+/// recorded at the PARENT's dequeue, so pruned items leave no edge), which seed-table entry it
+/// belongs to (initial tips and remote tips; used for the initial sort, workspace-ownership
+/// shuffles, and remote dedupe), and whether it starts a new segment.
+#[derive(Debug, Clone, Copy)]
+pub struct Instruction {
+    pub queued_by: Option<gix::ObjectId>,
+    pub seed: Option<usize>,
+    /// Queued as one of ≥2 parents of a merge commit.
+    pub new_segment: bool,
 }
 
-impl Instruction {
-    /// Returns any segment index we may be referring to.
-    pub fn segment_idx(&self) -> SegmentIndex {
-        match self {
-            Instruction::CollectCommit { into } => *into,
-            Instruction::ConnectNewSegment { parent_above, .. } => *parent_above,
-        }
-    }
-
-    pub fn with_replaced_sidx(self, sidx: SegmentIndex) -> Self {
-        match self {
-            Instruction::CollectCommit { into: _ } => Instruction::CollectCommit { into: sidx },
-            Instruction::ConnectNewSegment {
-                parent_above: _,
-                at_commit,
-            } => Instruction::ConnectNewSegment {
-                parent_above: sidx,
-                at_commit,
-            },
-        }
-    }
-}
-
-/// A queue item generic over the traversal's per-item payload.
-pub type QueueItemT<I> = (super::walk::TraverseInfo, CommitFlags, I, Limit);
+/// One queued traversal step.
+pub type QueueItem = (super::walk::TraverseInfo, CommitFlags, Instruction, Limit);
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EdgeOwned {
     pub source: SegmentIndex,
-    pub target: SegmentIndex,
     pub weight: Connection,
 }
 
@@ -379,7 +351,6 @@ impl From<crate::segment_graph::EdgeRef<'_>> for EdgeOwned {
     fn from(e: crate::segment_graph::EdgeRef<'_>) -> Self {
         EdgeOwned {
             source: e.source(),
-            target: e.target(),
             weight: *e.weight(),
         }
     }

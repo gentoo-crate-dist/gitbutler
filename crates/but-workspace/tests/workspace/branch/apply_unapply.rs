@@ -4756,7 +4756,6 @@ mod utils {
             commits_limit_recharge_location: vec![],
             hard_limit: None,
             extra_target_commit_id: None,
-            raw_traversal: false,
         }
     }
 
