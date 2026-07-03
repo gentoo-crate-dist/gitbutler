@@ -1290,13 +1290,13 @@ impl Graph {
         let mut seen: std::collections::HashMap<&gix::refs::FullNameRef, SegmentIndex> =
             std::collections::HashMap::new();
         for sidx in self.inner.node_indices() {
-            if let Some(name) = self.inner[sidx].ref_name() {
-                if let Some(prev) = seen.insert(name, sidx) {
-                    bail!(
-                        "ref {name} names two segments: {prev:?} and {sidx:?}",
-                        name = name.as_bstr()
-                    );
-                }
+            if let Some(name) = self.inner[sidx].ref_name()
+                && let Some(prev) = seen.insert(name, sidx)
+            {
+                bail!(
+                    "ref {name} names two segments: {prev:?} and {sidx:?}",
+                    name = name.as_bstr()
+                );
             }
         }
         for sidx in self.inner.node_indices() {
@@ -1328,12 +1328,9 @@ impl Graph {
                 .first()
                 .filter(|c| c.flags.contains(crate::CommitFlags::NotInRemote))
                 .map(|c| c.id)
+                && let Some(prev) = seen.insert(first, sidx)
             {
-                if let Some(prev) = seen.insert(first, sidx) {
-                    bail!(
-                        "commit {first} is the first commit of two segments: {prev:?} and {sidx:?}"
-                    );
-                }
+                bail!("commit {first} is the first commit of two segments: {prev:?} and {sidx:?}");
             }
         }
         Ok(())

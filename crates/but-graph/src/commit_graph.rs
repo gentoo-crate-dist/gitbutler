@@ -162,10 +162,9 @@ impl CommitGraph {
                 // ref belongs on the commit it points at — the segment's first (tip) commit.
                 if i == 0
                     && let Some(ri) = &s.ref_info
+                    && !c.refs.iter().any(|r| r.ref_name == ri.ref_name)
                 {
-                    if !c.refs.iter().any(|r| r.ref_name == ri.ref_name) {
-                        c.refs.insert(0, ri.clone());
-                    }
+                    c.refs.insert(0, ri.clone());
                 }
                 commits.push(c);
             }
@@ -275,10 +274,13 @@ impl CommitGraph {
                             b.flags.debug_string(None)
                         ));
                     }
-                    let (ra, rb): (Vec<_>, Vec<_>) = (
+                    let (mut ra, mut rb): (Vec<_>, Vec<_>) = (
                         a.refs.iter().map(|r| r.ref_name.to_string()).collect(),
                         b.refs.iter().map(|r| r.ref_name.to_string()).collect(),
                     );
+                    // Ref ORDER is canonicalized by the native walker; compare as sets.
+                    ra.sort();
+                    rb.sort();
                     if ra != rb {
                         out.push(format!("{id}: refs {ra:?} != {rb:?}"));
                     }
@@ -338,6 +340,16 @@ impl CommitGraph {
         out
     }
 
+    /// Assemble from the NATIVE traversal outcome (see `init::native_walk`).
+    pub(crate) fn from_native_outcome(o: crate::init::native_walk::NativeOutcome) -> Self {
+        let mut cg = CommitGraph::from_commits(o.commits, o.entrypoint);
+        cg.entrypoint_ref = o.entrypoint_ref;
+        cg.set_connected(o.connected);
+        cg.hard_limit_hit = o.hard_limit_hit;
+        cg.traversal_tips = o.tips;
+        cg
+    }
+
     /// Build by running the WALK's real traversal (queue, goals, limits, flag propagation) with
     /// post-processing skipped, flattening the raw traversal segments into commits. This keeps the
     /// battle-tested traversal semantics — extents (limit cuts, integrated stop-early) and flags are
@@ -351,19 +363,44 @@ impl CommitGraph {
         options: crate::init::Options,
         overlay: crate::init::Overlay,
     ) -> anyhow::Result<Self> {
-        let raw = crate::Graph::from_commit_traversal_with_overlay(
-            repo,
-            tip,
-            ref_name,
-            meta,
-            project_meta,
-            crate::init::Options {
-                raw_traversal: true,
-                ..options
-            },
-            overlay,
-        )?;
-        Ok(Self::from_segment_graph(&raw))
+        let native =
+            Self::from_native_outcome(crate::Graph::native_from_commit_traversal_with_overlay(
+                repo,
+                tip,
+                ref_name.clone(),
+                meta,
+                project_meta.clone(),
+                crate::init::Options {
+                    raw_traversal: true,
+                    ..options.clone()
+                },
+                overlay.clone(),
+            )?);
+        // Transitional oracle: BUT_GRAPH_NATIVE=assert also runs the legacy raw walk and panics
+        // with precise diffs if its flattening disagrees with the native walker.
+        if std::env::var("BUT_GRAPH_NATIVE").ok().as_deref() == Some("assert") {
+            let raw = crate::Graph::from_commit_traversal_with_overlay(
+                repo,
+                tip,
+                ref_name,
+                meta,
+                project_meta,
+                crate::init::Options {
+                    raw_traversal: true,
+                    ..options
+                },
+                overlay,
+            )?;
+            let diffs = native.diff_against(&Self::from_segment_graph(&raw));
+            if !diffs.is_empty() {
+                panic!(
+                    "NATIVE_WALK_DIVERGENCE ({} lines):\n{}",
+                    diffs.len(),
+                    diffs.join("\n")
+                );
+            }
+        }
+        Ok(native)
     }
 
     /// Like [`Self::from_walk`], but seeded from explicit `tips` — the REAL
@@ -377,20 +414,45 @@ impl CommitGraph {
         options: crate::init::Options,
         overlay: crate::init::Overlay,
     ) -> anyhow::Result<Self> {
-        let raw = crate::Graph::from_commit_traversal_tips_with_overlay(
-            repo,
-            tips,
-            meta,
-            project_meta,
-            crate::init::Options {
-                raw_traversal: true,
-                ..options
-            },
-            overlay,
-        )?;
-        let mut cg = Self::from_segment_graph(&raw);
-        cg.explicit_tips = true;
-        Ok(cg)
+        let mut native = Self::from_native_outcome(
+            crate::Graph::native_from_commit_traversal_tips_with_overlay(
+                repo,
+                tips.clone(),
+                meta,
+                project_meta.clone(),
+                crate::init::Options {
+                    raw_traversal: true,
+                    ..options.clone()
+                },
+                overlay.clone(),
+            )?,
+        );
+        native.explicit_tips = true;
+        // Transitional oracle, like `from_walk`.
+        if std::env::var("BUT_GRAPH_NATIVE").ok().as_deref() == Some("assert") {
+            let raw = crate::Graph::from_commit_traversal_tips_with_overlay(
+                repo,
+                tips,
+                meta,
+                project_meta,
+                crate::init::Options {
+                    raw_traversal: true,
+                    ..options
+                },
+                overlay,
+            )?;
+            let mut cg = Self::from_segment_graph(&raw);
+            cg.explicit_tips = true;
+            let diffs = native.diff_against(&cg);
+            if !diffs.is_empty() {
+                panic!(
+                    "NATIVE_WALK_DIVERGENCE tips ({} lines):\n{}",
+                    diffs.len(),
+                    diffs.join("\n")
+                );
+            }
+        }
+        Ok(native)
     }
 
     /// Mark `id` as a GitButler-managed workspace commit when its message says so.

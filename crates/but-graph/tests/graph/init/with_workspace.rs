@@ -6654,7 +6654,7 @@ fn shared_target_base_keeps_exact_target_segment_with_inactive_unapplied_branch(
     │           ├── ·4ca0966 (⌂|🏘|01)
     │           └── ·a3b180e (⌂|🏘|01)
     │               └── ►:2[2]:main <> origin/main →:3:
-    │                   ├── ·ce09734 (⌂|🏘|✓|11) ►unapplied, ►base-peer, ►base-peer-1, ►base-peer-2, ►base-peer-3, ►base-peer-4, ►base-peer-5, ►base-peer-6, ►base-peer-7, ►base-peer-8
+    │                   ├── ·ce09734 (⌂|🏘|✓|11) ►base-peer, ►base-peer-1, ►base-peer-2, ►base-peer-3, ►base-peer-4, ►base-peer-5, ►base-peer-6, ►base-peer-7, ►base-peer-8, ►unapplied
     │                   └── 🏁·fafd9d0 (⌂|🏘|✓|11)
     └── ►:3[0]:origin/main →:2:
         └── →:2: (main →:3:)

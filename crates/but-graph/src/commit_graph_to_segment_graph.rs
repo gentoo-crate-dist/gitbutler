@@ -1360,7 +1360,7 @@ fn commit_run(
 /// Enforce the walk's remote↔local invariant after floats: a named remote segment `origin/X` is the
 /// sibling of the local segment named `X`, and that local carries `origin/X` as its remote-tracking ref
 /// + segment. Only repoints when such a distinct local segment exists, so a target ref that lives only
-/// as a commit ref (no local segment of its own) keeps the owning-segment sibling set for it elsewhere.
+///   as a commit ref (no local segment of its own) keeps the owning-segment sibling set for it elsewhere.
 fn reconcile_remote_siblings(
     sg: &mut SegmentGraph,
     remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
@@ -1398,6 +1398,7 @@ fn reconcile_remote_siblings(
     }
 }
 
+#[expect(clippy::too_many_arguments)]
 fn add_remote_segments(
     cg: &CommitGraph,
     sg: &mut SegmentGraph,
@@ -1592,17 +1593,14 @@ fn segment_ahead_region(
                 let mut it = cg
                     .refs_at(remote_tip)
                     .into_iter()
-                    .filter(|r| is_plain_local_branch(r));
+                    .filter(is_plain_local_branch);
                 it.next().filter(|_| it.next().is_none())
             })
         };
         // Interior segments are named by the unique plain local branch at their boundary,
         // like the local graph's ref-driven segmentation; ambiguity keeps them anonymous.
         let interior_name = || {
-            let mut it = cg
-                .refs_at(tip)
-                .into_iter()
-                .filter(|r| is_plain_local_branch(r));
+            let mut it = cg.refs_at(tip).into_iter().filter(is_plain_local_branch);
             it.next().filter(|_| it.next().is_none())
         };
         let sidx = sg.add_node(Segment {
@@ -2071,6 +2069,7 @@ fn segment_by_ref(sg: &SegmentGraph, ref_name: &gix::refs::FullName) -> Option<S
 /// its outside commits as a segment named after the branch: the first-parent run from its tip down to
 /// the first in-workspace commit, connected into the segment owning that commit. That owning segment
 /// gets a sibling link so the projection can display it under the advanced branch's name.
+#[expect(clippy::too_many_arguments)]
 fn add_advanced_outside_branches<T: but_core::RefMetadata>(
     sg: &mut SegmentGraph,
     cg: &CommitGraph,
@@ -2164,6 +2163,7 @@ fn add_advanced_outside_branches<T: but_core::RefMetadata>(
 /// commit was made a boundary. Any branch in a group that does not NAME the anchor is an empty segment
 /// stacked above it, in list order. Groups are threaded top→bottom so the chain interleaves
 /// `ws → [empties] → seg(c1) → [empties] → seg(c2) → … → [empties] → base`.
+#[expect(clippy::too_many_arguments)]
 fn insert_empty_branches(
     sg: &mut SegmentGraph,
     cg: &CommitGraph,
