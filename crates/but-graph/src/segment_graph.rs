@@ -349,18 +349,6 @@ impl SegmentGraph {
         out.into_iter()
     }
 
-    /// Live connections from `source` to `target`, in stored order.
-    pub fn edges_connecting(
-        &self,
-        source: SegmentIndex,
-        target: SegmentIndex,
-    ) -> impl Iterator<Item = EdgeRef<'_>> + '_ {
-        self.edges_directed(source, Direction::Outgoing)
-            .filter(move |e| e.target == target)
-            .collect::<Vec<_>>()
-            .into_iter()
-    }
-
     /// One past the largest segment id ever handed out (tombstoned slots included).
     pub fn node_bound(&self) -> usize {
         self.segments.len()
@@ -374,24 +362,6 @@ impl SegmentGraph {
     /// All live segments mutably, ascending by id.
     pub fn node_weights_mut(&mut self) -> impl Iterator<Item = &mut Segment> + '_ {
         self.segments.iter_mut().filter_map(Option::as_mut)
-    }
-
-    /// Two distinct live segments, mutably.
-    pub fn index_twice_mut(
-        &mut self,
-        a: SegmentIndex,
-        b: SegmentIndex,
-    ) -> (&mut Segment, &mut Segment) {
-        assert_ne!(a, b, "index_twice_mut requires distinct segments");
-        let (lo, hi) = if a < b { (a, b) } else { (b, a) };
-        let (left, right) = self.segments.split_at_mut(hi);
-        let lo_ref = left[lo].as_mut().expect("live segment");
-        let hi_ref = right[0].as_mut().expect("live segment");
-        if a < b {
-            (lo_ref, hi_ref)
-        } else {
-            (hi_ref, lo_ref)
-        }
     }
 }
 

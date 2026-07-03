@@ -866,15 +866,6 @@ impl Graph {
         self.inner.node_weight(sidx)?.sibling_segment(self)
     }
 
-    /// Lookup the segment of `sidx` and then find its remote tracking branch segment, if it has one.
-    pub fn lookup_remote_tracking_branch_segment(&self, sidx: SegmentIndex) -> Option<&Segment> {
-        self.inner.node_weight(
-            self.inner
-                .node_weight(sidx)?
-                .remote_tracking_branch_segment_id?,
-        )
-    }
-
     /// Return all segments which have no other segments *above* them, making them tips.
     ///
     /// Typically, there is only one, but there *can* be multiple technically.

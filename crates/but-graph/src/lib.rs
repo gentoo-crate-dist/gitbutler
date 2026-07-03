@@ -222,11 +222,8 @@ pub use segment_graph::{Connection, Direction, SegmentGraph};
 /// The commit-first graph flattened out of the raw traversal — the substrate every graph build
 /// starts from. See the module docs.
 mod commit_graph;
-pub use commit_graph::{CommitGraph, CommitNode, RestingChain};
+pub use commit_graph::{CommitGraph, CommitNode};
 /// Remote-tracking deduction for the graph builders, plus the historical commit-first display
-/// projection kept for the eventual but-graph/but-rebase unification.
-pub mod commit_graph_projection;
-
 mod commit_graph_to_segment_graph;
 pub use commit_graph_to_segment_graph::{
     graph_from_commit_graph, graph_from_repository, graph_from_repository_tips,

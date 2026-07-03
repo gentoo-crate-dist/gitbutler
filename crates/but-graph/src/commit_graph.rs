@@ -45,18 +45,6 @@ use crate::{Commit, CommitFlags};
 /// An index into a [`CommitGraph`]'s node arena.
 pub type CommitIdx = usize;
 
-/// A run of empty named segments resting above `below` (see
-/// [`CommitGraph::resting_chains`]).
-#[derive(Debug, Clone)]
-pub struct RestingChain {
-    /// The first commit below the run, if any.
-    pub below: Option<gix::ObjectId>,
-    /// The run's ref names, topmost first.
-    pub refs: Vec<gix::refs::FullName>,
-    /// Whether anything feeds the run's head (an incoming connection exists).
-    pub fed: bool,
-}
-
 /// A node in the commit graph: a commit, plus where it sits topologically.
 #[derive(Debug, Clone)]
 pub struct CommitNode {
@@ -86,15 +74,6 @@ pub struct CommitGraph {
     /// [`CommitFlags`](crate::CommitFlags) so it neither perturbs the walk's goal bits nor the
     /// segment fingerprint; used to tell a real managed merge from a ws ref advanced past it.
     managed_ws_commits: HashSet<gix::ObjectId>,
-    /// Chains of refs that REST above a commit through empty spliced segments (an empty branch
-    /// run in a lane, a spine-spliced remote) rather than pointing at it directly — set by
-    /// [`Self::from_segment_graph`]. One entry per maximal empty run.
-    resting_chains: Vec<RestingChain>,
-    /// Commits some empty NAMED segment points at (fed or dangling) — set by
-    /// [`Self::from_segment_graph`]. A merge edge into such a commit must land on its PICK, not
-    /// its ref chain: those refs must stay unreachable from the merge, or upstream-integration
-    /// reachability would classify them as integrated history.
-    merge_bypass_commits: HashSet<gix::ObjectId>,
     /// `(child, parent)` pairs the traversal actually CONNECTED, when built
     /// [from the walk](Self::from_walk). A commit's raw `parent_ids` can point past a traversal
     /// cut (limit, integrated stop-early); connectivity accessors must not rejoin what the walk
@@ -151,8 +130,6 @@ impl CommitGraph {
             entrypoint,
             entrypoint_ref: None,
             managed_ws_commits: HashSet::new(),
-            resting_chains: Vec::new(),
-            merge_bypass_commits: HashSet::new(),
             connected: None,
             hard_limit_hit: false,
             traversal_tips: Vec::new(),
@@ -160,157 +137,6 @@ impl CommitGraph {
         };
         graph.recompute_generations();
         graph
-    }
-
-    /// Bridge: build a commit graph from the existing segment graph, so the StepGraph and
-    /// projection builders can be exercised against it without first rewriting traversal. Every
-    /// segment's commits become nodes; their `parent_ids` are the edges, and the entrypoint commit
-    /// carries over.
-    pub fn from_segment_graph(graph: &crate::Graph) -> Self {
-        let ep = graph.entrypoint().ok();
-        let entrypoint = ep
-            .as_ref()
-            .and_then(|ep| ep.commit_and_owner.map(|(c, _)| c.id));
-        // The entrypoint segment's own ref names it (e.g. a checkout of a specific branch inside a
-        // stack); the owner is the segment holding the entrypoint commit.
-        let entrypoint_ref = ep
-            .as_ref()
-            .and_then(|ep| ep.commit_and_owner)
-            .and_then(|(_, owner)| owner.ref_info.as_ref().map(|ri| ri.ref_name.clone()));
-        let mut commits: Vec<crate::Commit> = Vec::new();
-        let mut commit_pos: HashMap<gix::ObjectId, usize> = HashMap::new();
-        for s in graph.node_weights() {
-            for (i, c) in s.commits.iter().enumerate() {
-                let mut c = c.clone();
-                // The segment graph hoists the tip ref onto `segment.ref_info`; in a commit graph a
-                // ref belongs on the commit it points at — the segment's first (tip) commit.
-                if i == 0
-                    && let Some(ri) = &s.ref_info
-                    && !c.refs.iter().any(|r| r.ref_name == ri.ref_name)
-                {
-                    c.refs.insert(0, ri.clone());
-                }
-                // Remote segments show COPIES of shared commits, sometimes with truncated
-                // parents. One node per id: merge refs, prefer the local (NotInRemote) copy's
-                // data, and never trade parents away for a truncated copy.
-                match commit_pos.entry(c.id) {
-                    std::collections::hash_map::Entry::Vacant(e) => {
-                        e.insert(commits.len());
-                        commits.push(c);
-                    }
-                    std::collections::hash_map::Entry::Occupied(e) => {
-                        let existing = &mut commits[*e.get()];
-
-                        for ri in c.refs {
-                            if !existing.refs.iter().any(|r| r.ref_name == ri.ref_name) {
-                                existing.refs.push(ri);
-                            }
-                        }
-                        let take_this = (c.flags.contains(crate::CommitFlags::NotInRemote)
-                            && !existing.flags.contains(crate::CommitFlags::NotInRemote)
-                            && (!c.parent_ids.is_empty() || existing.parent_ids.is_empty()))
-                            || (existing.parent_ids.is_empty() && !c.parent_ids.is_empty());
-                        if take_this {
-                            existing.parent_ids = c.parent_ids;
-                            existing.flags = c.flags;
-                        }
-                    }
-                }
-            }
-        }
-        // The traversal's ACTUAL connectivity: consecutive commits within a segment, plus each
-        // connection's `src → dst` commits (resolved through empty segments). Raw `parent_ids`
-        // reach past traversal cuts (limits, integrated stop-early) — those stay severed.
-        let mut connected: HashSet<(gix::ObjectId, gix::ObjectId)> = HashSet::new();
-        for s in graph.node_weights() {
-            for w in s.commits.windows(2) {
-                connected.insert((w[0].id, w[1].id));
-            }
-            let Some(last) = s.commits.last().map(|c| c.id) else {
-                continue;
-            };
-            for conn in &s.connections {
-                let src = conn.src_id.unwrap_or(last);
-                // Resolve the target commit through empty segments (e.g. an empty named segment
-                // spliced between commit-carrying ones).
-                let mut target = conn.target;
-                let mut dst = conn.dst_id;
-                for _ in 0..graph.num_segments() {
-                    if dst.is_some() {
-                        break;
-                    }
-                    let t = &graph[target];
-                    match t.commits.first() {
-                        Some(c) => dst = Some(c.id),
-                        None => {
-                            let Some(next) = t.connections.first() else {
-                                break;
-                            };
-                            dst = next.dst_id;
-                            target = next.target;
-                        }
-                    }
-                }
-                if let Some(dst) = dst {
-                    connected.insert((src, dst));
-                }
-            }
-        }
-        // An EMPTY named segment's ref would be lost — record it as a RESTING CHAIN above the
-        // first commit reachable below it, one chain per maximal run of empty segments. A run's
-        // head is an empty named segment not fed by another empty named segment.
-        let is_empty_named = |sidx: crate::SegmentIndex| {
-            let s = &graph[sidx];
-            s.commits.is_empty() && s.ref_info.is_some()
-        };
-        let mut resting_chains: Vec<RestingChain> = Vec::new();
-        let mut merge_bypass_commits: HashSet<gix::ObjectId> = HashSet::new();
-        for s in graph.node_weights() {
-            if !is_empty_named(s.id)
-                || graph
-                    .neighbors_directed(s.id, crate::Direction::Incoming)
-                    .any(is_empty_named)
-            {
-                continue;
-            }
-            let fed = graph
-                .neighbors_directed(s.id, crate::Direction::Incoming)
-                .next()
-                .is_some();
-            let mut refs = Vec::new();
-            let mut below = None;
-            let mut sidx = s.id;
-            for _ in 0..graph.num_segments() {
-                let t = &graph[sidx];
-                if let Some(c) = t.commits.first() {
-                    below = Some(c.id);
-                    break;
-                }
-                if let Some(ri) = &t.ref_info {
-                    refs.push(ri.ref_name.clone());
-                }
-                let Some(next) = t.connections.first() else {
-                    break;
-                };
-                if let Some(dst) = next.dst_id {
-                    below = Some(dst);
-                    break;
-                }
-                sidx = next.target;
-            }
-            if let Some(below) = below {
-                merge_bypass_commits.insert(below);
-            }
-            resting_chains.push(RestingChain { below, refs, fed });
-        }
-        let mut cg = CommitGraph::from_commits(commits, entrypoint);
-        cg.resting_chains = resting_chains;
-        cg.merge_bypass_commits = merge_bypass_commits;
-        cg.entrypoint_ref = entrypoint_ref;
-        cg.set_connected(connected);
-        cg.hard_limit_hit = graph.hard_limit_hit();
-        cg.traversal_tips = graph.traversal_tips.clone();
-        cg
     }
 
     /// Restrict connectivity to the given `(child, parent)` pairs and rebuild the child adjacency
@@ -436,18 +262,6 @@ impl CommitGraph {
         self.nodes.iter().map(|n| n.commit.id)
     }
 
-    /// Whether the traversal connected `child -> parent` (present and not severed).
-    pub fn is_connected_pair(&self, child: gix::ObjectId, parent: gix::ObjectId) -> bool {
-        self.by_id.contains_key(&parent) && self.is_connected(child, parent)
-    }
-
-    /// Every parent id the COMMIT asserts, verbatim — present or not, connected or not.
-    pub fn raw_parent_ids(&self, id: gix::ObjectId) -> Vec<gix::ObjectId> {
-        self.node(id)
-            .map(|n| n.commit.parent_ids.to_vec())
-            .unwrap_or_default()
-    }
-
     /// The commit's CONNECTED parent list, first-parent first — parents the traversal severed
     /// (limits, integrated stop-early, display cuts) are omitted.
     pub fn all_parent_ids(&self, id: gix::ObjectId) -> Vec<gix::ObjectId> {
@@ -489,28 +303,6 @@ impl CommitGraph {
             .into_iter()
             .flat_map(|n| n.commit.parent_ids.iter().copied())
             .filter(|p| self.by_id.contains_key(p))
-    }
-
-    /// The chains of refs resting above commits through empty spliced segments (see
-    /// `resting_chains`).
-    pub fn resting_chains(&self) -> &[RestingChain] {
-        &self.resting_chains
-    }
-
-    /// Whether a merge edge into `id` must land on its pick rather than its ref chain (see
-    /// `merge_bypass_commits`).
-    pub fn is_merge_bypass_commit(&self, id: gix::ObjectId) -> bool {
-        self.merge_bypass_commits.contains(&id)
-    }
-
-    /// The parents of `id` the traversal actually CONNECTED - present in the graph and not
-    /// severed by a traversal cut (limits, integrated stop-early). The parent-walking sibling
-    /// of [`Self::children`].
-    pub fn connected_parents(
-        &self,
-        id: gix::ObjectId,
-    ) -> impl Iterator<Item = gix::ObjectId> + use<'_> {
-        self.parents(id).filter(move |p| self.is_connected(id, *p))
     }
 
     /// The first parent of `id` (the next commit walking down first-parent), if present.
@@ -658,41 +450,6 @@ mod tests {
         assert_eq!(g.node(id(3)).unwrap().generation, 2);
         // No boundaries on a plain linear chain → the whole thing is one run.
         assert_eq!(g.first_parent_run(id(3)), vec![id(3), id(2), id(1)]);
-    }
-
-    #[test]
-    fn bridge_from_segment_graph_captures_commits_and_parents() {
-        // Build a tiny real segment graph: segment A (a2 -> a1) on base segment B (b0).
-        let mut graph = crate::Graph::default();
-        let a = graph.insert_segment_set_entrypoint(crate::Segment {
-            commits: vec![commit(0xA2, &[0xA1]), commit(0xA1, &[0xB0])],
-            ..Default::default()
-        });
-        graph.connect_new_segment(
-            a,
-            1, // from a1 (A's second commit)
-            crate::Segment {
-                commits: vec![commit(0xB0, &[])],
-                ..Default::default()
-            },
-            0,
-            id(0xB0),
-        );
-
-        let cg = CommitGraph::from_segment_graph(&graph);
-        // All three commits made it across, with their parent edges intact.
-        assert!(
-            cg.node(id(0xA2)).is_some()
-                && cg.node(id(0xA1)).is_some()
-                && cg.node(id(0xB0)).is_some()
-        );
-        assert_eq!(cg.first_parent(id(0xA2)), Some(id(0xA1)));
-        assert_eq!(cg.first_parent(id(0xA1)), Some(id(0xB0)));
-        assert_eq!(cg.first_parent(id(0xB0)), None);
-        // Reverse adjacency derived correctly.
-        assert_eq!(cg.children(id(0xB0)).collect::<Vec<_>>(), vec![id(0xA1)]);
-        // Entrypoint commit carried over (A is the entrypoint segment; its tip is a2).
-        assert_eq!(cg.entrypoint, Some(id(0xA2)));
     }
 
     #[test]

@@ -23,11 +23,6 @@ impl Commit {
     pub fn ref_name_iter(&self) -> impl Iterator<Item = &gix::refs::FullName> + Clone {
         self.refs.iter().map(|ri| &ri.ref_name)
     }
-
-    /// Return information about the reference that matches `name`.
-    pub fn ref_by_name(&self, name: &gix::refs::FullNameRef) -> Option<&RefInfo> {
-        self.refs.iter().find(|ri| ri.ref_name.as_ref() == name)
-    }
 }
 
 /// A structure to inform about a reference which was present at a commit.
