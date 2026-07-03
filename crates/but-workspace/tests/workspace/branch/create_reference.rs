@@ -126,7 +126,7 @@ mod with_workspace {
             but_graph::Graph::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
         let ws = graph.into_workspace()?;
 
-        insta::assert_snapshot!(graph_workspace(&ws), @"📕🏘️⚠️:2:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43");
+        insta::assert_snapshot!(graph_workspace(&ws), @"📕🏘️⚠️:1:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43");
 
         let a_ref = r("refs/heads/A");
         let ws = but_workspace::branch::create_reference(
@@ -140,9 +140,9 @@ mod with_workspace {
         )
         .expect("it updates the workspace metadata legitimate the new ref at base");
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:2:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
-        └── ≡📙:3:A on 3183e43 {41}
-            └── 📙:3:A
+        📕🏘️⚠️:1:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        └── ≡📙:2:A on 3183e43 {41}
+            └── 📙:2:A
         ");
         let ws_base = ws.lower_bound.expect("target is set");
         assert_eq!(
@@ -162,11 +162,11 @@ mod with_workspace {
             None,
         )?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:2:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
-        ├── ≡📙:3:A on 3183e43 {41}
-        │   └── 📙:3:A
-        └── ≡📙:4:B on 3183e43 {42}
-            └── 📙:4:B
+        📕🏘️⚠️:1:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        ├── ≡📙:2:A on 3183e43 {41}
+        │   └── 📙:2:A
+        └── ≡📙:3:B on 3183e43 {42}
+            └── 📙:3:B
         ");
 
         // Idempotency
@@ -180,11 +180,11 @@ mod with_workspace {
             None,
         )?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:2:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
-        ├── ≡📙:3:A on 3183e43 {41}
-        │   └── 📙:3:A
-        └── ≡📙:4:B on 3183e43 {42}
-            └── 📙:4:B
+        📕🏘️⚠️:1:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        ├── ≡📙:2:A on 3183e43 {41}
+        │   └── 📙:2:A
+        └── ≡📙:3:B on 3183e43 {42}
+            └── 📙:3:B
         ");
 
         let above_a = rc("refs/heads/above-A");
@@ -201,12 +201,12 @@ mod with_workspace {
             None,
         )?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:2:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
-        ├── ≡📙:3:above-A on 3183e43 {41}
-        │   ├── 📙:3:above-A
-        │   └── 📙:4:A
-        └── ≡📙:5:B on 3183e43 {42}
-            └── 📙:5:B
+        📕🏘️⚠️:1:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        ├── ≡📙:2:above-A on 3183e43 {41}
+        │   ├── 📙:2:above-A
+        │   └── 📙:3:A
+        └── ≡📙:4:B on 3183e43 {42}
+            └── 📙:4:B
         ");
 
         let below_b = rc("refs/heads/below-B");
@@ -223,13 +223,13 @@ mod with_workspace {
             None,
         )?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:2:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
-        ├── ≡📙:3:above-A on 3183e43 {41}
-        │   ├── 📙:3:above-A
-        │   └── 📙:4:A
-        └── ≡📙:5:B on 3183e43 {42}
-            ├── 📙:5:B
-            └── 📙:6:below-B
+        📕🏘️⚠️:1:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        ├── ≡📙:2:above-A on 3183e43 {41}
+        │   ├── 📙:2:above-A
+        │   └── 📙:3:A
+        └── ≡📙:4:B on 3183e43 {42}
+            ├── 📙:4:B
+            └── 📙:5:below-B
         ");
 
         // Finally, assure the data looks correct. Can't afford bugs in the translation.
@@ -240,13 +240,13 @@ mod with_workspace {
             but_graph::Graph::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
         let ws = graph.into_workspace()?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:2:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
-        ├── ≡📙:3:above-A on 3183e43 {41}
-        │   ├── 📙:3:above-A
-        │   └── 📙:4:A
-        └── ≡📙:5:B on 3183e43 {42}
-            ├── 📙:5:B
-            └── 📙:6:below-B
+        📕🏘️⚠️:1:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        ├── ≡📙:2:above-A on 3183e43 {41}
+        │   ├── 📙:2:above-A
+        │   └── 📙:3:A
+        └── ≡📙:4:B on 3183e43 {42}
+            ├── 📙:4:B
+            └── 📙:5:below-B
         ");
 
         insta::assert_snapshot!(visualize_commit_graph_all(&repo)?, @"* 3183e43 (HEAD -> gitbutler/workspace, origin/main, main, below-B, above-A, B, A) M1");
@@ -323,7 +323,7 @@ mod with_workspace {
             │   └── ·43f9472 (🏘️)
             ├── 📙:2:above-bottom
             │   └── ·6fdab32 (🏘️)
-            └── 📙:5:bottom
+            └── 📙:4:bottom
         ");
 
         let above_a_commit_ref = r("refs/heads/above-A-commit");
@@ -351,7 +351,7 @@ mod with_workspace {
             │   └── ·43f9472 (🏘️) ►A
             ├── 📙:2:above-bottom
             │   └── ·6fdab32 (🏘️)
-            └── 📙:5:bottom
+            └── 📙:4:bottom
         ");
 
         // We can, however, restore it simply by putting idempotency.
@@ -372,13 +372,13 @@ mod with_workspace {
         // And 'A' is back, with the desired order correctly restored.
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
-        └── ≡📙:5:above-A-commit on bce0c5e {4cf}
-            ├── 📙:5:above-A-commit
+        └── ≡📙:4:above-A-commit on bce0c5e {4cf}
+            ├── 📙:4:above-A-commit
             ├── 📙:1:A
             │   └── ·43f9472 (🏘️)
             ├── 📙:2:above-bottom
             │   └── ·6fdab32 (🏘️)
-            └── 📙:6:bottom
+            └── 📙:5:bottom
         ");
 
         let above_a_ref = rc("refs/heads/above-A");
@@ -399,14 +399,14 @@ mod with_workspace {
         // *Above a segment means what one would expect though.
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
-        └── ≡📙:5:above-A-commit on bce0c5e {4cf}
-            ├── 📙:5:above-A-commit
-            ├── 📙:6:above-A
+        └── ≡📙:4:above-A-commit on bce0c5e {4cf}
+            ├── 📙:4:above-A-commit
+            ├── 📙:5:above-A
             ├── 📙:1:A
             │   └── ·43f9472 (🏘️)
             ├── 📙:2:above-bottom
             │   └── ·6fdab32 (🏘️)
-            └── 📙:7:bottom
+            └── 📙:6:bottom
         ");
 
         let below_a_commit_ref = rc("refs/heads/below-A-commit");
@@ -425,15 +425,15 @@ mod with_workspace {
 
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
-        └── ≡📙:5:above-A-commit on bce0c5e {4cf}
-            ├── 📙:5:above-A-commit
-            ├── 📙:6:above-A
+        └── ≡📙:4:above-A-commit on bce0c5e {4cf}
+            ├── 📙:4:above-A-commit
+            ├── 📙:5:above-A
             ├── 📙:1:A
             │   └── ·43f9472 (🏘️)
-            ├── 📙:7:below-A-commit
+            ├── 📙:6:below-A-commit
             ├── 📙:2:above-bottom
             │   └── ·6fdab32 (🏘️)
-            └── 📙:8:bottom
+            └── 📙:7:bottom
         ");
 
         let below_a_ref = rc("refs/heads/below-A");
@@ -451,16 +451,16 @@ mod with_workspace {
         )?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
-        └── ≡📙:5:above-A on bce0c5e {4cf}
-            ├── 📙:5:above-A
-            ├── 📙:6:A
+        └── ≡📙:4:above-A on bce0c5e {4cf}
+            ├── 📙:4:above-A
+            ├── 📙:5:A
             ├── 📙:1:above-A-commit
             │   └── ·43f9472 (🏘️)
-            ├── 📙:7:below-A-commit
-            ├── 📙:8:above-bottom
+            ├── 📙:6:below-A-commit
+            ├── 📙:7:above-bottom
             ├── 📙:2:below-A
             │   └── ·6fdab32 (🏘️)
-            └── 📙:9:bottom
+            └── 📙:8:bottom
         ");
 
         // create a new stack for good measure.
@@ -476,18 +476,18 @@ mod with_workspace {
         )?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
-        ├── ≡📙:5:above-A on bce0c5e {4cf}
-        │   ├── 📙:5:above-A
-        │   ├── 📙:6:A
+        ├── ≡📙:4:above-A on bce0c5e {4cf}
+        │   ├── 📙:4:above-A
+        │   ├── 📙:5:A
         │   ├── 📙:1:above-A-commit
         │   │   └── ·43f9472 (🏘️)
-        │   ├── 📙:7:below-A-commit
-        │   ├── 📙:8:above-bottom
+        │   ├── 📙:6:below-A-commit
+        │   ├── 📙:7:above-bottom
         │   ├── 📙:2:below-A
         │   │   └── ·6fdab32 (🏘️)
-        │   └── 📙:9:bottom
-        └── ≡📙:10:B on bce0c5e {42}
-            └── 📙:10:B
+        │   └── 📙:8:bottom
+        └── ≡📙:9:B on bce0c5e {42}
+            └── 📙:9:B
         ");
 
         // create a new dependent branch by segment above (commit can't be done).
@@ -506,19 +506,19 @@ mod with_workspace {
         )?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
-        ├── ≡📙:5:above-A on bce0c5e {4cf}
-        │   ├── 📙:5:above-A
-        │   ├── 📙:6:A
+        ├── ≡📙:4:above-A on bce0c5e {4cf}
+        │   ├── 📙:4:above-A
+        │   ├── 📙:5:A
         │   ├── 📙:1:above-A-commit
         │   │   └── ·43f9472 (🏘️)
-        │   ├── 📙:7:below-A-commit
-        │   ├── 📙:8:above-bottom
+        │   ├── 📙:6:below-A-commit
+        │   ├── 📙:7:above-bottom
         │   ├── 📙:2:below-A
         │   │   └── ·6fdab32 (🏘️)
-        │   └── 📙:9:bottom
-        └── ≡📙:10:above-B on bce0c5e {42}
-            ├── 📙:10:above-B
-            └── 📙:11:B
+        │   └── 📙:8:bottom
+        └── ≡📙:9:above-B on bce0c5e {42}
+            ├── 📙:9:above-B
+            └── 📙:10:B
         ");
 
         // create a new dependent branch by segment below
@@ -539,20 +539,20 @@ mod with_workspace {
         )?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
-        ├── ≡📙:5:above-A on bce0c5e {4cf}
-        │   ├── 📙:5:above-A
-        │   ├── 📙:6:A
+        ├── ≡📙:4:above-A on bce0c5e {4cf}
+        │   ├── 📙:4:above-A
+        │   ├── 📙:5:A
         │   ├── 📙:1:above-A-commit
         │   │   └── ·43f9472 (🏘️)
-        │   ├── 📙:7:below-A-commit
-        │   ├── 📙:8:above-bottom
+        │   ├── 📙:6:below-A-commit
+        │   ├── 📙:7:above-bottom
         │   ├── 📙:2:below-A
         │   │   └── ·6fdab32 (🏘️)
-        │   └── 📙:9:bottom
-        └── ≡📙:10:above-B on bce0c5e {42}
-            ├── 📙:10:above-B
-            ├── 📙:11:B
-            └── 📙:12:below-B
+        │   └── 📙:8:bottom
+        └── ≡📙:9:above-B on bce0c5e {42}
+            ├── 📙:9:above-B
+            ├── 📙:10:B
+            └── 📙:11:below-B
         ");
 
         // Finally, assure the data looks correct. Can't afford bugs in the translation.
@@ -564,20 +564,20 @@ mod with_workspace {
         let ws = graph.into_workspace()?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
-        ├── ≡📙:5:above-A on bce0c5e {4cf}
-        │   ├── 📙:5:above-A
-        │   ├── 📙:6:A
+        ├── ≡📙:4:above-A on bce0c5e {4cf}
+        │   ├── 📙:4:above-A
+        │   ├── 📙:5:A
         │   ├── 📙:1:above-A-commit
         │   │   └── ·43f9472 (🏘️)
-        │   ├── 📙:7:below-A-commit
-        │   ├── 📙:8:above-bottom
+        │   ├── 📙:6:below-A-commit
+        │   ├── 📙:7:above-bottom
         │   ├── 📙:2:below-A
         │   │   └── ·6fdab32 (🏘️)
-        │   └── 📙:9:bottom
-        └── ≡📙:10:above-B on bce0c5e {42}
-            ├── 📙:10:above-B
-            ├── 📙:11:B
-            └── 📙:12:below-B
+        │   └── 📙:8:bottom
+        └── ≡📙:9:above-B on bce0c5e {42}
+            ├── 📙:9:above-B
+            ├── 📙:10:B
+            └── 📙:11:below-B
         ");
 
         insta::assert_snapshot!(visualize_commit_graph_all(&repo)?, @"
@@ -607,7 +607,7 @@ mod with_workspace {
         let ws = graph.into_workspace()?;
 
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:3:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        📕🏘️⚠️:2:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
         └── ≡📙:0:A on 3183e43 {0}
             └── 📙:0:A
                 ├── ·c2878fb (🏘️)
@@ -629,7 +629,7 @@ mod with_workspace {
             None,
         )?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:4:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        📕🏘️⚠️:3:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
         └── ≡📙:0:A on 3183e43 {0}
             ├── 📙:0:A
             │   └── ·c2878fb (🏘️)
@@ -654,13 +654,13 @@ mod with_workspace {
         // We can create branches that would be on the base.
         // There are
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:4:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        📕🏘️⚠️:3:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
         └── ≡📙:0:A on 3183e43 {0}
             ├── 📙:0:A
             │   └── ·c2878fb (🏘️)
             ├── 📙:1:above-bottom
             │   └── ·49d4b34 (🏘️)
-            └── 📙:5:bottom
+            └── 📙:4:bottom
         ");
 
         let above_a_commit_ref = r("refs/heads/above-A-commit");
@@ -680,14 +680,14 @@ mod with_workspace {
 
         // Note how 'Above' *a commit* means directly above, not on top of everything.
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:4:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
-        └── ≡📙:5:A on 3183e43 {0}
-            ├── 📙:5:A
+        📕🏘️⚠️:3:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        └── ≡📙:4:A on 3183e43 {0}
+            ├── 📙:4:A
             ├── 📙:0:above-A-commit
             │   └── ·c2878fb (🏘️)
             ├── 📙:1:above-bottom
             │   └── ·49d4b34 (🏘️)
-            └── 📙:6:bottom
+            └── 📙:5:bottom
         ");
 
         let above_a_ref = rc("refs/heads/above-A");
@@ -707,15 +707,15 @@ mod with_workspace {
 
         // *Above a segment means what one would expect though.
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:4:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
-        └── ≡📙:5:above-A on 3183e43 {0}
-            ├── 📙:5:above-A
-            ├── 📙:6:A
+        📕🏘️⚠️:3:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        └── ≡📙:4:above-A on 3183e43 {0}
+            ├── 📙:4:above-A
+            ├── 📙:5:A
             ├── 📙:0:above-A-commit
             │   └── ·c2878fb (🏘️)
             ├── 📙:1:above-bottom
             │   └── ·49d4b34 (🏘️)
-            └── 📙:7:bottom
+            └── 📙:6:bottom
         ");
 
         // Idempotency!
@@ -735,15 +735,15 @@ mod with_workspace {
         )?;
 
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:4:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
-        └── ≡📙:5:above-A on 3183e43 {0}
-            ├── 📙:5:above-A
-            ├── 📙:6:A
+        📕🏘️⚠️:3:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        └── ≡📙:4:above-A on 3183e43 {0}
+            ├── 📙:4:above-A
+            ├── 📙:5:A
             ├── 📙:0:above-A-commit
             │   └── ·c2878fb (🏘️)
             ├── 📙:1:above-bottom
             │   └── ·49d4b34 (🏘️)
-            └── 📙:7:bottom
+            └── 📙:6:bottom
         ");
 
         let below_a_commit_ref = rc("refs/heads/below-A-commit");
@@ -761,16 +761,16 @@ mod with_workspace {
         )?;
 
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:4:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
-        └── ≡📙:5:above-A on 3183e43 {0}
-            ├── 📙:5:above-A
-            ├── 📙:6:A
+        📕🏘️⚠️:3:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        └── ≡📙:4:above-A on 3183e43 {0}
+            ├── 📙:4:above-A
+            ├── 📙:5:A
             ├── 📙:0:above-A-commit
             │   └── ·c2878fb (🏘️)
-            ├── 📙:7:below-A-commit
+            ├── 📙:6:below-A-commit
             ├── 📙:1:above-bottom
             │   └── ·49d4b34 (🏘️)
-            └── 📙:8:bottom
+            └── 📙:7:bottom
         ");
 
         let below_a_ref = rc("refs/heads/below-A");
@@ -787,17 +787,17 @@ mod with_workspace {
             None,
         )?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:4:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
-        └── ≡📙:5:above-A on 3183e43 {0}
-            ├── 📙:5:above-A
-            ├── 📙:6:A
+        📕🏘️⚠️:3:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        └── ≡📙:4:above-A on 3183e43 {0}
+            ├── 📙:4:above-A
+            ├── 📙:5:A
             ├── 📙:0:above-A-commit
             │   └── ·c2878fb (🏘️)
-            ├── 📙:7:below-A
-            ├── 📙:8:below-A-commit
+            ├── 📙:6:below-A
+            ├── 📙:7:below-A-commit
             ├── 📙:1:above-bottom
             │   └── ·49d4b34 (🏘️)
-            └── 📙:9:bottom
+            └── 📙:8:bottom
         ");
 
         // create a new stack for good measure.
@@ -812,19 +812,19 @@ mod with_workspace {
             None,
         )?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:4:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
-        ├── ≡📙:5:above-A on 3183e43 {0}
-        │   ├── 📙:5:above-A
-        │   ├── 📙:6:A
+        📕🏘️⚠️:3:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        ├── ≡📙:4:above-A on 3183e43 {0}
+        │   ├── 📙:4:above-A
+        │   ├── 📙:5:A
         │   ├── 📙:0:above-A-commit
         │   │   └── ·c2878fb (🏘️)
-        │   ├── 📙:7:below-A
-        │   ├── 📙:8:below-A-commit
+        │   ├── 📙:6:below-A
+        │   ├── 📙:7:below-A-commit
         │   ├── 📙:1:above-bottom
         │   │   └── ·49d4b34 (🏘️)
-        │   └── 📙:9:bottom
-        └── ≡📙:10:B on 3183e43 {42}
-            └── 📙:10:B
+        │   └── 📙:8:bottom
+        └── ≡📙:9:B on 3183e43 {42}
+            └── 📙:9:B
         ");
 
         // create a new dependent branch by segment above (commit can't be done).
@@ -842,20 +842,20 @@ mod with_workspace {
             None,
         )?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:4:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
-        ├── ≡📙:5:above-A on 3183e43 {0}
-        │   ├── 📙:5:above-A
-        │   ├── 📙:6:A
+        📕🏘️⚠️:3:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        ├── ≡📙:4:above-A on 3183e43 {0}
+        │   ├── 📙:4:above-A
+        │   ├── 📙:5:A
         │   ├── 📙:0:above-A-commit
         │   │   └── ·c2878fb (🏘️)
-        │   ├── 📙:7:below-A
-        │   ├── 📙:8:below-A-commit
+        │   ├── 📙:6:below-A
+        │   ├── 📙:7:below-A-commit
         │   ├── 📙:1:above-bottom
         │   │   └── ·49d4b34 (🏘️)
-        │   └── 📙:9:bottom
-        └── ≡📙:10:above-B on 3183e43 {42}
-            ├── 📙:10:above-B
-            └── 📙:11:B
+        │   └── 📙:8:bottom
+        └── ≡📙:9:above-B on 3183e43 {42}
+            ├── 📙:9:above-B
+            └── 📙:10:B
         ");
 
         // create a new dependent branch by segment below
@@ -875,21 +875,21 @@ mod with_workspace {
             None,
         )?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:4:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
-        ├── ≡📙:5:above-A on 3183e43 {0}
-        │   ├── 📙:5:above-A
-        │   ├── 📙:6:A
+        📕🏘️⚠️:3:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        ├── ≡📙:4:above-A on 3183e43 {0}
+        │   ├── 📙:4:above-A
+        │   ├── 📙:5:A
         │   ├── 📙:0:above-A-commit
         │   │   └── ·c2878fb (🏘️)
-        │   ├── 📙:7:below-A
-        │   ├── 📙:8:below-A-commit
+        │   ├── 📙:6:below-A
+        │   ├── 📙:7:below-A-commit
         │   ├── 📙:1:above-bottom
         │   │   └── ·49d4b34 (🏘️)
-        │   └── 📙:9:bottom
-        └── ≡📙:10:above-B on 3183e43 {42}
-            ├── 📙:10:above-B
-            ├── 📙:11:B
-            └── 📙:12:below-B
+        │   └── 📙:8:bottom
+        └── ≡📙:9:above-B on 3183e43 {42}
+            ├── 📙:9:above-B
+            ├── 📙:10:B
+            └── 📙:11:below-B
         ");
 
         // Finally, assure the data looks correct. Can't afford bugs in the translation.
@@ -900,21 +900,21 @@ mod with_workspace {
             but_graph::Graph::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
         let ws = graph.into_workspace()?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:4:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
-        ├── ≡📙:5:above-A on 3183e43 {0}
-        │   ├── 📙:5:above-A
-        │   ├── 📙:6:A
+        📕🏘️⚠️:3:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        ├── ≡📙:4:above-A on 3183e43 {0}
+        │   ├── 📙:4:above-A
+        │   ├── 📙:5:A
         │   ├── 📙:0:above-A-commit
         │   │   └── ·c2878fb (🏘️)
-        │   ├── 📙:7:below-A
-        │   ├── 📙:8:below-A-commit
+        │   ├── 📙:6:below-A
+        │   ├── 📙:7:below-A-commit
         │   ├── 📙:1:above-bottom
         │   │   └── ·49d4b34 (🏘️)
-        │   └── 📙:9:bottom
-        └── ≡📙:10:above-B on 3183e43 {42}
-            ├── 📙:10:above-B
-            ├── 📙:11:B
-            └── 📙:12:below-B
+        │   └── 📙:8:bottom
+        └── ≡📙:9:above-B on 3183e43 {42}
+            ├── 📙:9:above-B
+            ├── 📙:10:B
+            └── 📙:11:below-B
         ");
 
         insta::assert_snapshot!(visualize_commit_graph_all(&repo)?, @"
@@ -942,7 +942,7 @@ mod with_workspace {
         let ws = graph.into_workspace()?;
 
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:3:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        📕🏘️⚠️:2:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
         └── ≡📙:0:A on 3183e43 {0}
             └── 📙:0:A
                 ├── ·c2878fb (🏘️)
@@ -965,12 +965,12 @@ mod with_workspace {
         )?;
 
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:3:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        📕🏘️⚠️:2:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
         └── ≡📙:0:A on 3183e43 {0}
             ├── 📙:0:A
             │   ├── ·c2878fb (🏘️)
             │   └── ·49d4b34 (🏘️)
-            └── 📙:4:bottom
+            └── 📙:3:bottom
         ");
         Ok(())
     }
@@ -1026,7 +1026,7 @@ mod with_workspace {
         └── ≡📙:1:A on 3183e43 {0}
             ├── 📙:1:A
             │   └── ·49d4b34 (🏘️)
-            └── 📙:5:a-bottom
+            └── 📙:4:a-bottom
         ");
 
         let bottom_ref_b = rc("refs/heads/b-bottom");
@@ -1049,11 +1049,11 @@ mod with_workspace {
         ├── ≡📙:2:B on 3183e43 {1}
         │   ├── 📙:2:B
         │   │   └── ·f57c528 (🏘️)
-        │   └── 📙:6:b-bottom
+        │   └── 📙:5:b-bottom
         └── ≡📙:1:A on 3183e43 {0}
             ├── 📙:1:A
             │   └── ·49d4b34 (🏘️)
-            └── 📙:5:a-bottom
+            └── 📙:4:a-bottom
         ");
         Ok(())
     }
@@ -1124,8 +1124,8 @@ mod with_workspace {
         )?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
-        └── ≡📙:5:A on bce0c5e {0}
-            ├── 📙:5:A
+        └── ≡📙:4:A on bce0c5e {0}
+            ├── 📙:4:A
             ├── 📙:1:new
             │   └── ·43f9472 (🏘️)
             └── 📙:2:foo
@@ -1148,9 +1148,9 @@ mod with_workspace {
         )?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
-        └── ≡📙:5:above-A on bce0c5e {0}
-            ├── 📙:5:above-A
-            ├── 📙:6:A
+        └── ≡📙:4:above-A on bce0c5e {0}
+            ├── 📙:4:above-A
+            ├── 📙:5:A
             ├── 📙:1:new
             │   └── ·43f9472 (🏘️)
             └── 📙:2:foo
@@ -1173,10 +1173,10 @@ mod with_workspace {
         )?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
-        └── ≡📙:5:above-A on bce0c5e {0}
-            ├── 📙:5:above-A
-            ├── 📙:6:A
-            ├── 📙:7:below-empty-A
+        └── ≡📙:4:above-A on bce0c5e {0}
+            ├── 📙:4:above-A
+            ├── 📙:5:A
+            ├── 📙:6:below-empty-A
             ├── 📙:1:new
             │   └── ·43f9472 (🏘️)
             └── 📙:2:foo
@@ -1198,10 +1198,10 @@ mod with_workspace {
         )?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
-        └── ≡📙:5:above-A on bce0c5e {0}
-            ├── 📙:5:above-A
-            ├── 📙:6:A
-            ├── 📙:7:below-empty-A
+        └── ≡📙:4:above-A on bce0c5e {0}
+            ├── 📙:4:above-A
+            ├── 📙:5:A
+            ├── 📙:6:below-empty-A
             ├── 📙:1:new
             │   └── ·43f9472 (🏘️)
             └── 📙:2:foo
@@ -1217,10 +1217,10 @@ mod with_workspace {
         let ws = graph.into_workspace()?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
-        └── ≡📙:5:above-A on bce0c5e {0}
-            ├── 📙:5:above-A
-            ├── 📙:6:A
-            ├── 📙:7:below-empty-A
+        └── ≡📙:4:above-A on bce0c5e {0}
+            ├── 📙:4:above-A
+            ├── 📙:5:A
+            ├── 📙:6:below-empty-A
             ├── 📙:1:new
             │   └── ·43f9472 (🏘️)
             └── 📙:2:foo
@@ -1257,9 +1257,9 @@ mod with_workspace {
             None,
         )?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:2:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
-        └── ≡📙:3:A on 3183e43 {41}
-            └── 📙:3:A
+        📕🏘️⚠️:1:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        └── ≡📙:2:A on 3183e43 {41}
+            └── 📙:2:A
         ");
 
         // Both positions work even though the anchor sits right on the workspace base.
@@ -1277,10 +1277,10 @@ mod with_workspace {
             None,
         )?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:2:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
-        └── ≡📙:3:A on 3183e43 {41}
-            ├── 📙:3:A
-            └── 📙:4:below-A
+        📕🏘️⚠️:1:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        └── ≡📙:2:A on 3183e43 {41}
+            ├── 📙:2:A
+            └── 📙:3:below-A
         ");
 
         let above_a_ref = r("refs/heads/above-A");
@@ -1297,11 +1297,11 @@ mod with_workspace {
             None,
         )?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:2:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
-        └── ≡📙:3:above-A on 3183e43 {41}
-            ├── 📙:3:above-A
-            ├── 📙:4:A
-            └── 📙:5:below-A
+        📕🏘️⚠️:1:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        └── ≡📙:2:above-A on 3183e43 {41}
+            ├── 📙:2:above-A
+            ├── 📙:3:A
+            └── 📙:4:below-A
         ");
 
         insta::assert_snapshot!(visualize_commit_graph_all(&repo)?, @"* 3183e43 (HEAD -> gitbutler/workspace, origin/main, main, below-A, above-A, A) M1");
@@ -1407,8 +1407,8 @@ mod with_workspace {
         )?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
-        ├── ≡📙:5:B on 3183e43 {1}
-        │   ├── 📙:5:B
+        ├── ≡📙:4:B on 3183e43 {1}
+        │   ├── 📙:4:B
         │   └── 📙:2:new
         │       └── ·f57c528 (🏘️)
         └── ≡📙:1:A on 3183e43 {0}
@@ -1483,7 +1483,7 @@ mod with_workspace {
             but_graph::Graph::from_head(&repo, &*meta, project_meta(&*meta), Options::limited())?;
         let ws = graph.into_workspace()?;
 
-        insta::assert_snapshot!(graph_workspace(&ws), @"📕🏘️⚠️:2:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on bce0c5e");
+        insta::assert_snapshot!(graph_workspace(&ws), @"📕🏘️⚠️:1:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on bce0c5e");
 
         let (ws_id, ws_ref_name) = id_at(&repo, "gitbutler/workspace");
         let main_remote_id = id_by_rev(&repo, "@~1");
@@ -1545,7 +1545,7 @@ mod with_workspace {
         let ws = graph.into_workspace()?;
 
         insta::assert_snapshot!(graph_workspace(&ws), @"
-        📕🏘️⚠️:3:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        📕🏘️⚠️:2:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
         └── ≡📙:0:A on 3183e43 {0}
             └── 📙:0:A
                 ├── ·c2878fb (🏘️)
@@ -1728,8 +1728,8 @@ mod with_workspace {
         ├── ≡📙:1:A on 3183e43 {0}
         │   └── 📙:1:A
         │       └── ·49d4b34 (🏘️)
-        └── ≡📙:5:new-branch on 3183e43 {3e5}
-            └── 📙:5:new-branch
+        └── ≡📙:4:new-branch on 3183e43 {3e5}
+            └── 📙:4:new-branch
         ");
 
         // `new-branch` was written at M1 (== merge_base(target, ws-commit)), the commit just

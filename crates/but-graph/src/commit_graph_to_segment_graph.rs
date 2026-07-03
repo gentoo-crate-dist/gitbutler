@@ -653,10 +653,10 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
     project_meta: but_core::ref_metadata::ProjectMeta,
     options: crate::init::Options,
 ) -> crate::Graph {
-    // Transitional order oracle: BUT_GRAPH_LANES=assert builds the graph in BOTH pass orders and
-    // panics with precise diffs if their canonical forms disagree; =new returns the lanes-first
-    // build. The historical order (lanes after remotes, reconciled) stays the default until the
-    // corpus is at zero.
+    // LANES-FIRST is the default: the lane structure precedes the remote passes, which link the
+    // lane segments at creation. Canonically verified identical to the historical order across
+    // the whole corpus. Transitional: BUT_GRAPH_LANES=assert builds BOTH orders and panics with
+    // precise diffs; =old returns the historical build.
     let mode = std::env::var("BUT_GRAPH_LANES").ok();
     let build = |lanes_first: bool| {
         graph_from_commit_graph_ordered(
@@ -688,10 +688,10 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
                     diffs.join("\n")
                 );
             }
-            old
+            new
         }
-        Some("new") => build(true),
-        _ => build(false),
+        Some("old") => build(false),
+        _ => build(true),
     }
 }
 
@@ -896,6 +896,7 @@ fn graph_from_commit_graph_ordered<T: but_core::RefMetadata>(
             remote_tracking,
             meta,
             project_meta.target_ref.as_ref(),
+            &pinned_commits,
         );
         let ws_sidx = ws_empty_sidx.or_else(|| seg_of_tip.get(&workspace_commit).copied());
         insert_empty_branches(
@@ -912,8 +913,18 @@ fn graph_from_commit_graph_ordered<T: but_core::RefMetadata>(
             lanes_first,
         );
     };
+    // Segments the EARLY lane pass creates: the coverage gates below (extra target, outside
+    // entrypoint, explicit tips) historically evaluated BEFORE any lane existed — they must not
+    // be shadowed by lane segments (e.g. an advanced-outside run swallowing the stored target
+    // position that the extra-target region must surface).
+    let mut lane_created: HashSet<SegmentIndex> = HashSet::new();
     if lanes_first {
+        let before: HashSet<SegmentIndex> = sg.node_indices().collect();
         lane_structure(&mut sg, &mut ws_empty_sidx);
+        lane_created = sg
+            .node_indices()
+            .filter(|sidx| !before.contains(sidx))
+            .collect();
     }
 
     // Remote segments: for each local segment with a remote-tracking ref whose remote tip is
@@ -1058,7 +1069,7 @@ fn graph_from_commit_graph_ordered<T: but_core::RefMetadata>(
     // region, so the projection can derive `target_commit` from it.
     if let Some(extra) = options.extra_target_commit_id
         && cg.node(extra).is_some()
-        && segment_by_commit(&sg, extra).is_none()
+        && segment_by_commit_excluding(&sg, extra, &lane_created).is_none()
     {
         segment_ahead_region(
             cg,
@@ -1081,7 +1092,7 @@ fn graph_from_commit_graph_ordered<T: but_core::RefMetadata>(
     // still see the workspace. The projection downgrades it to the single-branch view.
     if !in_set.contains(&entrypoint)
         && cg.node(entrypoint).is_some()
-        && segment_by_commit(&sg, entrypoint).is_none()
+        && segment_by_commit_excluding(&sg, entrypoint, &lane_created).is_none()
     {
         segment_ahead_region(
             cg,
@@ -1107,7 +1118,7 @@ fn graph_from_commit_graph_ordered<T: but_core::RefMetadata>(
         if cg.node(t.id).is_none() {
             continue;
         }
-        match segment_by_commit(&sg, t.id) {
+        match segment_by_commit_excluding(&sg, t.id, &lane_created) {
             None => segment_ahead_region(
                 cg,
                 &mut sg,
@@ -2786,6 +2797,7 @@ fn add_advanced_outside_branches<T: but_core::RefMetadata>(
     remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
     meta: &T,
     target_ref: Option<&gix::refs::FullName>,
+    pinned_commits: &HashSet<gix::ObjectId>,
 ) {
     for b in stack_branches.into_iter().flatten().flatten() {
         // Only LOCAL branches advance past a workspace; metadata can also list remote refs as stack
@@ -2797,6 +2809,13 @@ fn add_advanced_outside_branches<T: but_core::RefMetadata>(
             continue;
         };
         if in_set.contains(&tip) {
+            continue;
+        }
+        // A PINNED commit (a stored/extra target position) must start its own segment via the
+        // extra-target region — the projection derives the remembered base from it. When lanes
+        // run before the remote passes this pass would otherwise swallow it into the branch's
+        // outside run first.
+        if pinned_commits.contains(&tip) {
             continue;
         }
         // The branch's outside commits, down to where it rejoins the workspace.
@@ -3042,6 +3061,21 @@ fn is_remote_segment(sg: &SegmentGraph, sidx: SegmentIndex) -> bool {
     sg.node(sidx)
         .and_then(|s| s.ref_info.as_ref())
         .is_some_and(|ri| ri.ref_name.as_ref().category() == Some(Category::RemoteBranch))
+}
+
+/// Like [`segment_by_commit`], but ignoring `exclude`d segments — the pre-lane coverage view
+/// for gates that historically ran before the lane structure existed.
+fn segment_by_commit_excluding(
+    sg: &SegmentGraph,
+    commit: gix::ObjectId,
+    exclude: &HashSet<SegmentIndex>,
+) -> Option<SegmentIndex> {
+    sg.node_indices().find(|&sidx| {
+        !exclude.contains(&sidx)
+            && sg
+                .node(sidx)
+                .is_some_and(|s| s.commits.iter().any(|c| c.id == commit))
+    })
 }
 
 /// Find the segment that holds `commit`, if any.

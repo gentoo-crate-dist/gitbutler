@@ -376,15 +376,15 @@ fn workspace_with_three_empty_stacks() -> Result<()> {
 
     ├── 👉📕►►►:0[0]:gitbutler/workspace[🌳]
     │   └── ·a26ae77 (⌂|🏘|01)
-    │       ├── 📙►:4[1]:stack-1
+    │       ├── 📙►:3[1]:stack-1
     │       │   └── ►:2[2]:anon:
     │       │       └── 🏁·fafd9d0 (⌂|🏘|✓|11)
-    │       ├── 📙►:5[1]:stack-2
+    │       ├── 📙►:4[1]:stack-2
     │       │   └── →:2:
-    │       └── 📙►:6[1]:stack-3
+    │       └── 📙►:5[1]:stack-3
     │           └── →:2:
-    └── ►:3[0]:origin/main →:1:
-        └── ►:1[1]:main <> origin/main →:3:
+    └── ►:6[0]:origin/main →:1:
+        └── ►:1[1]:main <> origin/main →:6:
             └── ·1cf9cf4 (⌂|✓|10)
                 └── →:2:
     ");

@@ -420,8 +420,8 @@ fn move_empty_branch() -> anyhow::Result<()> {
     let mut ws = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&ws), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 85efbe4
-    ├── ≡📙:4:B on 85efbe4 {2}
-    │   └── 📙:4:B
+    ├── ≡📙:3:B on 85efbe4 {2}
+    │   └── 📙:3:B
     └── ≡📙:1:A on 85efbe4 {1}
         └── 📙:1:A
             └── ·09d8e52 (🏘️)
@@ -450,8 +450,8 @@ fn move_empty_branch() -> anyhow::Result<()> {
 
     insta::assert_snapshot!(graph_workspace(&ws), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 85efbe4
-    └── ≡📙:4:B on 85efbe4 {1}
-        ├── 📙:4:B
+    └── ≡📙:3:B on 85efbe4 {1}
+        ├── 📙:3:B
         └── 📙:1:A
             └── ·09d8e52 (🏘️)
     ");
@@ -476,8 +476,8 @@ fn move_branch_on_top_of_empty_branch() -> anyhow::Result<()> {
     let mut ws = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&ws), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 85efbe4
-    ├── ≡📙:4:B on 85efbe4 {2}
-    │   └── 📙:4:B
+    ├── ≡📙:3:B on 85efbe4 {2}
+    │   └── 📙:3:B
     └── ≡📙:1:A on 85efbe4 {1}
         └── 📙:1:A
             └── ·09d8e52 (🏘️)
@@ -509,7 +509,7 @@ fn move_branch_on_top_of_empty_branch() -> anyhow::Result<()> {
     └── ≡📙:1:A on 85efbe4 {2}
         ├── 📙:1:A
         │   └── ·09d8e52 (🏘️)
-        └── 📙:4:B
+        └── 📙:3:B
     ");
     Ok(())
 }
@@ -543,9 +543,9 @@ fn move_empty_branch_on_top_of_empty_branch_in_same_stack() -> anyhow::Result<()
     let mut ws = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&ws), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on 3183e43
-    └── ≡📙:4:B on 3183e43 {1}
-        ├── 📙:4:B
-        └── 📙:5:A
+    └── ≡📙:3:B on 3183e43 {1}
+        ├── 📙:3:B
+        └── 📙:4:A
     ");
 
     let editor = Editor::create(&mut ws, &mut meta, &repo)?;
@@ -563,9 +563,9 @@ fn move_empty_branch_on_top_of_empty_branch_in_same_stack() -> anyhow::Result<()
 
     insta::assert_snapshot!(graph_workspace(&ws), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on 3183e43
-    └── ≡📙:4:A on 3183e43 {1}
-        ├── 📙:4:A
-        └── 📙:5:B
+    └── ≡📙:3:A on 3183e43 {1}
+        ├── 📙:3:A
+        └── 📙:4:B
     ");
 
     Ok(())
@@ -601,10 +601,10 @@ fn move_empty_branch_on_top_of_empty_branch_across_stacks() -> anyhow::Result<()
     let mut ws = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&ws), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on 3183e43
-    ├── ≡📙:4:A on 3183e43 {1}
-    │   └── 📙:4:A
-    └── ≡📙:5:B on 3183e43 {2}
-        └── 📙:5:B
+    ├── ≡📙:3:A on 3183e43 {1}
+    │   └── 📙:3:A
+    └── ≡📙:4:B on 3183e43 {2}
+        └── 📙:4:B
     ");
 
     let editor = Editor::create(&mut ws, &mut meta, &repo)?;
@@ -622,9 +622,9 @@ fn move_empty_branch_on_top_of_empty_branch_across_stacks() -> anyhow::Result<()
 
     insta::assert_snapshot!(graph_workspace(&ws), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on 3183e43
-    └── ≡📙:4:A on 3183e43 {2}
-        ├── 📙:4:A
-        └── 📙:5:B
+    └── ≡📙:3:A on 3183e43 {2}
+        ├── 📙:3:A
+        └── 📙:4:B
     ");
 
     Ok(())
@@ -933,8 +933,8 @@ fn move_empty_branch_onto_non_empty_branch_with_advanced_target() -> anyhow::Res
     ");
     insta::assert_snapshot!(graph_workspace(&ws), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on 85efbe4
-    └── ≡📙:5:B on 85efbe4 {1}
-        ├── 📙:5:B
+    └── ≡📙:4:B on 85efbe4 {1}
+        ├── 📙:4:B
         └── 📙:1:A
             └── ·09d8e52 (🏘️)
     ");

@@ -406,7 +406,7 @@ fn j05_empty_stack() -> anyhow::Result<()> {
                     ),
                     segments: [
                         ref_info::ui::Segment {
-                            id: 3,
+                            id: 2,
                             ref_name: "►S1",
                             remote_tracking_ref_name: "None",
                             commits: [],
@@ -424,7 +424,7 @@ fn j05_empty_stack() -> anyhow::Result<()> {
                     ref_name: FullName(
                         "refs/remotes/origin/main",
                     ),
-                    segment_index: 2,
+                    segment_index: 3,
                     commits_ahead: 0,
                 },
             ),

@@ -697,7 +697,7 @@ mod stack_details {
                     ref_name: FullName(
                         "refs/remotes/origin/main",
                     ),
-                    segment_index: 4,
+                    segment_index: 5,
                     commits_ahead: 0,
                 },
             ),

@@ -104,8 +104,8 @@ fn discard_tip_commit_in_workspace_stack() -> Result<()> {
     let outcome = outcome.materialize()?;
     insta::assert_snapshot!(graph_workspace(outcome.workspace), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 85efbe4
-    ├── ≡📙:5:C on 85efbe4 {2}
-    │   ├── 📙:5:C
+    ├── ≡📙:4:C on 85efbe4 {2}
+    │   ├── 📙:4:C
     │   └── 📙:2:B
     │       └── ·c813d8d (🏘️)
     └── ≡📙:1:A on 85efbe4 {1}
@@ -174,7 +174,7 @@ fn discard_bottom_commit_in_workspace_stack() -> Result<()> {
     ├── ≡📙:2:C on 85efbe4 {2}
     │   ├── 📙:2:C
     │   │   └── ·8e00332 (🏘️)
-    │   └── 📙:5:B
+    │   └── 📙:4:B
     └── ≡📙:1:A on 85efbe4 {1}
         └── 📙:1:A
             └── ·09d8e52 (🏘️)
