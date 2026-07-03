@@ -406,25 +406,57 @@ impl TargetRef {
     pub(crate) fn visit_upstream_commits(
         graph: &Graph,
         target_segment: SegmentIndex,
-        lower_bound_segment_and_generation: Option<(SegmentIndex, usize)>,
+        lower_bound: Option<SegmentIndex>,
         mut visit: impl FnMut(&Segment),
     ) {
+        // Shared-history semantics (the disjoint-target ruling): paint the lower bound's
+        // ancestor set on the carried commit graph, then collect from the target tip until the
+        // walk TOUCHES shared history — the paint, or any workspace-reachable commit. Diverged
+        // commits are never in either, so a rewritten remote is collected at any depth.
+        let shared_history = graph
+            .commit_graph()
+            .zip(lower_bound)
+            .and_then(|(cg, sidx)| {
+                let lb = graph[sidx].commits.first()?.id;
+                Some(cg.ancestor_set(lb))
+            });
+        let mut touched_shared_history = false;
+        let mut collected: Vec<SegmentIndex> = Vec::new();
         graph.visit_all_segments_including_start_until(target_segment, Direction::Outgoing, |s| {
             let prune = true;
-            if lower_bound_segment_and_generation.is_some_and(
-                |(lower_bound, lower_bound_generation)| {
-                    s.id == lower_bound || s.generation > lower_bound_generation
-                },
-            ) || s
+            let in_shared_history = shared_history
+                .as_ref()
+                .is_some_and(|shared| s.commits.first().is_some_and(|c| shared.contains(&c.id)));
+            let in_workspace = s
                 .commits
                 .iter()
-                .any(|c| c.flags.contains(CommitFlags::InWorkspace))
-            {
+                .any(|c| c.flags.contains(CommitFlags::InWorkspace));
+            touched_shared_history |= in_shared_history || in_workspace;
+            if Some(s.id) == lower_bound || in_shared_history || in_workspace {
                 return prune;
             }
-            visit(s);
+            collected.push(s.id);
             !prune
         });
+        if let Some(shared) = shared_history.as_ref().filter(|_| !touched_shared_history) {
+            // A walk that never touched shared history found a DISJOINT target — nothing is
+            // upstream — unless either side's ancestry ends at a traversal CUT (a raw parent
+            // the walk did not follow), in which case the shared base may lie beyond the
+            // window and everything visible stays.
+            let genuinely_disjoint = graph.commit_graph().is_some_and(|cg| {
+                !collected
+                    .iter()
+                    .flat_map(|sidx| graph[*sidx].commits.iter())
+                    .any(|c| cg.has_cut_parents(c.id))
+                    && !shared.iter().any(|id| cg.has_cut_parents(*id))
+            });
+            if genuinely_disjoint {
+                return;
+            }
+        }
+        for sidx in collected {
+            visit(&graph[sidx]);
+        }
     }
 }
 

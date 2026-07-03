@@ -226,9 +226,8 @@ impl TargetRef {
         graph: &Graph,
         lower_bound_segment: Option<SegmentIndex>,
     ) {
-        let lower_bound = lower_bound_segment.map(|sidx| (sidx, graph[sidx].generation));
         self.commits_ahead = 0;
-        Self::visit_upstream_commits(graph, self.segment_index, lower_bound, |s| {
+        Self::visit_upstream_commits(graph, self.segment_index, lower_bound_segment, |s| {
             self.commits_ahead += s.commits.len();
         })
     }

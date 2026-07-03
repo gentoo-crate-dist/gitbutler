@@ -1015,7 +1015,7 @@ fn stacked_rebased_remotes() -> anyhow::Result<()> {
         "graph should record that traversal stopped queueing after hitting the hard limit"
     );
     insta::assert_snapshot!(graph_workspace(&graph.into_workspace()?), @"
-    ⌂:0:B[🌳] <> ✓refs/remotes/origin/B⇣1 on 312f819
+    ⌂:0:B[🌳] <> ✓refs/remotes/origin/B⇣3 on 312f819
     └── ≡:0:B[🌳] <> origin/B →:2:⇣1 on e255adc {1}
         └── :0:B[🌳] <> origin/B →:2:⇣1
             └── 🟣682be32

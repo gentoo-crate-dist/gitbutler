@@ -180,9 +180,7 @@ impl Workspace {
             .target_ref
             .as_ref()
             .context("incoming target commits require a workspace with a target ref")?;
-        let lower_bound = self
-            .lower_bound_segment_id
-            .map(|segment_id| (segment_id, self.graph[segment_id].generation));
+        let lower_bound = self.lower_bound_segment_id;
 
         let mut commit_ids = Vec::new();
         TargetRef::visit_upstream_commits(

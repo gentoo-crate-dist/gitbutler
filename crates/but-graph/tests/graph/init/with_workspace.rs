@@ -4455,7 +4455,7 @@ fn a_stack_segment_can_be_a_segment_elsewhere_and_stack_order() -> anyhow::Resul
     // However, as nothing is integrated, it really is another name for `main` now,
     // `main` is nothing special.
     insta::assert_snapshot!(graph_workspace(&graph.into_workspace()?), @"
-    📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on fafd9d0
+    📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on fafd9d0
     ├── ≡📙:1:advanced-lane on fafd9d0 {0}
     │   └── 📙:1:advanced-lane
     │       └── ·cbc6713 (🏘️)
@@ -4484,7 +4484,7 @@ fn a_stack_segment_can_be_a_segment_elsewhere_and_stack_order() -> anyhow::Resul
     ");
 
     insta::assert_snapshot!(graph_workspace(&graph.into_workspace()?), @"
-    📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on fafd9d0
+    📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on fafd9d0
     ├── ≡📙:1:advanced-lane on fafd9d0 {1}
     │   └── 📙:1:advanced-lane
     │       └── ·cbc6713 (🏘️)
@@ -5803,7 +5803,7 @@ fn two_branches_one_advanced_two_parent_ws_commit_diverged_ttb() -> anyhow::Resu
         └── 🏁🟣da83717 (✓)
     ");
     insta::assert_snapshot!(graph_workspace(&graph.into_workspace()?), @"
-    📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on fafd9d0
+    📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on fafd9d0
     ├── ≡📙:1:advanced-lane on fafd9d0 {1}
     │   └── 📙:1:advanced-lane
     │       └── ·cbc6713 (🏘️)
@@ -5833,7 +5833,7 @@ fn two_branches_one_advanced_two_parent_ws_commit_diverged_ttb() -> anyhow::Resu
     ");
 
     insta::assert_snapshot!(graph_workspace(&graph.into_workspace()?), @"
-    📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on fafd9d0
+    📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on fafd9d0
     ├── ≡📙:1:advanced-lane on fafd9d0 {1}
     │   └── 📙:1:advanced-lane
     │       └── ·cbc6713 (🏘️)
@@ -5858,7 +5858,7 @@ fn two_branches_one_advanced_two_parent_ws_commit_diverged_ttb() -> anyhow::Resu
     ");
 
     insta::assert_snapshot!(graph_workspace(&graph.into_workspace()?), @"
-    📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on fafd9d0
+    📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on fafd9d0
     ├── ≡📙:1:advanced-lane on fafd9d0 {1}
     │   └── 📙:1:advanced-lane
     │       └── ·cbc6713 (🏘️)
@@ -7635,7 +7635,7 @@ fn remote_trailing_local_stack() -> anyhow::Result<()> {
         └── ►:2[1]:main <> origin/main →:3:
             └── 🏁·fafd9d0 (⌂|✓|10)
     ");
-    insta::assert_snapshot!(graph_workspace(&graph.into_workspace()?), "this is a weird state as the target is actually disjoint from the workspace - it appears empty now", @"📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on cb7021b");
+    insta::assert_snapshot!(graph_workspace(&graph.into_workspace()?), "this is a weird state as the target is actually disjoint from the workspace - it appears empty now", @"📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on cb7021b");
     Ok(())
 }
 

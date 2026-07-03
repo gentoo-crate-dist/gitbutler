@@ -114,9 +114,13 @@ impl RefInfo {
             // (a diverged remote cut short by limits — its commits ARE upstream). The graph
             // records where the traversal cut: if every collected commit's ancestry is fully
             // present and roots out without meeting shared history, it is genuinely disjoint.
-            let genuinely_disjoint = graph
-                .commit_graph()
-                .is_some_and(|cg| !upstream_commits.iter().any(|id| cg.has_cut_parents(*id)));
+            let genuinely_disjoint = graph.commit_graph().is_some_and(|cg| {
+                !upstream_commits.iter().any(|id| cg.has_cut_parents(*id))
+                    && !shared_history
+                        .iter()
+                        .flatten()
+                        .any(|id| cg.has_cut_parents(*id))
+            });
             if genuinely_disjoint {
                 upstream_commits.clear();
             }
