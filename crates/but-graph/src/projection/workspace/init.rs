@@ -690,12 +690,19 @@ impl Graph {
     /// can provide an explicit [`crate::init::TipRole::TargetRemote`] target without workspace metadata. In that
     /// mode there is no stored `target_commit_id` to resolve, but workspace projection still needs a
     /// target commit to frame the lower bound and workspace view. When multiple target remotes are
-    /// available, choose the lowest one, i.e. the one with the highest segment generation.
+    /// available, choose the lowest one — deepest in history on the carried commit graph.
     fn integrated_tip_target_commit(&self, target_ref: Option<&TargetRef>) -> Option<TargetCommit> {
         self.workspace_projection_target_remote_tips()
             .filter_map(|tip| TargetCommit::from_commit(tip.id, self))
             .filter(|target| !self.target_ref_points_to_commit(target_ref, target.commit_id))
-            .max_by_key(|target| self[target.segment_index].generation)
+            .max_by_key(|target| {
+                std::cmp::Reverse(
+                    self.commit_graph()
+                        .and_then(|cg| cg.node(target.commit_id))
+                        .map(|n| n.generation)
+                        .unwrap_or_default(),
+                )
+            })
     }
 
     /// Target-remote traversal tips that workspace projection can use as target context.
