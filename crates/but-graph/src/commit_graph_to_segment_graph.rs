@@ -393,33 +393,40 @@ fn assemble_unmanaged<T: but_core::RefMetadata>(
     Ok(graph)
 }
 
-/// Build a segment [`Graph`](crate::Graph) from `cg`.
-///
-/// Inputs mirror the projection's enrichment: the workspace commit, the target that bounds/integrates,
-/// and the local→remote tracking map. `project_meta`/`options` are carried onto the `Graph`.
+/// Everything the build decides BEFORE any segment exists — pure facts over the commit graph,
+/// ref positions, and metadata. Phase 1 of gather-then-build: the materialization and every
+/// later pass read these; nothing here reads a segment.
+struct Facts {
+    /// The commit set the LOCAL segments span.
+    in_set: HashSet<gix::ObjectId>,
+    /// Is the checked-out workspace commit a real GitButler-managed merge?
+    ws_is_managed_merge: bool,
+    /// Managed, but the ws ref sits on (or advanced past) a plain commit: an empty workspace
+    /// segment is spliced in above.
+    empty_ws_case: bool,
+    /// Stored/extra target positions (and explicit tips): segments must start there.
+    pinned_commits: HashSet<gix::ObjectId>,
+    /// Commits that START a segment.
+    boundaries: HashSet<gix::ObjectId>,
+    /// Which boundary's first-parent run each in-set commit belongs to.
+    owner_of: HashMap<gix::ObjectId, gix::ObjectId>,
+    /// The boundaries in materialization order: workspace first, then descending generation, id.
+    tips: Vec<gix::ObjectId>,
+}
+
 #[allow(clippy::too_many_arguments)]
-pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
+fn facts<T: but_core::RefMetadata>(
     cg: &CommitGraph,
     workspace_commit: gix::ObjectId,
     entrypoint: gix::ObjectId,
-    entrypoint_ref: Option<gix::refs::FullName>,
     target: Option<gix::ObjectId>,
     remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
-    // Remote names implied by the workspace configuration (push remote, target's remote). Only these
-    // remotes' AHEAD regions are traversed; a config-only tracking link keeps its name but its remote's
-    // own commits stay out of the graph, matching the walk's traversal reach.
-    symbolic_remotes: &[String],
     stack_branches: Option<&[Vec<gix::refs::FullName>]>,
-    // A managed workspace (`workspace_commit` is the gitbutler/workspace octopus merge). When false,
-    // `workspace_commit` is just the checked-out tip: no stack/ws-ref/anonymize passes.
     managed: bool,
-    // Which worktree (if any) checks out each ref, keyed by ref name — the main worktree `[🌳]` and any
-    // linked worktrees `[📁]`. Mirrors the walk's `RefInfo::from_ref` lookup.
-    worktree_by_branch: &BTreeMap<gix::refs::FullName, Vec<crate::Worktree>>,
     meta: &T,
-    project_meta: but_core::ref_metadata::ProjectMeta,
-    options: crate::init::Options,
-) -> crate::Graph {
+    project_meta: &but_core::ref_metadata::ProjectMeta,
+    options: &crate::init::Options,
+) -> Facts {
     // The commit set the LOCAL segments span: everything reachable from the workspace commit, plus the
     // target's own history WHEN the target has a local branch (it is `NotInRemote`) — e.g. an
     // integrated `main` that sits outside the workspace. A remote-only target (ahead of its local, not
@@ -582,15 +589,17 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
                         .any(|&k| cg.first_parent(k) != Some(c) && in_set.contains(&k))
             }
     };
+    let boundaries: HashSet<gix::ObjectId> =
+        in_set.iter().copied().filter(|&c| is_boundary(c)).collect();
 
     // Every boundary in the set starts a segment; each segment's commit run is the boundary plus its
     // first-parent tail up to (excluding) the next boundary. These runs partition the set, so assigning
     // each commit in a run to its boundary gives the owner directly — no reverse walk (a run's oldest
     // commit, e.g. a root, has no first-parent path back up to its own boundary).
     let mut owner_of: HashMap<gix::ObjectId, gix::ObjectId> = HashMap::new();
-    let mut tips: Vec<gix::ObjectId> = in_set.iter().copied().filter(|&c| is_boundary(c)).collect();
+    let mut tips: Vec<gix::ObjectId> = boundaries.iter().copied().collect();
     for &tip in &tips {
-        for c in commit_run(cg, tip, &in_set, &is_boundary) {
+        for c in commit_run(cg, tip, &in_set, &|c| boundaries.contains(&c)) {
             owner_of.insert(c.id, tip);
         }
     }
@@ -604,6 +613,67 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
             t,
         )
     });
+
+    Facts {
+        in_set,
+        ws_is_managed_merge,
+        empty_ws_case,
+        pinned_commits,
+        boundaries,
+        owner_of,
+        tips,
+    }
+}
+
+/// Build a segment [`Graph`](crate::Graph) from `cg`.
+///
+/// Inputs mirror the projection's enrichment: the workspace commit, the target that bounds/integrates,
+/// and the local→remote tracking map. `project_meta`/`options` are carried onto the `Graph`.
+#[allow(clippy::too_many_arguments)]
+pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
+    cg: &CommitGraph,
+    workspace_commit: gix::ObjectId,
+    entrypoint: gix::ObjectId,
+    entrypoint_ref: Option<gix::refs::FullName>,
+    target: Option<gix::ObjectId>,
+    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
+    // Remote names implied by the workspace configuration (push remote, target's remote). Only these
+    // remotes' AHEAD regions are traversed; a config-only tracking link keeps its name but its remote's
+    // own commits stay out of the graph, matching the walk's traversal reach.
+    symbolic_remotes: &[String],
+    stack_branches: Option<&[Vec<gix::refs::FullName>]>,
+    // A managed workspace (`workspace_commit` is the gitbutler/workspace octopus merge). When false,
+    // `workspace_commit` is just the checked-out tip: no stack/ws-ref/anonymize passes.
+    managed: bool,
+    // Which worktree (if any) checks out each ref, keyed by ref name — the main worktree `[🌳]` and any
+    // linked worktrees `[📁]`. Mirrors the walk's `RefInfo::from_ref` lookup.
+    worktree_by_branch: &BTreeMap<gix::refs::FullName, Vec<crate::Worktree>>,
+    meta: &T,
+    project_meta: but_core::ref_metadata::ProjectMeta,
+    options: crate::init::Options,
+) -> crate::Graph {
+    let f = facts(
+        cg,
+        workspace_commit,
+        entrypoint,
+        target,
+        remote_tracking,
+        stack_branches,
+        managed,
+        meta,
+        &project_meta,
+        &options,
+    );
+    let Facts {
+        in_set,
+        ws_is_managed_merge,
+        empty_ws_case,
+        pinned_commits,
+        boundaries,
+        owner_of,
+        tips,
+    } = f;
+    let is_boundary = |c: gix::ObjectId| boundaries.contains(&c);
 
     let mut sg = SegmentGraph::new();
     let mut seg_of_tip: HashMap<gix::ObjectId, SegmentIndex> = HashMap::new();
