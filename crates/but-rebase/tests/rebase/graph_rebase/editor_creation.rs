@@ -322,10 +322,10 @@ fn workspace_with_empty_stack() -> Result<()> {
     │       │           ├── ·f555940 (⌂|🏘|✓|11)
     │       │           ├── ·d664be0 (⌂|🏘|✓|11)
     │       │           └── 🏁·fafd9d0 (⌂|🏘|✓|11)
-    │       └── 📙►:5[1]:stack-2
+    │       └── 📙►:4[1]:stack-2
     │           └── →:3:
-    └── ►:4[0]:origin/main →:2:
-        └── ►:2[1]:main <> origin/main →:4:
+    └── ►:5[0]:origin/main →:2:
+        └── ►:2[1]:main <> origin/main →:5:
             └── ·a0f2ac5 (⌂|✓|10)
                 └── →:3:
     ");

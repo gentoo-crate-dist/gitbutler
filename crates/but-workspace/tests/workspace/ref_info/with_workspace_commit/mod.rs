@@ -2808,7 +2808,7 @@ fn two_branches_one_advanced_two_parent_ws_commit_diverged_remote_tracking_branc
                 ),
                 segments: [
                     ref_info::ui::Segment {
-                        id: 4,
+                        id: 3,
                         ref_name: "►lane",
                         remote_tracking_ref_name: "None",
                         commits: [],
@@ -2826,7 +2826,7 @@ fn two_branches_one_advanced_two_parent_ws_commit_diverged_remote_tracking_branc
                 ref_name: FullName(
                     "refs/remotes/origin/main",
                 ),
-                segment_index: 3,
+                segment_index: 4,
                 commits_ahead: 1,
             },
         ),
@@ -2904,7 +2904,7 @@ fn two_branches_one_advanced_two_parent_ws_commit_diverged_remote_tracking_branc
                 ),
                 segments: [
                     ref_info::ui::Segment {
-                        id: 4,
+                        id: 3,
                         ref_name: "►lane",
                         remote_tracking_ref_name: "None",
                         commits: [],
@@ -2922,7 +2922,7 @@ fn two_branches_one_advanced_two_parent_ws_commit_diverged_remote_tracking_branc
                 ref_name: FullName(
                     "refs/remotes/origin/main",
                 ),
-                segment_index: 3,
+                segment_index: 4,
                 commits_ahead: 1,
             },
         ),
@@ -2995,7 +2995,7 @@ fn two_branches_one_advanced_two_parent_ws_commit_diverged_remote_tracking_branc
                 ),
                 segments: [
                     👉ref_info::ui::Segment {
-                        id: 4,
+                        id: 3,
                         ref_name: "►lane",
                         remote_tracking_ref_name: "None",
                         commits: [],
@@ -3013,7 +3013,7 @@ fn two_branches_one_advanced_two_parent_ws_commit_diverged_remote_tracking_branc
                 ref_name: FullName(
                     "refs/remotes/origin/main",
                 ),
-                segment_index: 3,
+                segment_index: 4,
                 commits_ahead: 1,
             },
         ),
@@ -3092,7 +3092,7 @@ fn two_branches_one_advanced_two_parent_ws_commit_diverged_remote_tracking_branc
                 ),
                 segments: [
                     ref_info::ui::Segment {
-                        id: 4,
+                        id: 3,
                         ref_name: "►lane",
                         remote_tracking_ref_name: "None",
                         commits: [],
@@ -3110,7 +3110,7 @@ fn two_branches_one_advanced_two_parent_ws_commit_diverged_remote_tracking_branc
                 ref_name: FullName(
                     "refs/remotes/origin/main",
                 ),
-                segment_index: 3,
+                segment_index: 4,
                 commits_ahead: 1,
             },
         ),

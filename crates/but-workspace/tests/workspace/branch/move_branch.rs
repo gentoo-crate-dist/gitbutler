@@ -903,8 +903,8 @@ fn move_empty_branch_onto_non_empty_branch_with_advanced_target() -> anyhow::Res
     let mut ws = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&ws), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on 85efbe4
-    ├── ≡📙:5:B on 85efbe4 {2}
-    │   └── 📙:5:B
+    ├── ≡📙:4:B on 85efbe4 {2}
+    │   └── 📙:4:B
     └── ≡📙:1:A on 85efbe4 {1}
         └── 📙:1:A
             └── ·09d8e52 (🏘️)
@@ -967,8 +967,8 @@ fn move_non_empty_branch_onto_empty_branch_with_advanced_target() -> anyhow::Res
     let mut ws = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&ws), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on 85efbe4
-    ├── ≡📙:5:B on 85efbe4 {2}
-    │   └── 📙:5:B
+    ├── ≡📙:4:B on 85efbe4 {2}
+    │   └── 📙:4:B
     └── ≡📙:1:A on 85efbe4 {1}
         └── 📙:1:A
             └── ·09d8e52 (🏘️)

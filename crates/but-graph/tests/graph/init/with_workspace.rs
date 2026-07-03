@@ -4445,9 +4445,9 @@ fn a_stack_segment_can_be_a_segment_elsewhere_and_stack_order() -> anyhow::Resul
     │       │   └── ·cbc6713 (⌂|🏘|1)
     │       │       └── ►:2[2]:anon:
     │       │           └── 🏁·fafd9d0 (⌂|🏘|1) ►main
-    │       └── 📙►:4[1]:lane
+    │       └── 📙►:3[1]:lane
     │           └── →:2:
-    └── ►:3[0]:origin/main
+    └── ►:4[0]:origin/main
         └── 🏁🟣da83717 (✓)
     ");
 
@@ -4459,8 +4459,8 @@ fn a_stack_segment_can_be_a_segment_elsewhere_and_stack_order() -> anyhow::Resul
     ├── ≡📙:1:advanced-lane on fafd9d0 {0}
     │   └── 📙:1:advanced-lane
     │       └── ·cbc6713 (🏘️)
-    └── ≡📙:4:lane on fafd9d0 {1}
-        └── 📙:4:lane
+    └── ≡📙:3:lane on fafd9d0 {1}
+        └── 📙:3:lane
     ");
 
     // Reverse the order of stacks in the worktree data.
@@ -4477,9 +4477,9 @@ fn a_stack_segment_can_be_a_segment_elsewhere_and_stack_order() -> anyhow::Resul
     │       │   └── ·cbc6713 (⌂|🏘|1)
     │       │       └── ►:2[2]:anon:
     │       │           └── 🏁·fafd9d0 (⌂|🏘|1) ►main
-    │       └── 📙►:4[1]:lane
+    │       └── 📙►:3[1]:lane
     │           └── →:2:
-    └── ►:3[0]:origin/main
+    └── ►:4[0]:origin/main
         └── 🏁🟣da83717 (✓)
     ");
 
@@ -4488,8 +4488,8 @@ fn a_stack_segment_can_be_a_segment_elsewhere_and_stack_order() -> anyhow::Resul
     ├── ≡📙:1:advanced-lane on fafd9d0 {1}
     │   └── 📙:1:advanced-lane
     │       └── ·cbc6713 (🏘️)
-    └── ≡📙:4:lane on fafd9d0 {0}
-        └── 📙:4:lane
+    └── ≡📙:3:lane on fafd9d0 {0}
+        └── 📙:3:lane
     ");
     Ok(())
 }
@@ -5797,9 +5797,9 @@ fn two_branches_one_advanced_two_parent_ws_commit_diverged_ttb() -> anyhow::Resu
     │       │   └── ·cbc6713 (⌂|🏘)
     │       │       └── ►:2[2]:anon:
     │       │           └── 🏁·fafd9d0 (⌂|🏘|1) ►main
-    │       └── 👉📙►:4[1]:lane
+    │       └── 👉📙►:3[1]:lane
     │           └── →:2:
-    └── ►:3[0]:origin/main
+    └── ►:4[0]:origin/main
         └── 🏁🟣da83717 (✓)
     ");
     insta::assert_snapshot!(graph_workspace(&graph.into_workspace()?), @"
@@ -5807,8 +5807,8 @@ fn two_branches_one_advanced_two_parent_ws_commit_diverged_ttb() -> anyhow::Resu
     ├── ≡📙:1:advanced-lane on fafd9d0 {1}
     │   └── 📙:1:advanced-lane
     │       └── ·cbc6713 (🏘️)
-    └── ≡👉📙:4:lane on fafd9d0 {0}
-        └── 👉📙:4:lane
+    └── ≡👉📙:3:lane on fafd9d0 {0}
+        └── 👉📙:3:lane
     ");
 
     let graph = Graph::from_head(
@@ -5826,9 +5826,9 @@ fn two_branches_one_advanced_two_parent_ws_commit_diverged_ttb() -> anyhow::Resu
     │       │   └── ·cbc6713 (⌂|🏘|1)
     │       │       └── ►:2[2]:anon:
     │       │           └── 🏁·fafd9d0 (⌂|🏘|✓|1) ►main
-    │       └── 📙►:4[1]:lane
+    │       └── 📙►:3[1]:lane
     │           └── →:2:
-    └── ►:3[0]:origin/main →:2:
+    └── ►:4[0]:origin/main →:2:
         └── 🏁🟣da83717 (✓)
     ");
 
@@ -5837,8 +5837,8 @@ fn two_branches_one_advanced_two_parent_ws_commit_diverged_ttb() -> anyhow::Resu
     ├── ≡📙:1:advanced-lane on fafd9d0 {1}
     │   └── 📙:1:advanced-lane
     │       └── ·cbc6713 (🏘️)
-    └── ≡📙:4:lane on fafd9d0 {0}
-        └── 📙:4:lane
+    └── ≡📙:3:lane on fafd9d0 {0}
+        └── 📙:3:lane
     ");
 
     let graph =
@@ -5851,9 +5851,9 @@ fn two_branches_one_advanced_two_parent_ws_commit_diverged_ttb() -> anyhow::Resu
     │       │   └── ·cbc6713 (⌂|🏘|1)
     │       │       └── ►:2[2]:anon:
     │       │           └── 🏁·fafd9d0 (⌂|🏘|1) ►main
-    │       └── 📙►:4[1]:lane
+    │       └── 📙►:3[1]:lane
     │           └── →:2:
-    └── ►:3[0]:origin/main
+    └── ►:4[0]:origin/main
         └── 🏁🟣da83717 (✓)
     ");
 
@@ -5862,8 +5862,8 @@ fn two_branches_one_advanced_two_parent_ws_commit_diverged_ttb() -> anyhow::Resu
     ├── ≡📙:1:advanced-lane on fafd9d0 {1}
     │   └── 📙:1:advanced-lane
     │       └── ·cbc6713 (🏘️)
-    └── ≡📙:4:lane on fafd9d0 {0}
-        └── 📙:4:lane
+    └── ≡📙:3:lane on fafd9d0 {0}
+        └── 📙:3:lane
     ");
     Ok(())
 }
@@ -6814,26 +6814,26 @@ fn ambiguous_worktrees() -> anyhow::Result<()> {
 
     ├── 👉📕►►►:0[0]:gitbutler/workspace[🌳@repo]
     │   └── ·a5f94a2 (⌂|🏘|0001)
-    │       ├── 📙►:6[1]:A <> origin/A →:5:
+    │       ├── 📙►:4[1]:A <> origin/A →:6:
     │       │   └── ►:3[2]:anon:
     │       │       ├── ·081bae9 (⌂|🏘|✓|1111) ►A-inside[📁wt-A-inside], ►A-outside[📁wt-A-outside]
     │       │       └── 🏁·3183e43 (⌂|🏘|✓|1111)
     │       └── ►:1[1]:B[📁wt-B-inside]
     │           └── ·3e01e28 (⌂|🏘|0001)
     │               └── →:3:
-    ├── ►:4[0]:origin/main →:2:
-    │   └── ►:2[1]:main <> origin/main →:4:
+    ├── ►:5[0]:origin/main →:2:
+    │   └── ►:2[1]:main <> origin/main →:5:
     │       └── ·8dc508f (⌂|✓|0010)
     │           └── →:3:
-    └── ►:5[0]:origin/A →:6:
+    └── ►:6[0]:origin/A →:4:
         └── 🟣197ddce (0x0|1000)
             └── →:3:
     ");
 
     insta::assert_snapshot!(graph_workspace(&graph.into_workspace()?), @"
     📕🏘️:0:gitbutler/workspace[🌳@repo] <> ✓refs/remotes/origin/main⇣1 on 081bae9
-    ├── ≡📙:6:A <> origin/A →:5:⇣1 on 081bae9 {0}
-    │   └── 📙:6:A <> origin/A →:5:⇣1
+    ├── ≡📙:4:A <> origin/A →:6:⇣1 on 081bae9 {0}
+    │   └── 📙:4:A <> origin/A →:6:⇣1
     │       └── 🟣197ddce
     └── ≡:1:B[📁wt-B-inside] on 081bae9
         └── :1:B[📁wt-B-inside]
@@ -6859,26 +6859,26 @@ fn ambiguous_worktrees() -> anyhow::Result<()> {
 
     ├── 📕►►►:0[0]:gitbutler/workspace[🌳]
     │   └── ·a5f94a2 (⌂|🏘)
-    │       ├── 📙►:6[1]:A <> origin/A →:5:
+    │       ├── 📙►:4[1]:A <> origin/A →:6:
     │       │   └── ►:3[2]:anon:
     │       │       ├── ·081bae9 (⌂|🏘|✓|1111) ►A-inside[📁wt-A-inside], ►A-outside[📁wt-A-outside]
     │       │       └── 🏁·3183e43 (⌂|🏘|✓|1111)
     │       └── 👉►:1[1]:B[📁wt-B-inside@repo]
     │           └── ·3e01e28 (⌂|🏘|0001)
     │               └── →:3:
-    ├── ►:4[0]:origin/main →:2:
-    │   └── ►:2[1]:main <> origin/main →:4:
+    ├── ►:5[0]:origin/main →:2:
+    │   └── ►:2[1]:main <> origin/main →:5:
     │       └── ·8dc508f (⌂|✓|0010)
     │           └── →:3:
-    └── ►:5[0]:origin/A →:6:
+    └── ►:6[0]:origin/A →:4:
         └── 🟣197ddce (0x0|1000)
             └── →:3:
     ");
 
     insta::assert_snapshot!(graph_workspace(&graph.into_workspace()?), "workspace projection should keep the linked-worktree ownership marker on the focused stack while leaving the workspace ref itself unowned", @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on 081bae9
-    ├── ≡📙:6:A <> origin/A →:5:⇣1 on 081bae9 {0}
-    │   └── 📙:6:A <> origin/A →:5:⇣1
+    ├── ≡📙:4:A <> origin/A →:6:⇣1 on 081bae9 {0}
+    │   └── 📙:4:A <> origin/A →:6:⇣1
     │       └── 🟣197ddce
     └── ≡👉:1:B[📁wt-B-inside@repo] on 081bae9
         └── 👉:1:B[📁wt-B-inside@repo]
@@ -7230,16 +7230,16 @@ fn reproduce_12146() -> anyhow::Result<()> {
 
     ├── 👉📕►►►:0[0]:gitbutler/workspace[🌳]
     │   └── ·d77ecda (⌂|🏘|01)
-    │       ├── 📙►:5[1]:A
+    │       ├── 📙►:4[1]:A
     │       │   └── ►:2[2]:anon:
     │       │       └── ·81d4e38 (⌂|🏘|01)
-    │       │           └── ►:3[3]:main <> origin/main →:4:
+    │       │           └── ►:3[3]:main <> origin/main →:5:
     │       │               └── 🏁·e32cf47 (⌂|🏘|✓|11)
     │       └── 📙►:1[1]:B
     │           └── ·7163661 (⌂|🏘|01)
     │               └── →:2:
-    └── ►:4[0]:origin/main →:3:
-        └── →:3: (main →:4:)
+    └── ►:5[0]:origin/main →:3:
+        └── →:3: (main →:5:)
     ");
 
     // The sibling ID is not set, and we see only two stacks: B owns 7163661,
@@ -7247,8 +7247,8 @@ fn reproduce_12146() -> anyhow::Result<()> {
     let ws = &graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(ws), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on e32cf47
-    ├── ≡📙:5:A on e32cf47 {0}
-    │   └── 📙:5:A
+    ├── ≡📙:4:A on e32cf47 {0}
+    │   └── 📙:4:A
     │       └── ·81d4e38 (🏘️)
     └── ≡📙:1:B on e32cf47 {1}
         └── 📙:1:B

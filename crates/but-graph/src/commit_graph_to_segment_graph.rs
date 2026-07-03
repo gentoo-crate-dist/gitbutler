@@ -705,20 +705,30 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
     let mut sg = SegmentGraph::new();
     let mut seg_of_tip: HashMap<gix::ObjectId, SegmentIndex> = HashMap::new();
 
-    // Create a local segment per tip, holding its first-parent commit run.
+    // Create a local segment per tip, holding its first-parent commit run. Names come from the
+    // plan: floated and demoted tips start ANONYMOUS (their name never touches the segment); a
+    // float's displaced build-time name rides on the tip commit as a passive ref.
+    let floated: HashMap<gix::ObjectId, &Float> =
+        plan.floats.iter().map(|fl| (fl.tip, fl)).collect();
     for &tip in &tips {
-        let commits = commit_run(cg, tip, &in_set, &is_boundary);
-        let ref_name = materialize_tip_name(
-            cg,
-            tip,
-            workspace_commit,
-            ws_is_managed_merge,
-            entrypoint_forced_boundary.then_some(entrypoint),
-            entrypoint_ref.as_ref(),
-            remote_tracking,
-            meta,
-            project_meta.target_ref.as_ref(),
-        );
+        let mut commits = commit_run(cg, tip, &in_set, &is_boundary);
+        let suppressed = floated.contains_key(&tip) || plan.demoted.contains(&tip);
+        let ref_name = if suppressed {
+            None
+        } else {
+            plan.base_name_of.get(&tip).cloned()
+        };
+        if let Some(displaced) = floated.get(&tip).and_then(|fl| fl.displaced.as_ref())
+            && let Some(c0) = commits.first_mut()
+            && !c0.refs.iter().any(|r| r.ref_name == *displaced)
+        {
+            c0.refs.push(RefInfo {
+                ref_name: displaced.clone(),
+                commit_id: Some(tip),
+                worktree: None,
+            });
+            c0.refs.sort_by(|a, b| a.ref_name.cmp(&b.ref_name));
+        }
         let ref_info = ref_name.map(|ref_name| RefInfo {
             ref_name,
             commit_id: Some(tip),
@@ -741,9 +751,32 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
         sg.node_mut(sidx).expect("just added").id = sidx;
         seg_of_tip.insert(tip, sidx);
     }
+    // The planned float placeholders: empty segments carrying the floated names, spliced between
+    // the workspace and the now-anonymous shared tips (edges below).
+    let mut placeholder_of: HashMap<gix::ObjectId, SegmentIndex> = HashMap::new();
+    for float in &plan.floats {
+        let sidx = sg.add_node(Segment {
+            id: 0,
+            generation: 0,
+            ref_info: Some(RefInfo {
+                ref_name: float.name.clone(),
+                commit_id: Some(float.tip),
+                worktree: None,
+            }),
+            remote_tracking_ref_name: None,
+            sibling_segment_id: None,
+            remote_tracking_branch_segment_id: None,
+            commits: Vec::new(),
+            metadata: None,
+            connections: Vec::new(),
+        });
+        sg.node_mut(sidx).expect("just added").id = sidx;
+        placeholder_of.insert(float.tip, sidx);
+    }
 
     // Connections: for each segment, its bottom commit's parents point at the segment owning each
-    // parent, in first-parent order.
+    // parent, in first-parent order. The workspace's edge to a FLOATED parent routes through the
+    // placeholder instead.
     for &tip in &tips {
         let src = seg_of_tip[&tip];
         let bottom = sg
@@ -755,11 +788,29 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
             .unwrap_or(tip);
         for parent in cg.all_parent_ids(bottom) {
             if let Some(&owner) = owner_of.get(&parent) {
-                let dst = seg_of_tip[&owner];
-                let conn = Connection::new(dst, None, Some(bottom), None, Some(parent));
+                let conn = if tip == workspace_commit
+                    && let Some(&ph) = placeholder_of.get(&parent)
+                {
+                    Connection::new(ph, None, Some(bottom), None, None)
+                } else {
+                    let dst = seg_of_tip[&owner];
+                    Connection::new(dst, None, Some(bottom), None, Some(parent))
+                };
                 sg.add_edge(src, conn);
             }
         }
+    }
+    // Placeholder → the anonymized shared segment.
+    for float in &plan.floats {
+        let (Some(&ph), Some(&tip_sidx)) =
+            (placeholder_of.get(&float.tip), seg_of_tip.get(&float.tip))
+        else {
+            continue;
+        };
+        sg.add_edge(
+            ph,
+            Connection::new(tip_sidx, None, None, None, Some(float.tip)),
+        );
     }
 
     // Remote segments: for each local segment with a remote-tracking ref whose remote tip is present,
@@ -774,6 +825,8 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
         symbolic_remotes,
         stack_branches,
         &pinned_commits,
+        remote_tracking,
+        &plan,
     );
     add_untracked_remote_segments(
         cg,
@@ -795,8 +848,9 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
         && let Some(tip) = cg.commit_by_ref(tr.as_ref())
     {
         if in_set.contains(&tip) {
+            let owner_tip = owner_of.get(&tip).copied().unwrap_or(tip);
             if let Some(owner_sidx) = segment_by_commit(&sg, tip)
-                && sg.node(owner_sidx).is_some_and(|s| s.ref_info.is_none())
+                && plan.effective_name(&sg, owner_sidx, owner_tip).is_none()
             {
                 if let Some(s) = sg.node_mut(owner_sidx) {
                     s.ref_info = Some(RefInfo {
@@ -975,9 +1029,11 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
                 // An ANONYMOUS segment starting at the tip takes the tip's name directly — the
                 // walk names tip-seeded segments; the empty splice is only for a commit already
                 // named by another ref.
-                if sg.node(owner_sidx).is_some_and(|s| {
-                    s.ref_info.is_none() && s.commits.first().is_some_and(|c| c.id == t.id)
-                }) {
+                if sg
+                    .node(owner_sidx)
+                    .is_some_and(|s| s.commits.first().is_some_and(|c| c.id == t.id))
+                    && plan.effective_name(&sg, owner_sidx, t.id).is_none()
+                {
                     if let Some(s) = sg.node_mut(owner_sidx) {
                         s.ref_info = Some(RefInfo {
                             ref_name,
@@ -1084,10 +1140,24 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
     // workspace segment sits above it.
     let mut ws_empty_sidx = None;
     if managed {
+        // The remote/target passes linked remotes against the suppressed names (they key on the
+        // plan's effective names); the segments themselves are anonymous lanes-to-be — their
+        // remote links belong to the floated/demoted name's segment, re-established by
+        // `reconcile_remote_siblings`.
+        for tip in plan
+            .floats
+            .iter()
+            .map(|fl| fl.tip)
+            .chain(plan.demoted.iter().copied())
+        {
+            if let Some(s) = seg_of_tip.get(&tip).and_then(|&sidx| sg.node_mut(sidx)) {
+                s.remote_tracking_ref_name = None;
+                s.remote_tracking_branch_segment_id = None;
+            }
+        }
         // A workspace-stack tip that another stack flows into (via first-parent) is a SHARED commit: it
         // is anonymized into its own segment and its ref floats up as an empty placeholder that the
         // workspace connects to (the dependent-branch pattern).
-        anonymize_shared_stack_tips(&mut sg, workspace_commit, &seg_of_tip, &plan.floats);
         // The empty workspace segment must exist BEFORE empty branches are spliced in, so each empty
         // stack routes from it (not from the stack segment the ws ref sits on — which would be degenerate).
         if empty_ws_case {
@@ -1412,6 +1482,26 @@ struct Float {
 struct LanePlan {
     floats: Vec<Float>,
     demoted: HashSet<gix::ObjectId>,
+    /// Every boundary tip's MATERIALIZATION name (before floats/demotions suppress it on the
+    /// segment). The remote/target passes run before the lane shape existed historically and
+    /// keyed their decisions on these — they read them through [`Names`].
+    base_name_of: HashMap<gix::ObjectId, gix::refs::FullName>,
+}
+
+impl LanePlan {
+    /// The name the remote/target/explicit-tip passes must key on for `tip`'s segment: the
+    /// segment's actual name (covers their own renames), else the SUPPRESSED base name — those
+    /// passes historically ran before the lane shape was applied and saw the build-time names.
+    fn effective_name(
+        &self,
+        sg: &SegmentGraph,
+        sidx: SegmentIndex,
+        tip: gix::ObjectId,
+    ) -> Option<gix::refs::FullName> {
+        sg.node(sidx)
+            .and_then(|s| s.ref_info.as_ref().map(|ri| ri.ref_name.clone()))
+            .or_else(|| self.base_name_of.get(&tip).cloned())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1432,10 +1522,8 @@ fn lane_plan<T: but_core::RefMetadata>(
     let mut plan = LanePlan {
         floats: Vec::new(),
         demoted: HashSet::new(),
+        base_name_of: HashMap::new(),
     };
-    if !managed {
-        return plan;
-    }
     // The naming state as the lane passes will see it: materialization names first…
     let mut name_of: HashMap<gix::ObjectId, gix::refs::FullName> = HashMap::new();
     for &tip in &facts.tips {
@@ -1452,6 +1540,10 @@ fn lane_plan<T: but_core::RefMetadata>(
         ) {
             name_of.insert(tip, name);
         }
+    }
+    plan.base_name_of = name_of.clone();
+    if !managed {
+        return plan;
     }
     // …then the anon-owner renames of `add_remote_segments` (a remote pointing BEHIND/at an
     // anonymous in-set segment names it), in materialization order like the pass.
@@ -1758,6 +1850,7 @@ fn reconcile_remote_siblings(
 }
 
 #[expect(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn add_remote_segments(
     cg: &CommitGraph,
     sg: &mut SegmentGraph,
@@ -1767,12 +1860,16 @@ fn add_remote_segments(
     symbolic_remotes: &[String],
     stack_branches: Option<&[Vec<gix::refs::FullName>]>,
     pinned_commits: &HashSet<gix::ObjectId>,
+    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
+    plan: &LanePlan,
 ) {
+    // Locals are keyed on the plan's EFFECTIVE names: this pass historically ran before the lane
+    // shape (floats/demotions) was applied and saw every build-time name.
     let mut locals: Vec<(SegmentIndex, gix::refs::FullName, gix::ObjectId)> = seg_of_tip
         .iter()
         .filter_map(|(&tip, &sidx)| {
-            sg.node(sidx)
-                .and_then(|s| s.remote_tracking_ref_name.clone())
+            plan.effective_name(sg, sidx, tip)
+                .and_then(|name| remote_tracking.get(&name).cloned())
                 .map(|rt| (sidx, rt, tip))
         })
         .collect();
@@ -1788,7 +1885,7 @@ fn add_remote_segments(
         if in_set.contains(&remote_tip) {
             let owner = owner_of.get(&remote_tip).copied().unwrap_or(remote_tip);
             let owner_sidx = seg_of_tip[&owner];
-            let owner_is_anon = sg.node(owner_sidx).is_some_and(|s| s.ref_info.is_none());
+            let owner_is_anon = plan.effective_name(sg, owner_sidx, owner).is_none();
             if owner_is_anon {
                 if let Some(s) = sg.node_mut(owner_sidx) {
                     s.ref_info = Some(RefInfo {
@@ -2258,79 +2355,6 @@ fn add_empty_remote_root(
         .expect("present")
         .remote_tracking_branch_segment_id = Some(remote_sidx);
     remote_sidx
-}
-
-/// Apply the plan's FLOATS: each floated workspace-parent tip goes anonymous, its displaced
-/// name (if any) returns to the commit as a passive ref, and an empty placeholder segment
-/// carrying the floated name splices in between the workspace and the now-anonymous segment.
-/// This reproduces the dependent-branch shape (empty A → anon(shared) ← B). The decisions live
-/// in [`lane_plan`].
-fn anonymize_shared_stack_tips(
-    sg: &mut SegmentGraph,
-    workspace_commit: gix::ObjectId,
-    seg_of_tip: &HashMap<gix::ObjectId, SegmentIndex>,
-    floats: &[Float],
-) {
-    let Some(&ws_sidx) = seg_of_tip.get(&workspace_commit) else {
-        return;
-    };
-    for float in floats {
-        let Some(&p_sidx) = seg_of_tip.get(&float.tip) else {
-            continue;
-        };
-        if std::env::var_os("BUT_GRAPH_FLIP_DEBUG").is_some() {
-            eprintln!(
-                "FLIP anonymize_shared_stack_tips floats ref off segment of {}",
-                float.tip
-            );
-        }
-        if let Some(displaced) = &float.displaced
-            && let Some(c0) = sg.node_mut(p_sidx).and_then(|s| s.commits.first_mut())
-            && !c0.refs.iter().any(|r| r.ref_name == *displaced)
-        {
-            c0.refs.push(RefInfo {
-                ref_name: displaced.clone(),
-                commit_id: Some(float.tip),
-                worktree: None,
-            });
-            c0.refs.sort_by(|a, b| a.ref_name.cmp(&b.ref_name));
-        }
-        if let Some(s) = sg.node_mut(p_sidx) {
-            s.ref_info = None;
-            s.remote_tracking_ref_name = None;
-            s.remote_tracking_branch_segment_id = None;
-        }
-        let placeholder = sg.add_node(Segment {
-            id: 0,
-            generation: 0,
-            ref_info: Some(RefInfo {
-                ref_name: float.name.clone(),
-                commit_id: Some(float.tip),
-                worktree: None,
-            }),
-            remote_tracking_ref_name: None,
-            sibling_segment_id: None,
-            remote_tracking_branch_segment_id: None,
-            commits: Vec::new(),
-            metadata: None,
-            connections: Vec::new(),
-        });
-        sg.node_mut(placeholder).expect("just added").id = placeholder;
-        // Workspace now connects to the placeholder instead of directly to the shared segment.
-        if let Some(ws) = sg.node_mut(ws_sidx) {
-            for conn in &mut ws.connections {
-                if conn.target == p_sidx {
-                    conn.target = placeholder;
-                    conn.dst_id = None;
-                }
-            }
-        }
-        // Placeholder → the anonymized shared segment.
-        sg.add_edge(
-            placeholder,
-            Connection::new(p_sidx, None, None, None, Some(float.tip)),
-        );
-    }
 }
 
 /// Splice an empty `gitbutler/workspace` segment above the stack tip the workspace ref is co-located
