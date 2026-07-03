@@ -25,7 +25,7 @@ fn local_branches_by_id(
 /// If `ref_name` is `None`, and `refs_by_id_lookup` is `Some`, it will try to look up unambiguous
 /// references on that object.
 /// Note that `ref_name` should only be set if you are sure that it is unambiguous, and otherwise won't interfere with
-/// the post-processing or the workspace projection later.
+/// the graph build or the workspace projection later.
 pub(crate) fn branch_segment_from_name_and_meta<T: RefMetadata>(
     ref_name: Option<(gix::refs::FullName, Option<SegmentMetadata>)>,
     meta: &OverlayMetadata<'_, T>,

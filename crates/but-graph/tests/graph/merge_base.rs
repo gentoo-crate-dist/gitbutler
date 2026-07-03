@@ -1,7 +1,5 @@
 use anyhow::Context;
-use but_graph::{
-    CommitFlags, FirstParent, Graph, Segment, SegmentIndex, SegmentRelation, init::Tip,
-};
+use but_graph::{CommitFlags, FirstParent, Graph, Segment, SegmentIndex, init::Tip};
 use but_testsupport::{graph_tree, visualize_commit_graph_all};
 
 use crate::init::{read_only_in_memory_scenario, standard_options};
@@ -60,7 +58,7 @@ fn find_git_merge_base_handles_duplicate_queue_entries_and_redundant_bases() -> 
 }
 
 #[test]
-fn relation_between_matches_merge_base_in_redundant_ancestor_case() -> anyhow::Result<()> {
+fn merge_base_in_redundant_ancestor_case() -> anyhow::Result<()> {
     let (repo, meta) = read_only_in_memory_scenario("four-diamond")?;
     let graph = Graph::from_head(
         &repo,
@@ -74,12 +72,12 @@ fn relation_between_matches_merge_base_in_redundant_ancestor_case() -> anyhow::R
     let a = segment_id_by_ref_name(&graph, "refs/heads/A")?;
     let c = segment_id_by_ref_name(&graph, "refs/heads/C")?;
 
-    assert_eq!(graph.relation_between(a, merged), SegmentRelation::Ancestor);
-    assert_eq!(
-        graph.relation_between(merged, a),
-        SegmentRelation::Descendant
-    );
-    assert_eq!(graph.relation_between(a, c), SegmentRelation::Diverged);
+    // `a` is an ancestor of `merged` (either order), while `a` and `c` diverge: they share
+    // history without one being the base of the other.
+    assert_eq!(graph.find_merge_base(a, merged), Some(a));
+    assert_eq!(graph.find_merge_base(merged, a), Some(a));
+    let base = graph.find_merge_base(a, c);
+    assert!(base.is_some_and(|base| base != a && base != c));
     insta::assert_snapshot!(graph_tree(&graph), @"
 
     └── 👉►:0[0]:merged[🌳]
@@ -219,8 +217,12 @@ fn explicit_traversal_tips_include_unnamed_revisions() -> anyhow::Result<()> {
         ids_by_revs(&repo, &["merged", "C", "C^1", "C^2"])?
     );
     assert_eq!(
-        graph.find_merge_base_octopus_by_commit_id([a_id, c_id, merged_id])?,
-        Some(main_id)
+        graph.find_merge_base_octopus([
+            graph.segment_id_by_commit_id(a_id)?,
+            graph.segment_id_by_commit_id(c_id)?,
+            graph.segment_id_by_commit_id(merged_id)?,
+        ]),
+        Some(graph.segment_id_by_commit_id(main_id)?)
     );
 
     Ok(())
@@ -284,7 +286,7 @@ fn explicit_traversal_prioritizes_integrated_tips_independent_of_input_order() -
 }
 
 #[test]
-fn relation_between_handles_identity_and_disjoint_segments() -> anyhow::Result<()> {
+fn merge_base_handles_identity_and_disjoint_segments() -> anyhow::Result<()> {
     let (repo, meta) = read_only_in_memory_scenario("four-diamond")?;
     let mut graph = Graph::from_head(
         &repo,
@@ -296,19 +298,12 @@ fn relation_between_handles_identity_and_disjoint_segments() -> anyhow::Result<(
 
     let main = segment_id_by_ref_name(&graph, "refs/heads/main")?;
     let a = segment_id_by_ref_name(&graph, "refs/heads/A")?;
-    assert_eq!(
-        graph.relation_between(main, main),
-        SegmentRelation::Identity
-    );
+    assert_eq!(graph.find_merge_base(main, main), Some(main));
 
     let orphan = graph.insert_segment(Segment {
-        generation: 0,
         ..Default::default()
     });
-    assert_eq!(
-        graph.relation_between(main, orphan),
-        SegmentRelation::Disjoint
-    );
+    assert_eq!(graph.find_merge_base(main, orphan), None);
     assert_eq!(graph.find_merge_base_octopus([main, orphan]), None);
     assert_eq!(graph.find_merge_base_octopus([main, orphan, a]), None);
 
@@ -331,27 +326,12 @@ fn merge_base_apis_can_resolve_segments_by_first_commit_id() -> anyhow::Result<(
     let c = segment_id_by_ref_name(&graph, "refs/heads/C")?;
     let main = segment_id_by_ref_name(&graph, "refs/heads/main")?;
 
-    let merged_id = graph[merged].tip().expect("commit");
-    let a_id = graph[a].tip().expect("commit");
-    let c_id = graph[c].tip().expect("commit");
-    let main_id = graph[main].tip().expect("commit");
-
-    assert_eq!(
-        graph.relation_between_by_commit_id(a_id, merged_id)?,
-        SegmentRelation::Ancestor
-    );
-    assert_eq!(
-        graph.find_merge_base_by_commit_id(merged_id, a_id)?,
-        Some(a_id)
-    );
-    assert_eq!(
-        graph.find_merge_base_octopus_by_commit_id([a_id, c_id, merged_id])?,
-        Some(main_id)
-    );
+    assert_eq!(graph.find_merge_base(merged, a), Some(a));
+    assert_eq!(graph.find_merge_base_octopus([a, c, merged]), Some(main));
 
     assert!(
         graph
-            .find_merge_base_by_commit_id(repo.object_hash().null(), main_id)
+            .segment_id_by_commit_id(repo.object_hash().null())
             .is_err()
     );
 

@@ -32,14 +32,14 @@ pub(crate) type Entrypoint = Option<(gix::ObjectId, Option<gix::refs::FullName>)
 /// ## Traversal invariants
 ///
 /// The traversal will build a segment graph, where Segments follow specific rules.
-/// We differentiate between [tip segments](Segment), segments created from [Tip]s, (*TS*) and
+/// We differentiate between [tip segments](crate::Segment), segments created from [Tip]s, (*TS*) and
 /// ancestor segments (*AS*), which are ancestors of *TS* and connected to them by outgoing
 /// connections.
 ///
-/// - Virtual segments (*VS*) are created in a post-processing step to represent refs
-///   which are described in [but_core::ref_metadata::Workspace]. They are [named](Segment::ref_name())
+/// - Virtual segments (*VS*) are minted by lane materialization to represent refs
+///   which are described in [but_core::ref_metadata::Workspace]. They are [named](crate::Segment::ref_name())
 ///   and always empty graph nodes, and ordinary virtual segments have *exactly one*
-///   outgoing connection that lets [Graph::resolve_to_unambiguously_pointed_to_commit()]
+///   outgoing connection that lets `Graph::resolve_to_unambiguously_pointed_to_commit()`
 ///   find the commit named by the ref. The commit is owned by another segment, sometimes
 ///   because another segment was prioritized when multiple refs point to the same commit.
 /// - The virtual workspace tip segment is a special kind of *VS*, which may have one or more
@@ -48,17 +48,17 @@ pub(crate) type Entrypoint = Option<(gix::ObjectId, Option<gix::refs::FullName>)
 ///   be followed, yielding multiple commits.
 ///   Note that ordinary workspace tip segments may also exist as *TS*, which do own a commit,
 ///   which *typically* is the workspace commit.
-/// - After the traversal, before post-processing, forks and joins of the underlying
+/// - Forks and joins of the underlying
 ///   commit graph are represented by segments. This allows traversals or
 ///   graph computations, like merge-bases, to work the same as on the commit-graph, but
 ///   possibly with less jumps among nodes as segments may contain more than one commit,
 ///   allowing to skip over uninteresting commits naturally.
-/// - After post-processing, the graph may not fully represent the commit-graph anymore
+/// - The built graph may not fully represent the commit-graph
 ///   due to the creation of *VS*. What makes a *VS* virtual is not the ref itself,
 ///   but that its relationship to other segments is not represented by the Git
 ///   commit-graph or by Git refs: to Git, these are refs pointing to the same commit,
 ///   while GitButler sees one or more stacks of branches with specific ordering.
-/// - *TS* with [Self::ref_name] set will return that as [Segment::ref_name()].
+/// - *TS* with [Self::ref_name] set will return that as [crate::Segment::ref_name()].
 /// - *TS* that contain [Self::id] contain it as first commit
 /// - *TS* that don't contain [Self::id] are empty and can find their commit by following
 ///   their only outgoing connection until a non-empty commit is found which contains
@@ -333,7 +333,7 @@ type WorkspaceTargetTip = (gix::refs::FullName, gix::ObjectId, Option<LocalTrack
 ///
 /// [`queue_initial_tips()`] consumes this value to create graph *segments*, seed
 /// the traversal queue, and provide the auxiliary ref and remote information
-/// needed by traversal and post-processing.
+/// needed by the traversal and the graph build.
 ///
 /// This means that each of these tip *will get its own possibly empty* graph segment.
 struct InitialTips {
@@ -510,7 +510,7 @@ impl Options {
     /// The commit is queued like an integrated target so traversal can connect
     /// the workspace to history that may otherwise be outside the ordinary
     /// target ref or workspace metadata. The tip is also kept as a tip of
-    /// interest and re-resolved after post-processing so workspace projection
+    /// interest and re-resolved against the built graph so workspace projection
     /// can use it as a past target/base candidate.
     pub fn with_extra_target_commit_id(mut self, id: impl Into<gix::ObjectId>) -> Self {
         self.extra_target_commit_id = Some(id.into());
@@ -617,7 +617,7 @@ impl Graph {
     /// * Multiple tips with different [roles](TipRole) may point to the same commit id,
     ///   as multiple refs can name the same commit.
     /// * A detached tip must be the entrypoint and cannot carry a ref name.
-    /// * The entrypoint always causes the start of a [`Segment`].
+    /// * The entrypoint always causes the start of a [`crate::Segment`].
     /// * Tips discovered from workspace metadata preserve their queue order.
     ///   Explicit tips without a custom queue position are normalized into
     ///   deterministic traversal order: integrated and target tips first,
@@ -638,7 +638,7 @@ impl Graph {
     /// * Remote tracking branches are picked up during traversal for any ref
     ///   that we reached through traversal.
     ///     - Remote tracking branches are discovered only for refs encountered
-    ///       during traversal. Segments created later during post-processing,
+    ///       during traversal. Segments minted later during the graph build,
     ///       especially virtual or empty segments, do not cause additional remote
     ///       traversal.
     ///     - Remote tracking branches never take commits that are already owned.
@@ -694,7 +694,7 @@ impl Graph {
     /// contain exactly one tip whose [`Tip::is_entrypoint`] flag is set.
     /// `meta` provides branch metadata for any refs encountered while walking.
     /// `options` controls tag collection, traversal limits, additional
-    /// integrated tips, and post-processing behavior.
+    /// integrated tips, and graph-build behavior.
     pub fn from_commit_traversal_tips(
         repo: &gix::Repository,
         tips: impl IntoIterator<Item = Tip>,
@@ -959,7 +959,7 @@ fn validate_tip_ref(
 /// The traversal seed is the commit id, the traversal role, and whether the tip
 /// is the entrypoint. Labels and presentation data like `ref_name`, metadata,
 /// detached entrypoint mode, and caller order are intentionally ignored here:
-/// they can affect naming, post-processing, or stable tie-breaking, but they
+/// they can affect naming, the graph build, or stable tie-breaking, but they
 /// don't make it useful to enqueue the same commit with the same traversal
 /// semantics twice.
 fn tips_have_same_traversal_seed(previous: &Tip, tip: &Tip) -> bool {
@@ -1110,7 +1110,7 @@ fn tips_in_queue_order(
 ///
 /// Workspace, workspace-stack, and target-local tips are not just additional
 /// roots. Their relative order influences which segment owns a shared commit
-/// and how post-processing reconstructs virtual workspace and stack segments.
+/// and how the graph build mints virtual workspace and stack segments.
 /// Detecting such tips switches sorting from "mostly preserve caller order" to
 /// "rebuild the metadata order deterministically".
 fn has_workspace_related_tips(tips: &[Tip]) -> bool {

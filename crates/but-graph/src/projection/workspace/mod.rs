@@ -6,7 +6,6 @@ use crate::{Graph, SegmentIndex};
 
 pub(super) mod api;
 mod init;
-pub(crate) use init::Downgrade;
 
 /// A workspace reference is a list of [Stacks](Stack), with a reference to the underlying [`Graph`].
 #[derive(Clone)]
@@ -69,6 +68,46 @@ pub(crate) struct WorkspaceState {
     pub target_ref: Option<TargetRef>,
     pub target_commit: Option<TargetCommit>,
     pub metadata: Option<ref_metadata::Workspace>,
+}
+
+/// Construction: the workspace-level entry points, mirroring the graph traversals. These are
+/// what operations use — the segment [`Graph`] is carried as [`Workspace::graph`], but nothing
+/// outside the crate needs to build one. (The fold: builder and projection fuse behind these.)
+impl Workspace {
+    /// Build the workspace as seen from `HEAD` — the standard entry point.
+    pub fn from_head(
+        repo: &gix::Repository,
+        meta: &impl but_core::RefMetadata,
+        project_meta: but_core::ref_metadata::ProjectMeta,
+        options: crate::init::Options,
+    ) -> anyhow::Result<Self> {
+        Graph::from_head(repo, meta, project_meta, options)?.into_workspace()
+    }
+
+    /// Build the workspace as seen from `tip` (a checkout or preview position), named by
+    /// `ref_name` if the position is checked out as a ref.
+    pub fn from_commit_traversal(
+        tip: gix::Id<'_>,
+        ref_name: impl Into<Option<gix::refs::FullName>>,
+        meta: &impl but_core::RefMetadata,
+        project_meta: but_core::ref_metadata::ProjectMeta,
+        options: crate::init::Options,
+    ) -> anyhow::Result<Self> {
+        Graph::from_commit_traversal(tip, ref_name, meta, project_meta, options)?.into_workspace()
+    }
+
+    /// Re-read the world with in-memory `overlay` refs and metadata, yielding the workspace as
+    /// it would look after applying them.
+    pub fn redo_with_overlay(
+        &self,
+        repo: &gix::Repository,
+        meta: &impl but_core::RefMetadata,
+        overlay: crate::init::Overlay,
+    ) -> anyhow::Result<Self> {
+        self.graph
+            .redo_traversal_with_overlay(repo, meta, overlay)?
+            .into_workspace()
+    }
 }
 
 impl Workspace {
@@ -226,9 +265,8 @@ impl TargetRef {
         graph: &Graph,
         lower_bound_segment: Option<SegmentIndex>,
     ) {
-        let lower_bound = lower_bound_segment.map(|sidx| (sidx, graph[sidx].generation));
         self.commits_ahead = 0;
-        Self::visit_upstream_commits(graph, self.segment_index, lower_bound, |s| {
+        Self::visit_upstream_commits(graph, self.segment_index, lower_bound_segment, |s| {
             self.commits_ahead += s.commits.len();
         })
     }

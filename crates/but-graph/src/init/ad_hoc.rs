@@ -1,6 +1,6 @@
 //! Ad-hoc/single-branch mode: persisted GitButler-created branch ordering, applied to a finished
-//! [`Graph`]. Runs in the walk's post-processing and on the flip's non-managed builds — it only
-//! reads segments, refs, and metadata, so it is builder-agnostic.
+//! [`Graph`] by the non-managed builds — it only reads segments, refs, and metadata, so it is
+//! builder-agnostic.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -19,19 +19,6 @@ use crate::{
 };
 
 impl Graph {
-    /// Recompute every segment's generation number (the maximum distance from a source segment).
-    pub(crate) fn compute_generation_numbers(&mut self) {
-        for sidx in self.inner.toposort() {
-            let max_gen_of_incoming = self
-                .inner
-                .neighbors_directed(sidx, crate::Direction::Incoming)
-                .map(|sidx| self[sidx].generation + 1)
-                .max()
-                .unwrap_or(0);
-            self[sidx].generation = max_gen_of_incoming;
-        }
-    }
-
     /// In ad-hoc/single-branch mode, use persisted GitButler-created branch
     /// ordering to split multiple same-tip refs into empty stack segments.
     pub(crate) fn ad_hoc_branch_stack_upgrades<T: RefMetadata>(

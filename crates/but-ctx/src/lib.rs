@@ -766,13 +766,12 @@ impl Context {
     fn workspace_from_head(&self) -> anyhow::Result<but_graph::Workspace> {
         let repo = self.repo.get()?;
         let meta = self.meta_inner_read_only()?;
-        let graph = but_graph::Graph::from_head(
+        but_graph::Workspace::from_head(
             &repo,
             &meta,
             self.project_meta()?,
             but_graph::init::Options::limited(),
-        )?;
-        graph.into_workspace()
+        )
     }
 
     fn meta_inner_read_only(&self) -> anyhow::Result<but_meta::VirtualBranchesTomlMetadata> {

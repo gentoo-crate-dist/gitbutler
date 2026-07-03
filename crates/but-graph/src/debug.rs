@@ -120,7 +120,7 @@ impl Graph {
         Ok(self)
     }
 
-    /// Like [`Self::commit_debug_string()`], but includes graph-contextual worktree ownership markers.
+    /// Like `Self::commit_debug_string()`, but includes graph-contextual worktree ownership markers.
     pub fn commit_debug_string_with_graph_context(
         &self,
         commit: &crate::Commit,
@@ -194,7 +194,7 @@ impl Graph {
         Self::ref_debug_string_inner(ref_name, worktree, false)
     }
 
-    /// Like [`Self::ref_debug_string()`], but includes graph-contextual worktree ownership markers.
+    /// Like `Self::ref_debug_string()`, but includes graph-contextual worktree ownership markers.
     pub fn ref_debug_string_with_graph_context(
         &self,
         ref_name: &gix::refs::FullNameRef,
@@ -244,7 +244,7 @@ impl Graph {
         )
     }
 
-    /// Like [`Self::ref_and_remote_debug_string()`], but includes graph-contextual worktree ownership markers.
+    /// Like `Self::ref_and_remote_debug_string()`, but includes graph-contextual worktree ownership markers.
     pub fn ref_and_remote_debug_string_with_graph_context(
         &self,
         ref_info: Option<&crate::RefInfo>,
@@ -426,6 +426,7 @@ impl Graph {
         let entrypoint = self.entrypoint_location();
         let max_goals = self.max_goals();
         let show_owned_by_repo = self.has_multiple_worktrees();
+        let generations = self.derived_generations();
         let node_attrs = |_: &PetGraph, (sidx, s): (SegmentIndex, &Segment)| {
             let name = format!(
                 "{ref_name_and_remote}{maybe_centering_newline}",
@@ -488,7 +489,7 @@ impl Graph {
                 },
                 entrypoint = if show_segment_entrypoint { "👉" } else { "" },
                 id = sidx,
-                generation = s.generation,
+                generation = generations.get(sidx),
             )
         };
 
@@ -532,7 +533,7 @@ impl Graph {
     // WARNING: should only be run on a fresh clone as it probably leaves the graph unusable.
     fn prune_for_dot_graph(&mut self) {
         let lower_bound_segment_id = self
-            .to_workspace_state(crate::workspace::workspace::Downgrade::Allow)
+            .to_workspace_state()
             .ok()
             .and_then(|state| state.lower_bound_segment_id);
         if let Some(lower_bound_segment_id) = lower_bound_segment_id {

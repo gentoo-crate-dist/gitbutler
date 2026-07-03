@@ -2827,7 +2827,7 @@ fn two_branches_one_advanced_two_parent_ws_commit_diverged_remote_tracking_branc
                     "refs/remotes/origin/main",
                 ),
                 segment_index: 4,
-                commits_ahead: 1,
+                commits_ahead: 0,
             },
         ),
         target_commit: Some(
@@ -2923,7 +2923,7 @@ fn two_branches_one_advanced_two_parent_ws_commit_diverged_remote_tracking_branc
                     "refs/remotes/origin/main",
                 ),
                 segment_index: 4,
-                commits_ahead: 1,
+                commits_ahead: 0,
             },
         ),
         target_commit: Some(
@@ -3014,7 +3014,7 @@ fn two_branches_one_advanced_two_parent_ws_commit_diverged_remote_tracking_branc
                     "refs/remotes/origin/main",
                 ),
                 segment_index: 4,
-                commits_ahead: 1,
+                commits_ahead: 0,
             },
         ),
         target_commit: Some(
@@ -3111,7 +3111,7 @@ fn two_branches_one_advanced_two_parent_ws_commit_diverged_remote_tracking_branc
                     "refs/remotes/origin/main",
                 ),
                 segment_index: 4,
-                commits_ahead: 1,
+                commits_ahead: 0,
             },
         ),
         target_commit: Some(

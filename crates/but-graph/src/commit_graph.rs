@@ -88,7 +88,7 @@ pub struct CommitGraph {
     pub(crate) traversal_tips: Vec<crate::init::Tip>,
     /// Built from EXPLICIT tips ([`Self::from_walk_tips`]): every tip must start (or get) its own
     /// segment. Workspace-discovered builds must NOT carve boundaries at their normalized tips —
-    /// the walk merges tip-seeded segments back in post-processing.
+    /// there they are ordinary interior commits unless the plan makes them boundaries.
     pub(crate) explicit_tips: bool,
 }
 
@@ -177,10 +177,9 @@ impl CommitGraph {
         cg
     }
 
-    /// Build by running the WALK's real traversal (queue, goals, limits, flag propagation) with
-    /// post-processing skipped, flattening the raw traversal segments into commits. This keeps the
-    /// battle-tested traversal semantics — extents (limit cuts, integrated stop-early) and flags are
-    /// exactly the walk's — while segments remain a derived view built on top.
+    /// Build by running the real traversal (queue, goals, limits, flag propagation), accumulating
+    /// commits directly. This keeps the battle-tested traversal semantics — extents (limit cuts,
+    /// integrated stop-early) and flags — while segments remain a derived view built on top.
     pub(crate) fn from_walk<T: but_core::RefMetadata>(
         repo: &gix::Repository,
         meta: &T,
@@ -281,8 +280,34 @@ impl CommitGraph {
             .unwrap_or_default()
     }
 
+    /// All ancestors of `tip` (inclusive), following CONNECTED parent edges — history the
+    /// traversal severed is not rejoined. Bounded by the graph, which is the traversal-limited
+    /// window, not the repository.
+    pub fn ancestor_set(&self, tip: gix::ObjectId) -> HashSet<gix::ObjectId> {
+        let mut set = HashSet::new();
+        let mut queue = std::collections::VecDeque::from([tip]);
+        while let Some(c) = queue.pop_front() {
+            if set.insert(c) {
+                queue.extend(self.all_parent_ids(c));
+            }
+        }
+        set
+    }
+
+    /// Return `true` if any of `id`'s recorded parents is not CONNECTED in this graph — the
+    /// traversal cut history here (limits, integrated stop-early), so ancestry continues
+    /// beyond what the graph can see.
+    pub fn has_cut_parents(&self, id: gix::ObjectId) -> bool {
+        self.node(id).is_some_and(|n| {
+            n.commit
+                .parent_ids
+                .iter()
+                .any(|p| !self.is_connected(id, *p))
+        })
+    }
+
     /// The commit that `ref_name` points at, if present in the graph.
-    pub(crate) fn commit_by_ref(&self, ref_name: &gix::refs::FullNameRef) -> Option<gix::ObjectId> {
+    pub fn commit_by_ref(&self, ref_name: &gix::refs::FullNameRef) -> Option<gix::ObjectId> {
         self.nodes
             .iter()
             .find(|n| {
