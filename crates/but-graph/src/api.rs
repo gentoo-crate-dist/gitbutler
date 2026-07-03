@@ -19,6 +19,12 @@ boolean_enums::gen_boolean_enum!(pub FirstParent);
 
 /// Mutation
 impl Graph {
+    /// The commit graph this segment graph was assembled from, if it was built by the
+    /// CommitGraph builders — the commit-addressed substrate consumers migrate to.
+    pub fn commit_graph(&self) -> Option<&crate::CommitGraph> {
+        self.commit_graph.as_ref()
+    }
+
     /// Insert `segment` to the graph so that it's not connected to any other segment, and return its index.
     ///
     /// Note that as a side effect, the [entrypoint](Self::entrypoint()) will also be set if it's not

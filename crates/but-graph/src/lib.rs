@@ -244,7 +244,7 @@ mod debug;
 pub type CommitIndex = usize;
 
 /// A graph of connected segments that represent a section of the actual commit-graph.
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 #[must_use]
 pub struct Graph {
     inner: init::PetGraph,
@@ -294,6 +294,31 @@ pub struct Graph {
     /// They are useful to extract remote names from remote tracking refs like `refs/remotes/origin/master`,
     /// which may have slashes in them.
     pub symbolic_remote_names: Vec<String>,
+    /// The commit graph this segment graph was assembled from — the commit-addressed substrate
+    /// consumers migrate to as the segment view winds down. `None` only for graphs not born from
+    /// the CommitGraph builders (defaults, hand-assembled test graphs).
+    pub(crate) commit_graph: Option<CommitGraph>,
+}
+
+/// Like the derived implementation, but omitting the carried [`CommitGraph`]: the debug dump
+/// documents the segment view, and the substrate has its own renderers.
+impl std::fmt::Debug for Graph {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Graph")
+            .field("inner", &self.inner)
+            .field("entrypoint", &self.entrypoint)
+            .field("entrypoint_ref", &self.entrypoint_ref)
+            .field("traversal_tips", &self.traversal_tips)
+            .field(
+                "ad_hoc_branch_stack_orders",
+                &self.ad_hoc_branch_stack_orders,
+            )
+            .field("hard_limit_hit", &self.hard_limit_hit)
+            .field("options", &self.options)
+            .field("project_meta", &self.project_meta)
+            .field("symbolic_remote_names", &self.symbolic_remote_names)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

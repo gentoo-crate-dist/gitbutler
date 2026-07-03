@@ -74,7 +74,7 @@ pub fn graph_from_repository_with_overlay<T: but_core::RefMetadata>(
     } else {
         entrypoint_ref.clone()
     };
-    let mut cg = CommitGraph::from_walk(
+    let cg = CommitGraph::from_walk(
         repo,
         meta,
         walk_tip,
@@ -85,7 +85,7 @@ pub fn graph_from_repository_with_overlay<T: but_core::RefMetadata>(
     )?;
     let ep = entrypoint.unwrap_or(ws_commit);
     let graph = assemble_managed(
-        &mut cg,
+        cg,
         repo,
         &overlay_repo,
         &overlay_meta,
@@ -158,7 +158,7 @@ pub fn graph_from_repository_unmanaged_with_overlay<T: but_core::RefMetadata>(
     )?;
     let (overlay_repo, overlay_meta, _overlay_entrypoint) = overlay.into_parts(repo, meta);
     assemble_unmanaged(
-        &cg,
+        cg,
         repo,
         &overlay_repo,
         &overlay_meta,
@@ -181,7 +181,7 @@ pub fn graph_from_repository_tips<T: but_core::RefMetadata>(
     options: crate::init::Options,
 ) -> anyhow::Result<crate::Graph> {
     let overlay = crate::init::Overlay::default();
-    let mut cg = CommitGraph::from_walk_tips(
+    let cg = CommitGraph::from_walk_tips(
         repo,
         meta,
         tips,
@@ -212,7 +212,7 @@ pub fn graph_from_repository_tips<T: but_core::RefMetadata>(
             .clone()
             .filter(|r| !but_core::is_workspace_ref_name(r.as_ref()));
         assemble_managed(
-            &mut cg,
+            cg,
             repo,
             &overlay_repo,
             &overlay_meta,
@@ -226,7 +226,7 @@ pub fn graph_from_repository_tips<T: but_core::RefMetadata>(
         )?
     } else {
         assemble_unmanaged(
-            &cg,
+            cg,
             repo,
             &overlay_repo,
             &overlay_meta,
@@ -325,7 +325,7 @@ fn in_workspace_stack_branches(
 /// future state, not the on-disk one.
 #[allow(clippy::too_many_arguments)]
 fn assemble_managed<T: but_core::RefMetadata>(
-    cg: &mut CommitGraph,
+    mut cg: CommitGraph,
     repo: &gix::Repository,
     overlay_repo: &OverlayRepo<'_>,
     overlay_meta: &OverlayMetadata<'_, T>,
@@ -341,8 +341,8 @@ fn assemble_managed<T: but_core::RefMetadata>(
     let ws_meta = overlay_meta.workspace(ws_ref.as_ref())?;
     let stack_branches = in_workspace_stack_branches(&ws_meta);
     let inputs = enrichment_inputs(repo, overlay_repo, &project_meta, main_head_ref)?;
-    Ok(graph_from_commit_graph(
-        cg,
+    let mut graph = graph_from_commit_graph(
+        &cg,
         ws_commit,
         entrypoint,
         entrypoint_ref,
@@ -355,7 +355,9 @@ fn assemble_managed<T: but_core::RefMetadata>(
         overlay_meta,
         project_meta,
         options,
-    ))
+    );
+    graph.commit_graph = Some(cg);
+    Ok(graph)
 }
 
 /// Assemble the NON-managed graph from `cg`: no stack or workspace-ref passes, plus the
@@ -363,7 +365,7 @@ fn assemble_managed<T: but_core::RefMetadata>(
 /// generations after the rebuilt chain.
 #[allow(clippy::too_many_arguments)]
 fn assemble_unmanaged<T: but_core::RefMetadata>(
-    cg: &CommitGraph,
+    cg: CommitGraph,
     repo: &gix::Repository,
     overlay_repo: &OverlayRepo<'_>,
     overlay_meta: &OverlayMetadata<'_, T>,
@@ -374,7 +376,7 @@ fn assemble_unmanaged<T: but_core::RefMetadata>(
 ) -> anyhow::Result<crate::Graph> {
     let inputs = enrichment_inputs(repo, overlay_repo, &project_meta, entrypoint_ref.as_ref())?;
     let mut graph = graph_from_commit_graph(
-        cg,
+        &cg,
         head_tip,
         head_tip,
         entrypoint_ref,
@@ -390,6 +392,7 @@ fn assemble_unmanaged<T: but_core::RefMetadata>(
     );
     graph.ad_hoc_branch_stack_upgrades(overlay_repo, overlay_meta, &inputs.worktree_by_branch)?;
     graph.compute_generation_numbers();
+    graph.commit_graph = Some(cg);
     Ok(graph)
 }
 
