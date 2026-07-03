@@ -889,6 +889,13 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
     // Connections from a region into another creator's territory (a run stopped at a claimed
     // remote): recorded during region creation, wired once every creator ran.
     let mut pending_edges: Vec<(SegmentIndex, gix::ObjectId)> = Vec::new();
+    // The entrypoint is a planned boundary in every region too: a checkout inside a remote's
+    // ahead run starts its own segment at creation, never split out after the fact.
+    let region_pinned = {
+        let mut p = pinned_commits.clone();
+        p.insert(entrypoint);
+        p
+    };
     add_remote_segments(
         cg,
         &mut sg,
@@ -897,7 +904,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
         &owner_of,
         symbolic_remotes,
         stack_branches,
-        &pinned_commits,
+        &region_pinned,
         remote_tracking,
         &mut pre_lane_names,
         &claimed_remote_names,
@@ -968,7 +975,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
                 &owner_of,
                 remote_tracking,
                 None,
-                &pinned_commits,
+                &region_pinned,
                 &claimed_remote_names,
                 &mut pending_edges,
             );
@@ -1037,7 +1044,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
             &owner_of,
             remote_tracking,
             None,
-            &pinned_commits,
+            &region_pinned,
             &claimed_remote_names,
             &mut pending_edges,
         );
@@ -1062,7 +1069,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
             &owner_of,
             remote_tracking,
             None,
-            &pinned_commits,
+            &region_pinned,
             &claimed_remote_names,
             &mut pending_edges,
         );
@@ -1089,7 +1096,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
                 &owner_of,
                 remote_tracking,
                 None,
-                &pinned_commits,
+                &region_pinned,
                 &claimed_remote_names,
                 &mut pending_edges,
             ),
@@ -1269,14 +1276,11 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
         // the segment owning the commit it points to.
         Some(named)
     } else {
-        split_at_entrypoint_segment(
+        name_entrypoint_segment(
             &mut sg,
-            cg,
             entrypoint,
             entrypoint_ref.as_ref(),
             remote_tracking,
-            meta,
-            project_meta.target_ref.as_ref(),
         )
     };
 
@@ -1385,129 +1389,84 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
     graph
 }
 
-/// Force a segment boundary at the `entrypoint` commit: the enclosing segment is split so the
-/// entrypoint begins its own segment (unless it already starts one). Returns the entrypoint segment.
-/// A checked-out `entrypoint_ref` names it; else it is disambiguated (anonymous when ambiguous).
-fn split_at_entrypoint_segment<T: but_core::RefMetadata>(
+/// The segment starting at the `entrypoint` commit — which exists by construction: the
+/// entrypoint is a planned boundary in materialization and in every region, so no commit run
+/// ever contains it mid-run. A checked-out `entrypoint_ref` names it (validation requires it):
+/// an anonymous segment takes the name directly; one already named by ANOTHER ref keeps its
+/// commits and the entrypoint ref becomes an empty segment spliced in above, like the walk's.
+fn name_entrypoint_segment(
     sg: &mut SegmentGraph,
-    cg: &CommitGraph,
     entrypoint: gix::ObjectId,
     entrypoint_ref: Option<&gix::refs::FullName>,
     remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
-    meta: &T,
-    target_ref: Option<&gix::refs::FullName>,
 ) -> Option<SegmentIndex> {
     let (sidx, pos) = sg.node_indices().find_map(|sidx| {
         sg.node(sidx)
             .and_then(|s| s.commits.iter().position(|c| c.id == entrypoint))
             .map(|pos| (sidx, pos))
     })?;
-    if pos == 0 {
-        // The checked-out ref names the entrypoint segment (validation requires it): an anonymous
-        // segment takes the name directly; one already named by ANOTHER ref keeps its commits and
-        // the entrypoint ref becomes an empty segment spliced in above, like the walk's.
-        if let Some(ep_ref) = entrypoint_ref {
-            let current = sg
-                .node(sidx)
-                .and_then(|s| s.ref_info.as_ref())
-                .map(|ri| ri.ref_name.clone());
-            match current {
-                None => {
-                    if let Some(s) = sg.node_mut(sidx) {
-                        s.ref_info = Some(RefInfo {
-                            ref_name: ep_ref.clone(),
-                            commit_id: Some(entrypoint),
-                            worktree: None,
-                        });
-                        s.remote_tracking_ref_name = remote_tracking.get(ep_ref).cloned();
-                    }
-                }
-                Some(existing) if existing != *ep_ref => {
-                    let empty = sg.add_node(Segment {
-                        id: 0,
-                        generation: 0,
-                        ref_info: Some(RefInfo {
-                            ref_name: ep_ref.clone(),
-                            commit_id: Some(entrypoint),
-                            worktree: None,
-                        }),
-                        remote_tracking_ref_name: remote_tracking.get(ep_ref).cloned(),
-                        sibling_segment_id: None,
-                        remote_tracking_branch_segment_id: None,
-                        commits: Vec::new(),
-                        connections: Vec::new(),
-                        metadata: None,
+    debug_assert_eq!(
+        pos, 0,
+        "the entrypoint {entrypoint} is a planned boundary everywhere, yet sits mid-run in {sidx}"
+    );
+    if pos != 0 {
+        return None;
+    }
+    if let Some(ep_ref) = entrypoint_ref {
+        let current = sg
+            .node(sidx)
+            .and_then(|s| s.ref_info.as_ref())
+            .map(|ri| ri.ref_name.clone());
+        match current {
+            None => {
+                if let Some(s) = sg.node_mut(sidx) {
+                    s.ref_info = Some(RefInfo {
+                        ref_name: ep_ref.clone(),
+                        commit_id: Some(entrypoint),
+                        worktree: None,
                     });
-                    sg.node_mut(empty).expect("just added").id = empty;
-                    // Incoming edges now route through the entrypoint's empty segment.
-                    for other in sg.node_indices().collect::<Vec<_>>() {
-                        if other == empty {
-                            continue;
-                        }
-                        if let Some(s) = sg.node_mut(other) {
-                            for conn in &mut s.connections {
-                                if conn.target == sidx {
-                                    conn.target = empty;
-                                    conn.dst = None;
-                                    conn.dst_id = None;
-                                }
+                    s.remote_tracking_ref_name = remote_tracking.get(ep_ref).cloned();
+                }
+            }
+            Some(existing) if existing != *ep_ref => {
+                let empty = sg.add_node(Segment {
+                    id: 0,
+                    generation: 0,
+                    ref_info: Some(RefInfo {
+                        ref_name: ep_ref.clone(),
+                        commit_id: Some(entrypoint),
+                        worktree: None,
+                    }),
+                    remote_tracking_ref_name: remote_tracking.get(ep_ref).cloned(),
+                    sibling_segment_id: None,
+                    remote_tracking_branch_segment_id: None,
+                    commits: Vec::new(),
+                    connections: Vec::new(),
+                    metadata: None,
+                });
+                sg.node_mut(empty).expect("just added").id = empty;
+                // Incoming edges now route through the entrypoint's empty segment.
+                for other in sg.node_indices().collect::<Vec<_>>() {
+                    if other == empty {
+                        continue;
+                    }
+                    if let Some(s) = sg.node_mut(other) {
+                        for conn in &mut s.connections {
+                            if conn.target == sidx {
+                                conn.target = empty;
+                                conn.dst = None;
+                                conn.dst_id = None;
                             }
                         }
                     }
-                    connect(sg, empty, sidx);
-                    return Some(empty);
                 }
-                Some(_) => {}
+                connect(sg, empty, sidx);
+                return Some(empty);
             }
-        }
-        return Some(sidx);
-    }
-    let lower_commits = sg.node_mut(sidx).expect("present").commits.split_off(pos);
-    let moved_conns = std::mem::take(&mut sg.node_mut(sidx).expect("present").connections);
-    let name = entrypoint_ref
-        .cloned()
-        .or_else(|| disambiguated_ref(cg, entrypoint, remote_tracking, meta, None, target_ref));
-    let ref_info = name.clone().map(|ref_name| RefInfo {
-        ref_name,
-        commit_id: Some(entrypoint),
-        worktree: None,
-    });
-    let remote_tracking_ref_name = name.and_then(|n| remote_tracking.get(&n).cloned());
-    let new = sg.add_node(Segment {
-        id: 0,
-        generation: 0,
-        ref_info,
-        remote_tracking_ref_name,
-        sibling_segment_id: None,
-        remote_tracking_branch_segment_id: None,
-        commits: lower_commits,
-        metadata: None,
-        connections: Vec::new(),
-    });
-    sg.node_mut(new).expect("just added").id = new;
-    // The moved connections' source commits moved with them; re-anchor their endpoints. Edges
-    // into the shortened upper segment re-aim at its remaining reality (an aim below the cut
-    // has no representable target on the upper half).
-    for conn in moved_conns {
-        let adj = conn.adjusted_for(new, conn.target, sg);
-        sg.add_edge(new, adj);
-    }
-    for other in sg.node_indices().collect::<Vec<_>>() {
-        let conns = sg
-            .node(other)
-            .map(|s| s.connections.clone())
-            .unwrap_or_default();
-        for (i, c) in conns.into_iter().enumerate() {
-            if c.target == sidx {
-                let adj = c.adjusted_for(other, sidx, sg);
-                if let Some(s) = sg.node_mut(other) {
-                    s.connections[i] = adj;
-                }
-            }
+            Some(_) => {}
         }
     }
-    connect(sg, sidx, new);
-    Some(new)
+    Some(sidx)
 }
 
 /// One floated lane placeholder decided by [`lane_plan`]: `tip`'s segment goes anonymous, an
