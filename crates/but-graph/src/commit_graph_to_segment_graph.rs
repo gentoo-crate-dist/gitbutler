@@ -356,6 +356,7 @@ fn assemble_managed<T: but_core::RefMetadata>(
         options,
     );
     graph.commit_graph = Some(cg);
+    graph.remote_tracking = inputs.remote_tracking;
     Ok(graph)
 }
 
@@ -392,6 +393,7 @@ fn assemble_unmanaged<T: but_core::RefMetadata>(
     graph.ad_hoc_branch_stack_upgrades(overlay_repo, overlay_meta, &inputs.worktree_by_branch)?;
     graph.compute_generation_numbers();
     graph.commit_graph = Some(cg);
+    graph.remote_tracking = inputs.remote_tracking;
     Ok(graph)
 }
 

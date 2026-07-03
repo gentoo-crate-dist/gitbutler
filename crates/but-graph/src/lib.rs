@@ -295,6 +295,11 @@ pub struct Graph {
     /// consumers migrate to as the segment view winds down. `None` only for graphs not born from
     /// the CommitGraph builders (defaults, hand-assembled test graphs).
     pub(crate) commit_graph: Option<CommitGraph>,
+    /// The local → remote tracking-branch relationships the builder derived from the repository
+    /// (git-configured bindings plus name-deduction against the workspace's symbolic remotes).
+    /// Carried so consumers resolve tracking relationships as data instead of navigating
+    /// segment links. Empty for graphs not born from the CommitGraph builders.
+    pub(crate) remote_tracking: std::collections::HashMap<gix::refs::FullName, gix::refs::FullName>,
 }
 
 /// Like the derived implementation, but omitting the carried [`CommitGraph`]: the debug dump

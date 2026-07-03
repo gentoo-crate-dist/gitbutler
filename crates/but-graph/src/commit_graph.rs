@@ -282,7 +282,7 @@ impl CommitGraph {
     }
 
     /// The commit that `ref_name` points at, if present in the graph.
-    pub(crate) fn commit_by_ref(&self, ref_name: &gix::refs::FullNameRef) -> Option<gix::ObjectId> {
+    pub fn commit_by_ref(&self, ref_name: &gix::refs::FullNameRef) -> Option<gix::ObjectId> {
         self.nodes
             .iter()
             .find(|n| {

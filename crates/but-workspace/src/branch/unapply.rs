@@ -905,25 +905,28 @@ pub(crate) mod function {
             .transpose()
     }
 
-    /// Return the local branch to check out for the workspace target.
+    /// The local branch tracking the workspace target (e.g. `main` for `origin/main`), resolved
+    /// as data: the graph's carried tracking map names it, the carried commit graph positions it.
     ///
-    /// `ws` is the current graph projection with adjusted metadata. The workspace target already
-    /// carries the local tracking branch inferred while building the graph, including the peeled
-    /// commit id to check out.
+    /// `ws` is the current graph projection with adjusted metadata.
     fn local_tracking_branch_of_target(
         ws: &but_graph::Workspace,
     ) -> anyhow::Result<Option<RefToCheckout>> {
         let Some(target_ref) = ws.target_ref.as_ref() else {
             return Ok(None);
         };
-        let Some(local_target_ref_sidx) = ws.graph[target_ref.segment_index].sibling_segment_id
-        else {
-            return Ok(None);
-        };
-        let Some(ref_info) = ws.graph[local_target_ref_sidx].ref_info.as_ref() else {
-            return Ok(None);
-        };
-        RefToCheckout::from_segment_ref_info(ws, local_target_ref_sidx, ref_info).map(Some)
+        Ok(ws
+            .graph
+            .local_tracking_branch(target_ref.ref_name.as_ref())
+            .and_then(|local| {
+                ws.graph
+                    .commit_graph()
+                    .and_then(|cg| cg.commit_by_ref(local.as_ref()))
+                    .map(|commit_id| RefToCheckout {
+                        ref_name: local.clone(),
+                        commit_id,
+                    })
+            }))
     }
 
     /// Ref name and peeled commit id selected from the workspace projection for checkout.

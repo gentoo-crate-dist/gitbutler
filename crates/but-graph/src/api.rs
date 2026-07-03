@@ -25,6 +25,18 @@ impl Graph {
         self.commit_graph.as_ref()
     }
 
+    /// The LOCAL branch tracking `remote`, as the builder derived it from the repository
+    /// (a git-configured binding, or name-deduction against the workspace's symbolic remotes).
+    /// `None` when no local tracks `remote`, or for graphs not born from the builders.
+    pub fn local_tracking_branch(
+        &self,
+        remote: &gix::refs::FullNameRef,
+    ) -> Option<&gix::refs::FullName> {
+        self.remote_tracking
+            .iter()
+            .find_map(|(local, r)| (r.as_ref() == remote).then_some(local))
+    }
+
     /// Insert `segment` to the graph so that it's not connected to any other segment, and return its index.
     ///
     /// Note that as a side effect, the [entrypoint](Self::entrypoint()) will also be set if it's not
