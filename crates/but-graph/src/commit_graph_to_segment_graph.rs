@@ -1192,9 +1192,20 @@ fn graph_from_commit_graph_ordered<T: but_core::RefMetadata>(
         }
     }
 
+    // The target's remote segment may have been created before its LOCAL got a segment (the
+    // local can materialize from the extra-target region above) — link them like every other
+    // creator does.
+    if lanes_first
+        && let Some(tr) = project_meta.target_ref.as_ref()
+        && let Some(tr_sidx) = segment_by_ref(&sg, tr)
+    {
+        let tr = tr.clone();
+        link_remote_to_local(&mut sg, tr_sidx, &tr, remote_tracking);
+    }
+
     // A remote's ahead-run may absorb a lower remote's ref (e.g. `origin/split-segment` sitting inside
     // `origin/main`'s ahead commits): split it out into its own named segment first.
-    split_remote_interior_refs(&mut sg);
+    split_remote_interior_refs(&mut sg, remote_tracking);
     // Stacked remotes: a remote whose spine passes through another remote's tip stops there and
     // connects into it, rather than absorbing the lower remote's commits.
     split_stacked_remotes(&mut sg);
@@ -1279,10 +1290,11 @@ fn graph_from_commit_graph_ordered<T: but_core::RefMetadata>(
         if !lanes_first {
             lane_structure(&mut sg, &mut ws_empty_sidx);
         }
-        // Repoint every remote `origin/X` at the local segment named `X` (a lane placeholder, a
-        // spliced empty, a group-named anchor) and give that local the back-links. Dies once the
-        // remote passes target the lane segments at creation.
-        reconcile_remote_siblings(&mut sg, remote_tracking);
+        // With lanes first, every remote creator links its local at creation; the global
+        // repointing pass only serves the historical order.
+        if !lanes_first {
+            reconcile_remote_siblings(&mut sg, remote_tracking);
+        }
     }
 
     // A checkout inside a stack (from_commit_traversal) splits the enclosing segment so the entrypoint
@@ -2172,6 +2184,34 @@ fn commit_run(
     out
 }
 
+/// Link a just-created remote-named segment to the local segment named by its tracking
+/// counterpart, exactly like `reconcile_remote_siblings` would: the remote's sibling points at
+/// the local, and the local carries the remote's name and segment id. A no-op when no such
+/// local exists (e.g. the local ref only rides a commit).
+fn link_remote_to_local(
+    sg: &mut SegmentGraph,
+    remote_sidx: SegmentIndex,
+    remote_ref: &gix::refs::FullName,
+    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
+) {
+    let Some(local_name) = remote_tracking
+        .iter()
+        .find_map(|(l, r)| (r == remote_ref).then_some(l))
+    else {
+        return;
+    };
+    let Some(local_sidx) = segment_by_ref(sg, local_name) else {
+        return;
+    };
+    if let Some(s) = sg.node_mut(remote_sidx) {
+        s.sibling_segment_id = Some(local_sidx);
+    }
+    if let Some(s) = sg.node_mut(local_sidx) {
+        s.remote_tracking_ref_name = Some(remote_ref.clone());
+        s.remote_tracking_branch_segment_id = Some(remote_sidx);
+    }
+}
+
 /// Enforce the walk's remote↔local invariant after floats: a named remote segment `origin/X` is the
 /// sibling of the local segment named `X`, and that local carries `origin/X` as its remote-tracking ref
 /// + segment. Only repoints when such a distinct local segment exists, so a target ref that lives only
@@ -2565,6 +2605,7 @@ fn add_untracked_remote_segments(
                 remote_sidx,
                 Connection::new(owner_sidx, None, None, None, Some(tip)),
             );
+            link_remote_to_local(sg, remote_sidx, &r, remote_tracking);
         }
     }
 }
@@ -2572,7 +2613,10 @@ fn add_untracked_remote_segments(
 /// Split a remote segment at any INTERIOR commit carrying its own remote branch ref. When a stacked
 /// remote (`origin/split-segment`) sits inside a tracked remote's ahead-run (`origin/main`), the lower
 /// part becomes a new segment named by that ref, connected from above. Repeats down the chain.
-fn split_remote_interior_refs(sg: &mut SegmentGraph) {
+fn split_remote_interior_refs(
+    sg: &mut SegmentGraph,
+    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
+) {
     let is_remote = |sg: &SegmentGraph, sidx: SegmentIndex| {
         sg.node(sidx)
             .and_then(|s| s.ref_info.as_ref())
@@ -2613,6 +2657,13 @@ fn split_remote_interior_refs(sg: &mut SegmentGraph) {
             connections: moved,
         });
         sg.node_mut(new).expect("just added").id = new;
+        let new_ref = sg
+            .node(new)
+            .and_then(|seg| seg.ref_info.as_ref())
+            .map(|ri| ri.ref_name.clone());
+        if let Some(new_ref) = new_ref {
+            link_remote_to_local(sg, new, &new_ref, remote_tracking);
+        }
         let src_last = sg.node(sidx).and_then(|s| s.commits.last().map(|c| c.id));
         sg.add_edge(
             sidx,
@@ -2657,6 +2708,8 @@ fn split_remote_interior_refs(sg: &mut SegmentGraph) {
                 empty,
                 Connection::new(sidx, None, None, None, Some(first.id)),
             );
+            let name = ri.ref_name.clone();
+            link_remote_to_local(sg, empty, &name, remote_tracking);
         }
     }
 }
