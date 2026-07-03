@@ -992,6 +992,7 @@ mod tests {
             remote_tracking_ref_name: None,
             sibling_segment_id: None,
             remote_tracking_branch_segment_id: None,
+            name_projected_from_outside: false,
             id,
             commits: vec![],
             commits_outside: None,

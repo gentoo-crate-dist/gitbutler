@@ -708,6 +708,7 @@ impl crate::ref_info::Segment {
             remote_tracking_ref_name,
             sibling_segment_id: _,
             remote_tracking_branch_segment_id,
+            name_projected_from_outside: _,
             id,
             commits,
             // TODO: make it visible in this this data structure.

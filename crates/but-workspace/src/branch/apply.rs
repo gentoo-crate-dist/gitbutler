@@ -498,7 +498,7 @@ pub fn apply(
 
     let all_applied_branches_are_already_visible = branches_to_apply.iter().all(|rn| {
         ws.find_segment_and_stack_by_refname(rn.as_ref())
-            .is_some_and(|(_stack, segment)| !segment.is_projected_from_outside(&ws.graph))
+            .is_some_and(|(_stack, segment)| !segment.name_projected_from_outside)
     });
     let needs_ws_ref_creation = !ws_ref_exists;
     let local_tracking_config_and_ref_info = local_tracking_config_and_ref_info

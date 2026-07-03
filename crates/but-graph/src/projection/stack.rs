@@ -188,6 +188,10 @@ pub struct StackSegment {
     /// avoiding a search through the entire graph.
     /// It *only* ever points to the remote tracking branch segment.
     pub remote_tracking_branch_segment_id: Option<SegmentIndex>,
+    /// The segment is anonymous in the graph; the name, metadata, and remote shown here were
+    /// projected from its out-of-workspace sibling (an advanced branch whose tip left the
+    /// workspace), to allow reconstructing the originally desired workspace.
+    pub name_projected_from_outside: bool,
     /// An ID which uniquely identifies the [first graph segment](crate::Segment) that is contained
     /// in this instance.
     /// This is always the first id in the `commits_by_segment`.
@@ -251,14 +255,6 @@ impl StackSegment {
     pub fn ref_name(&self) -> Option<&gix::refs::FullNameRef> {
         self.ref_info.as_ref().map(|ri| ri.ref_name.as_ref())
     }
-
-    /// Return `true` if this segment *would* be anonymous if it wasn't for the out-of-workspace segment to be projected onto this one.
-    ///
-    /// This is signaled by its underlying graph segment being unnamed, with a sibling set.
-    pub fn is_projected_from_outside(&self, graph: &Graph) -> bool {
-        let segment = &graph[self.id];
-        segment.ref_info.is_none() && segment.sibling_segment_id.is_some()
-    }
 }
 
 impl std::fmt::Debug for StackSegment {
@@ -304,12 +300,14 @@ impl StackSegment {
         let (mut ref_name, mut metadata, mut remote_tracking_ref_name) =
             (ref_name, metadata, remote_tracking_ref_name);
         let mut commits_outside = None::<Vec<_>>;
+        let mut name_projected_from_outside = false;
         for s in segments {
             let mut stack_commits = Vec::new();
             if let Some(sibling_sidx) = s
                 .sibling_segment_id
                 .filter(|_| is_first && ref_name.is_none())
             {
+                name_projected_from_outside = true;
                 let sibling = &graph[sibling_sidx];
                 ref_name = &sibling.ref_info;
                 metadata = &sibling.metadata;
@@ -355,6 +353,7 @@ impl StackSegment {
             remote_tracking_ref_name: remote_tracking_ref_name.clone(),
             sibling_segment_id,
             remote_tracking_branch_segment_id,
+            name_projected_from_outside,
             // `base` is set later in the context of the entire stack.
             base: None,
             base_segment_id: None,
