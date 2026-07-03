@@ -645,64 +645,6 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
     entrypoint_ref: Option<gix::refs::FullName>,
     target: Option<gix::ObjectId>,
     remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
-    symbolic_remotes: &[String],
-    stack_branches: Option<&[Vec<gix::refs::FullName>]>,
-    managed: bool,
-    worktree_by_branch: &BTreeMap<gix::refs::FullName, Vec<crate::Worktree>>,
-    meta: &T,
-    project_meta: but_core::ref_metadata::ProjectMeta,
-    options: crate::init::Options,
-) -> crate::Graph {
-    // LANES-FIRST is the default: the lane structure precedes the remote passes, which link the
-    // lane segments at creation. Canonically verified identical to the historical order across
-    // the whole corpus. Transitional: BUT_GRAPH_LANES=assert builds BOTH orders and panics with
-    // precise diffs; =old returns the historical build.
-    let mode = std::env::var("BUT_GRAPH_LANES").ok();
-    let build = |lanes_first: bool| {
-        graph_from_commit_graph_ordered(
-            cg,
-            workspace_commit,
-            entrypoint,
-            entrypoint_ref.clone(),
-            target,
-            remote_tracking,
-            symbolic_remotes,
-            stack_branches,
-            managed,
-            worktree_by_branch,
-            meta,
-            project_meta.clone(),
-            options.clone(),
-            lanes_first,
-        )
-    };
-    match mode.as_deref() {
-        Some("assert") => {
-            let old = build(false);
-            let new = build(true);
-            let diffs = diff_canonical_sg(&new, &old);
-            if !diffs.is_empty() {
-                panic!(
-                    "LANES_FIRST_DIVERGENCE ({} lines):\n{}",
-                    diffs.len(),
-                    diffs.join("\n")
-                );
-            }
-            new
-        }
-        Some("old") => build(false),
-        _ => build(true),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn graph_from_commit_graph_ordered<T: but_core::RefMetadata>(
-    cg: &CommitGraph,
-    workspace_commit: gix::ObjectId,
-    entrypoint: gix::ObjectId,
-    entrypoint_ref: Option<gix::refs::FullName>,
-    target: Option<gix::ObjectId>,
-    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
     // Remote names implied by the workspace configuration (push remote, target's remote). Only these
     // remotes' AHEAD regions are traversed; a config-only tracking link keeps its name but its remote's
     // own commits stay out of the graph, matching the walk's traversal reach.
@@ -717,7 +659,6 @@ fn graph_from_commit_graph_ordered<T: but_core::RefMetadata>(
     meta: &T,
     project_meta: but_core::ref_metadata::ProjectMeta,
     options: crate::init::Options,
-    lanes_first: bool,
 ) -> crate::Graph {
     let f = facts(
         cg,
@@ -874,21 +815,17 @@ fn graph_from_commit_graph_ordered<T: but_core::RefMetadata>(
         );
     }
 
-    // The lane STRUCTURE (empty-ws segment, advanced-outside branches, empty-branch splices).
-    // With `lanes_first` it precedes the remote passes so remotes can link the lane segments at
-    // creation; otherwise it runs at its historical position after them (the committed order),
-    // with `reconcile_remote_siblings` repairing the links. Both orders converge on the same
-    // names by construction of `lane_plan`; the canonical-form oracle verifies the full graphs.
+    // The lane STRUCTURE (empty-ws segment, advanced-outside branches, empty-branch splices)
+    // precedes the remote passes, which link the lane segments at creation.
     let mut ws_empty_sidx = None;
-    let lane_structure = |sg: &mut SegmentGraph, ws_empty_sidx: &mut Option<SegmentIndex>| {
-        if !managed {
-            return;
-        }
+    let before_lanes: HashSet<SegmentIndex> = sg.node_indices().collect();
+    if managed {
         if empty_ws_case {
-            *ws_empty_sidx = insert_empty_workspace_segment(sg, &seg_of_tip, cg, workspace_commit);
+            ws_empty_sidx =
+                insert_empty_workspace_segment(&mut sg, &seg_of_tip, cg, workspace_commit);
         }
         add_advanced_outside_branches(
-            sg,
+            &mut sg,
             cg,
             &in_set,
             stack_branches,
@@ -900,7 +837,7 @@ fn graph_from_commit_graph_ordered<T: but_core::RefMetadata>(
         );
         let ws_sidx = ws_empty_sidx.or_else(|| seg_of_tip.get(&workspace_commit).copied());
         insert_empty_branches(
-            sg,
+            &mut sg,
             cg,
             ws_sidx,
             stack_branches,
@@ -910,22 +847,16 @@ fn graph_from_commit_graph_ordered<T: but_core::RefMetadata>(
             ws_is_managed_merge,
             &plan,
             remote_tracking,
-            lanes_first,
         );
-    };
-    // Segments the EARLY lane pass creates: the coverage gates below (extra target, outside
+    }
+    // Segments the lane pass creates: the coverage gates below (extra target, outside
     // entrypoint, explicit tips) historically evaluated BEFORE any lane existed — they must not
     // be shadowed by lane segments (e.g. an advanced-outside run swallowing the stored target
     // position that the extra-target region must surface).
-    let mut lane_created: HashSet<SegmentIndex> = HashSet::new();
-    if lanes_first {
-        let before: HashSet<SegmentIndex> = sg.node_indices().collect();
-        lane_structure(&mut sg, &mut ws_empty_sidx);
-        lane_created = sg
-            .node_indices()
-            .filter(|sidx| !before.contains(sidx))
-            .collect();
-    }
+    let lane_created: HashSet<SegmentIndex> = sg
+        .node_indices()
+        .filter(|sidx| !before_lanes.contains(sidx))
+        .collect();
 
     // Remote segments: for each local segment with a remote-tracking ref whose remote tip is
     // present, create a remote root segment (holding the remote-ahead commits) that connects into
@@ -1195,8 +1126,7 @@ fn graph_from_commit_graph_ordered<T: but_core::RefMetadata>(
     // The target's remote segment may have been created before its LOCAL got a segment (the
     // local can materialize from the extra-target region above) — link them like every other
     // creator does.
-    if lanes_first
-        && let Some(tr) = project_meta.target_ref.as_ref()
+    if let Some(tr) = project_meta.target_ref.as_ref()
         && let Some(tr_sidx) = segment_by_ref(&sg, tr)
     {
         let tr = tr.clone();
@@ -1273,9 +1203,8 @@ fn graph_from_commit_graph_ordered<T: but_core::RefMetadata>(
     }
 
     if managed {
-        // The remote/target passes link remotes against the plan's effective names; a suppressed
-        // tip's links belong to the floated/demoted name's segment, re-established by
-        // `reconcile_remote_siblings`.
+        // The remote/target passes link remotes against the plan's effective names — the
+        // floated/demoted name's segment carries the links, so the suppressed tip drops its own.
         for tip in plan
             .floats
             .iter()
@@ -1286,14 +1215,6 @@ fn graph_from_commit_graph_ordered<T: but_core::RefMetadata>(
                 s.remote_tracking_ref_name = None;
                 s.remote_tracking_branch_segment_id = None;
             }
-        }
-        if !lanes_first {
-            lane_structure(&mut sg, &mut ws_empty_sidx);
-        }
-        // With lanes first, every remote creator links its local at creation; the global
-        // repointing pass only serves the historical order.
-        if !lanes_first {
-            reconcile_remote_siblings(&mut sg, remote_tracking);
         }
     }
 
@@ -1541,116 +1462,6 @@ fn split_at_entrypoint_segment<T: but_core::RefMetadata>(
     Some(new)
 }
 
-/// An index-free canonical rendering of a segment graph, for comparing two builds that may
-/// number segments differently. A segment's KEY is its ref name, else its first commit, else a
-/// stable ordinal among anonymous-empty segments; every index-valued field is rendered through
-/// the key.
-fn canonical_sg(graph: &crate::Graph) -> std::collections::BTreeMap<String, String> {
-    use std::fmt::Write;
-    let mut anon_empty = 0usize;
-    let mut key_of: HashMap<SegmentIndex, String> = HashMap::new();
-    let mut sidxs: Vec<_> = graph.node_indices().collect();
-    sidxs.sort();
-    for &sidx in &sidxs {
-        let s = &graph[sidx];
-        let key = if let Some(name) = s.ref_name() {
-            format!("ref:{name}")
-        } else if let Some(c) = s.commits.first() {
-            format!("commit:{}", c.id)
-        } else {
-            anon_empty += 1;
-            format!("anon-empty:{anon_empty}")
-        };
-        key_of.insert(sidx, key);
-    }
-    let key = |sidx: SegmentIndex| key_of.get(&sidx).cloned().unwrap_or_default();
-    let mut out = std::collections::BTreeMap::new();
-    for &sidx in &sidxs {
-        let s = &graph[sidx];
-        let mut v = String::new();
-        let _ = writeln!(v, "generation={}", s.generation);
-        let _ = writeln!(
-            v,
-            "rt_name={:?}",
-            s.remote_tracking_ref_name.as_ref().map(|r| r.to_string())
-        );
-        let _ = writeln!(v, "sibling={:?}", s.sibling_segment_id.map(&key));
-        let _ = writeln!(
-            v,
-            "rtbsi={:?}",
-            s.remote_tracking_branch_segment_id.map(&key)
-        );
-        let _ = writeln!(
-            v,
-            "metadata={:?}",
-            s.metadata.as_ref().map(|m| format!("{m:?}"))
-        );
-        for c in &s.commits {
-            let mut refs: Vec<String> = c.refs.iter().map(|r| r.ref_name.to_string()).collect();
-            refs.sort();
-            let _ = writeln!(v, "commit {} {:?} {refs:?}", c.id, c.flags);
-        }
-        let mut edges: Vec<String> = s
-            .connections
-            .iter()
-            .map(|conn| {
-                format!(
-                    "edge -> {} src={:?} dst={:?}",
-                    key(conn.target),
-                    conn.src_id,
-                    conn.dst_id
-                )
-            })
-            .collect();
-        edges.sort();
-        for e in edges {
-            let _ = writeln!(v, "{e}");
-        }
-        out.insert(key(sidx), v);
-    }
-    if let Ok(ep) = graph.entrypoint() {
-        out.insert(
-            "entrypoint!".into(),
-            format!(
-                "{} at {:?}",
-                key(ep.segment.id),
-                ep.commit_and_owner.map(|(c, _)| c.id)
-            ),
-        );
-    }
-    out
-}
-
-/// Line diffs between two canonical segment-graph forms (`a` = NEW, `b` = OLD).
-fn diff_canonical_sg(a: &crate::Graph, b: &crate::Graph) -> Vec<String> {
-    let (ca, cb) = (canonical_sg(a), canonical_sg(b));
-    let mut out = Vec::new();
-    for (k, va) in &ca {
-        match cb.get(k) {
-            None => out.push(format!("segment {k} only in NEW: {va:?}")),
-            Some(vb) if va != vb => {
-                for l in va.lines() {
-                    if !vb.contains(l) {
-                        out.push(format!("{k}: NEW  {l}"));
-                    }
-                }
-                for l in vb.lines() {
-                    if !va.contains(l) {
-                        out.push(format!("{k}: OLD  {l}"));
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    for (k, vb) in &cb {
-        if !ca.contains_key(k) {
-            out.push(format!("segment {k} only in OLD: {vb:?}"));
-        }
-    }
-    out
-}
-
 /// One floated lane placeholder decided by [`lane_plan`]: `tip`'s segment goes anonymous, an
 /// empty segment named `name` splices in between the workspace and it, and `displaced` (a
 /// build-time name pushed aside by a metadata stack branch) returns to the commit as a passive
@@ -1678,8 +1489,7 @@ struct LanePlan {
     demoted: HashSet<gix::ObjectId>,
     /// Group-naming decisions of `insert_empty_branches`, keyed by (stack-list index, group
     /// commit): the anchor takes `name`; `clear_remote` marks the metadata-order override (a
-    /// non-bottom namer is displaced, its remote links re-established on its floated empty by
-    /// `reconcile_remote_siblings`).
+    /// non-bottom namer is displaced, the remote creators link its floated empty instead).
     group_names: HashMap<(usize, gix::ObjectId), (gix::refs::FullName, bool)>,
     /// Every boundary tip's MATERIALIZATION name (before floats/demotions suppress it on the
     /// segment). The remote/target passes historically ran before the lane shape existed and
@@ -2185,9 +1995,9 @@ fn commit_run(
 }
 
 /// Link a just-created remote-named segment to the local segment named by its tracking
-/// counterpart, exactly like `reconcile_remote_siblings` would: the remote's sibling points at
-/// the local, and the local carries the remote's name and segment id. A no-op when no such
-/// local exists (e.g. the local ref only rides a commit).
+/// counterpart: the remote's sibling points at the local, and the local carries the remote's
+/// name and segment id. A no-op when no such local exists (e.g. the local ref only rides a
+/// commit).
 fn link_remote_to_local(
     sg: &mut SegmentGraph,
     remote_sidx: SegmentIndex,
@@ -2209,47 +2019,6 @@ fn link_remote_to_local(
     if let Some(s) = sg.node_mut(local_sidx) {
         s.remote_tracking_ref_name = Some(remote_ref.clone());
         s.remote_tracking_branch_segment_id = Some(remote_sidx);
-    }
-}
-
-/// Enforce the walk's remote↔local invariant after floats: a named remote segment `origin/X` is the
-/// sibling of the local segment named `X`, and that local carries `origin/X` as its remote-tracking ref
-/// + segment. Only repoints when such a distinct local segment exists, so a target ref that lives only
-///   as a commit ref (no local segment of its own) keeps the owning-segment sibling set for it elsewhere.
-fn reconcile_remote_siblings(
-    sg: &mut SegmentGraph,
-    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
-) {
-    let local_of_remote: HashMap<&gix::refs::FullName, &gix::refs::FullName> =
-        remote_tracking.iter().map(|(l, r)| (r, l)).collect();
-    let mut fixes: Vec<(SegmentIndex, gix::refs::FullName, SegmentIndex)> = Vec::new();
-    for remote_sidx in sg.node_indices().collect::<Vec<_>>() {
-        let Some(remote_ref) = sg
-            .node(remote_sidx)
-            .and_then(|s| s.ref_info.as_ref())
-            .map(|ri| ri.ref_name.clone())
-        else {
-            continue;
-        };
-        if remote_ref.as_ref().category() != Some(Category::RemoteBranch) {
-            continue;
-        }
-        let Some(&local_name) = local_of_remote.get(&remote_ref) else {
-            continue;
-        };
-        let Some(local_sidx) = segment_by_ref(sg, local_name) else {
-            continue;
-        };
-        fixes.push((remote_sidx, remote_ref, local_sidx));
-    }
-    for (remote_sidx, remote_ref, local_sidx) in fixes {
-        if let Some(s) = sg.node_mut(remote_sidx) {
-            s.sibling_segment_id = Some(local_sidx);
-        }
-        if let Some(s) = sg.node_mut(local_sidx) {
-            s.remote_tracking_ref_name = Some(remote_ref);
-            s.remote_tracking_branch_segment_id = Some(remote_sidx);
-        }
     }
 }
 
@@ -2957,7 +2726,6 @@ fn insert_empty_branches(
     ws_is_managed_merge: bool,
     plan: &LanePlan,
     remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
-    lanes_first: bool,
 ) {
     let Some(lists) = stack_branches else {
         return;
@@ -2979,7 +2747,7 @@ fn insert_empty_branches(
     // DEMOTIONS, decided by `lane_plan`: a shared base at/below the bound stays anonymous while
     // every stack's branches float above as their own lane; the lower-bound anchor of an
     // otherwise-unrepresented stack floats likewise. Remote links of a demoted name are
-    // re-established on the floated segment by `reconcile_remote_siblings`.
+    // established on the floated segment by the remote creators.
     let at_or_below_bound: Option<HashSet<gix::ObjectId>> =
         ws_lower_bound.map(|lb| ancestor_set(cg, lb));
     for &tip in &plan.demoted {
@@ -3031,8 +2799,7 @@ fn insert_empty_branches(
             }
             // GROUP NAMING, decided by `lane_plan`: the bottom-most branch names an anonymous
             // anchor; metadata order overrides a build-time name that belongs to the group (its
-            // remote links are cleared and re-established on the floated empty by
-            // `reconcile_remote_siblings`).
+            // remote links are cleared, the remote creators link its floated empty instead).
             if let Some((namer, clear_remote)) = plan.group_names.get(&(li, commit))
                 && let Some(s) = sg.node_mut(anchor)
             {
@@ -3051,16 +2818,11 @@ fn insert_empty_branches(
             // `anonymize_shared_stack_tips`) is already placed.
             let empties: Vec<gix::refs::FullName> = group
                 .iter()
-                .filter(|b| {
-                    segment_by_ref(sg, b).is_none()
-                        && (!lanes_first || !plan.remote_used.contains(*b))
-                })
+                .filter(|b| segment_by_ref(sg, b).is_none() && !plan.remote_used.contains(*b))
                 .cloned()
                 .collect();
             if std::env::var_os("BUT_GRAPH_FLIP_DEBUG").is_some() {
-                eprintln!(
-                    "EMPTIES lanes_first={lanes_first} li={li} commit={commit} group={group:?} empties={empties:?}"
-                );
+                eprintln!("EMPTIES li={li} commit={commit} group={group:?} empties={empties:?}");
             }
             if !empties.is_empty() {
                 // Dependent-branch splice vs own lane: a commit at/below the base (Integrated) or
