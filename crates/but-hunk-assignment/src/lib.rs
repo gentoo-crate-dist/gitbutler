@@ -997,7 +997,6 @@ mod tests {
             commits: vec![],
             commits_outside: None,
             base: None,
-            base_segment_id: None,
             commits_by_segment: vec![],
             commits_on_remote: vec![],
             metadata: None,

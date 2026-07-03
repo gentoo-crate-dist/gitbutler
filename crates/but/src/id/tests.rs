@@ -2191,7 +2191,6 @@ mod util {
             commits,
             commits_outside: None,
             base,
-            base_segment_id: None,
             commits_by_segment: Vec::new(),
             commits_on_remote,
             metadata: None,

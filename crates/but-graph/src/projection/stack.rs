@@ -59,7 +59,6 @@ impl Stack {
         let mut cur = iter.next();
         while let Some((a, b)) = cur.zip(iter.next()) {
             a.base = b.commits.first().map(|c| c.id);
-            a.base_segment_id = b.id.into();
             cur = Some(b);
         }
         let mut stack = Stack { id, segments };
@@ -93,7 +92,6 @@ impl Stack {
                     .then_some(c.id)
             })
         });
-        last_segment.base_segment_id = first_parent_sidx.filter(|_| last_segment.base.is_some());
     }
 }
 
@@ -221,10 +219,6 @@ pub struct StackSegment {
     /// It is `None` if the stack segment contains the first commit in the history, an orphan without ancestry,
     /// or if the history traversal was stopped early.
     pub base: Option<gix::ObjectId>,
-    /// If `base` is set, this is the segment owning the commit.
-    /// This is particularly interesting if this is the bottom-most segment in a stack as it typically connects to
-    /// the first segment outside the stack.
-    pub base_segment_id: Option<SegmentIndex>,
     /// A mapping of `(segment_idx, offset)` to know which segment contributed the commits of the
     /// given offset into `commits`. The offsets are ascending, starting at `0`.
     /// This is useful to be able to retain the ability to associate a commit to a segment in the graph.
@@ -356,7 +350,6 @@ impl StackSegment {
             name_projected_from_outside,
             // `base` is set later in the context of the entire stack.
             base: None,
-            base_segment_id: None,
             commits_by_segment: {
                 let mut ofs = 0;
                 commits_by_segment
