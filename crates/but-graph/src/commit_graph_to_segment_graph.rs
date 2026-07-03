@@ -765,7 +765,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
                 commit_id: Some(float.tip),
                 worktree: None,
             }),
-            remote_tracking_ref_name: None,
+            remote_tracking_ref_name: remote_tracking.get(&float.name).cloned(),
             sibling_segment_id: None,
             remote_tracking_branch_segment_id: None,
             commits: Vec::new(),
@@ -892,6 +892,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
                 &in_set,
                 &seg_of_tip,
                 &owner_of,
+                remote_tracking,
                 None,
                 &pinned_commits,
             );
@@ -961,6 +962,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
             &in_set,
             &seg_of_tip,
             &owner_of,
+            remote_tracking,
             None,
             &pinned_commits,
         );
@@ -983,6 +985,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
             &in_set,
             &seg_of_tip,
             &owner_of,
+            remote_tracking,
             None,
             &pinned_commits,
         );
@@ -1007,6 +1010,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
                 &in_set,
                 &seg_of_tip,
                 &owner_of,
+                remote_tracking,
                 None,
                 &pinned_commits,
             ),
@@ -1037,6 +1041,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
                     && plan.effective_name(&sg, owner_sidx, t.id).is_none()
                 {
                     if let Some(s) = sg.node_mut(owner_sidx) {
+                        s.remote_tracking_ref_name = remote_tracking.get(&ref_name).cloned();
                         s.ref_info = Some(RefInfo {
                             ref_name,
                             commit_id: Some(t.id),
@@ -1049,11 +1054,11 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
                     id: 0,
                     generation: 0,
                     ref_info: Some(RefInfo {
-                        ref_name,
+                        ref_name: ref_name.clone(),
                         commit_id: Some(t.id),
                         worktree: None,
                     }),
-                    remote_tracking_ref_name: None,
+                    remote_tracking_ref_name: remote_tracking.get(&ref_name).cloned(),
                     sibling_segment_id: None,
                     remote_tracking_branch_segment_id: None,
                     commits: Vec::new(),
@@ -1192,26 +1197,14 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
             workspace_commit,
             ws_is_managed_merge,
             &plan,
+            remote_tracking,
         );
-        // `add_remote_segments` linked each remote to the local that named its commit's segment. When a
-        // later pass (anonymize / empty-branch splicing) floats that local up into its own empty segment,
-        // the remote's sibling is left pointing at the now-anonymous segment below. Re-establish the
-        // walk's invariant — a remote `origin/X` is the sibling of the local segment named `X`.
-        // Naming passes (anchor naming, metadata-order renames, floats) don't carry remote-tracking
-        // names — backfill them so any named local segment knows its remote, as segments named at
-        // creation time do.
-        for sidx in sg.node_indices().collect::<Vec<_>>() {
-            if let Some(s) = sg.node_mut(sidx)
-                && s.remote_tracking_ref_name.is_none()
-                && let Some(rt) = s
-                    .ref_info
-                    .as_ref()
-                    .filter(|ri| is_plain_local_branch(&ri.ref_name))
-                    .and_then(|ri| remote_tracking.get(&ri.ref_name).cloned())
-            {
-                s.remote_tracking_ref_name = Some(rt);
-            }
-        }
+        // `add_remote_segments` linked each remote to the local that named its commit's segment.
+        // When a later pass floats that local up into its own empty segment, the remote's sibling
+        // is left pointing at the now-anonymous segment below. Re-establish the walk's invariant —
+        // a remote `origin/X` is the sibling of the local segment named `X`. (Every naming site
+        // carries its remote-tracking name at creation now; this repointing dies once the lane
+        // structure precedes the remote passes.)
         reconcile_remote_siblings(&mut sg, remote_tracking);
     }
 
@@ -2131,6 +2124,7 @@ fn add_remote_segments(
             in_set,
             seg_of_tip,
             owner_of,
+            remote_tracking,
             Some(local_sidx),
             pinned_commits,
         );
@@ -2154,6 +2148,7 @@ fn segment_ahead_region(
     in_set: &HashSet<gix::ObjectId>,
     seg_of_tip: &HashMap<gix::ObjectId, SegmentIndex>,
     owner_of: &HashMap<gix::ObjectId, gix::ObjectId>,
+    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
     // The local segment tracking this remote, if any — a TARGET without a tracking local segment
     // builds the same region without the sibling/remote-tracking links.
     local_sidx: Option<SegmentIndex>,
@@ -2252,23 +2247,28 @@ fn segment_ahead_region(
             let mut it = cg.refs_at(tip).into_iter().filter(is_plain_local_branch);
             it.next().filter(|_| it.next().is_none())
         };
+        let ref_info = if is_root {
+            root_name().map(|ref_name| RefInfo {
+                ref_name,
+                commit_id: Some(remote_tip),
+                worktree: None,
+            })
+        } else {
+            interior_name().map(|ref_name| RefInfo {
+                ref_name,
+                commit_id: Some(tip),
+                worktree: None,
+            })
+        };
+        let remote_tracking_ref_name = ref_info
+            .as_ref()
+            .filter(|ri| is_plain_local_branch(&ri.ref_name))
+            .and_then(|ri| remote_tracking.get(&ri.ref_name).cloned());
         let sidx = sg.add_node(Segment {
             id: 0,
             generation: 0,
-            ref_info: if is_root {
-                root_name().map(|ref_name| RefInfo {
-                    ref_name,
-                    commit_id: Some(remote_tip),
-                    worktree: None,
-                })
-            } else {
-                interior_name().map(|ref_name| RefInfo {
-                    ref_name,
-                    commit_id: Some(tip),
-                    worktree: None,
-                })
-            },
-            remote_tracking_ref_name: None,
+            ref_info,
+            remote_tracking_ref_name,
             sibling_segment_id: if is_root { local_sidx } else { None },
             remote_tracking_branch_segment_id: None,
             commits,
@@ -2665,11 +2665,14 @@ fn add_advanced_outside_branches<T: but_core::RefMetadata>(
                 }
             });
         let named = ref_info.is_some();
+        let remote_tracking_ref_name = ref_info
+            .as_ref()
+            .and_then(|ri| remote_tracking.get(&ri.ref_name).cloned());
         let seg = sg.add_node(Segment {
             id: 0,
             generation: 0,
             ref_info,
-            remote_tracking_ref_name: None,
+            remote_tracking_ref_name,
             sibling_segment_id: None,
             remote_tracking_branch_segment_id: None,
             commits,
@@ -2711,6 +2714,7 @@ fn insert_empty_branches(
     workspace_commit: gix::ObjectId,
     ws_is_managed_merge: bool,
     plan: &LanePlan,
+    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
 ) {
     let Some(lists) = stack_branches else {
         return;
@@ -2794,8 +2798,8 @@ fn insert_empty_branches(
                     commit_id: Some(commit),
                     worktree: None,
                 });
+                s.remote_tracking_ref_name = remote_tracking.get(namer).cloned();
                 if *clear_remote {
-                    s.remote_tracking_ref_name = None;
                     s.remote_tracking_branch_segment_id = None;
                 }
             }
@@ -2839,7 +2843,14 @@ fn insert_empty_branches(
                 }
                 let dependent = !shared_base && anchor_not_integrated;
                 insert_empty_chain_above(
-                    sg, from_sidx, anchor, &empties, commit, dependent, dependent,
+                    sg,
+                    from_sidx,
+                    anchor,
+                    &empties,
+                    remote_tracking,
+                    commit,
+                    dependent,
+                    dependent,
                 );
             }
             from_sidx = Some(anchor);
@@ -2934,11 +2945,13 @@ fn effective_lower_bound(
 /// parents), they are moved onto the chain top; if it has none — because a sibling empty stack already
 /// consumed the shared edge to `anchor` (two empty stacks on the same base) — a fresh edge is added.
 /// Other stacks' and remotes' edges into `anchor` are untouched. Produces `top_empty → … → anchor`.
+#[expect(clippy::too_many_arguments)]
 fn insert_empty_chain_above(
     sg: &mut SegmentGraph,
     from_sidx: Option<SegmentIndex>,
     anchor: SegmentIndex,
     empties: &[gix::refs::FullName],
+    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
     // The commit every empty branch points at (the group's commit — empty segments still have a
     // ref TARGET, like the walk's).
     commit_id: gix::ObjectId,
@@ -2962,7 +2975,7 @@ fn insert_empty_chain_above(
                     commit_id: Some(commit_id),
                     worktree: None,
                 }),
-                remote_tracking_ref_name: None,
+                remote_tracking_ref_name: remote_tracking.get(b).cloned(),
                 sibling_segment_id: None,
                 remote_tracking_branch_segment_id: None,
                 commits: Vec::new(),
