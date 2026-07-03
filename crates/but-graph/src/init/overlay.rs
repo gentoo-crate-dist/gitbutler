@@ -240,11 +240,11 @@ impl<'repo> OverlayRepo<'repo> {
         Ok(self.inner.find_commit(id)?)
     }
 
-    pub fn for_attach_only(&self) -> &'repo gix::Repository {
+    pub(crate) fn for_attach_only(&self) -> &'repo gix::Repository {
         self.inner
     }
 
-    pub fn for_find_only(&self) -> &'repo gix::Repository {
+    pub(crate) fn for_find_only(&self) -> &'repo gix::Repository {
         self.inner
     }
 
@@ -263,7 +263,7 @@ impl<'repo> OverlayRepo<'repo> {
 
     /// Create a mapping of all heads to the object ids they point to.
     /// `workspace_ref_names` is the names of all known workspace references.
-    pub fn collect_ref_mapping_by_prefix<'a>(
+    pub(crate) fn collect_ref_mapping_by_prefix<'a>(
         &self,
         prefixes: impl Iterator<Item = &'a str>,
         workspace_ref_names: &[&gix::refs::FullNameRef],
@@ -463,7 +463,7 @@ impl<T> OverlayMetadata<'_, T>
 where
     T: RefMetadata,
 {
-    pub fn iter_workspaces(
+    pub(crate) fn iter_workspaces(
         &self,
     ) -> impl Iterator<Item = (gix::refs::FullName, ref_metadata::Workspace)> {
         self.inner
@@ -533,7 +533,7 @@ where
 
     /// The wrapped metadata WITHOUT the overlay — only for callers that re-apply the overlay
     /// themselves.
-    pub fn for_inner_only(&self) -> &'_ T {
+    pub(crate) fn for_inner_only(&self) -> &'_ T {
         self.inner
     }
 }

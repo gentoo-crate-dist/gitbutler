@@ -482,7 +482,7 @@ impl StackCommit {
     }
 
     /// Collect additional information on `commit` using `repo`.
-    pub fn from_graph_commit(commit: &crate::Commit) -> Self {
+    pub(crate) fn from_graph_commit(commit: &crate::Commit) -> Self {
         StackCommit {
             id: commit.id,
             parent_ids: commit.parent_ids.clone(),

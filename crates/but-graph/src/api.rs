@@ -188,7 +188,7 @@ impl Graph {
     ///
     /// If `first_parent` is [`FirstParent::Yes`], both the included and excluded traversals follow
     /// only the first-parent edge (the source commit's first parent).
-    pub fn find_segments_reachable_from_a_not_b(
+    pub(crate) fn find_segments_reachable_from_a_not_b(
         &self,
         included: SegmentIndex,
         excluded: SegmentIndex,
@@ -421,7 +421,7 @@ impl Graph {
     /// shared commit.
     ///
     /// This helper intentionally stops at ambiguous segments with more than one outgoing connection.
-    pub fn resolve_to_unambiguously_pointed_to_commit(
+    pub(crate) fn resolve_to_unambiguously_pointed_to_commit(
         &self,
         start: SegmentIndex,
     ) -> Option<(&crate::Commit, SegmentIndex)> {
@@ -806,7 +806,7 @@ impl Graph {
     }
 
     /// Visit the ancestry of `start` along the first parents, including `start`, until `stop` returns `true`.
-    pub fn visit_segments_downward_along_first_parent_include_start(
+    pub(crate) fn visit_segments_downward_along_first_parent_include_start(
         &self,
         start: SegmentIndex,
         stop: impl FnMut(&Segment) -> bool,
@@ -857,12 +857,12 @@ impl Graph {
     }
 
     /// Claim that the graph was pruned without regard to the core graph algorithm.
-    pub fn set_hard_limit_hit(&mut self) {
+    pub(crate) fn set_hard_limit_hit(&mut self) {
         self.hard_limit_hit = true;
     }
 
     /// Lookup the segment of `sidx` and then find its sibling segment, if it has one.
-    pub fn lookup_sibling_segment(&self, sidx: SegmentIndex) -> Option<&Segment> {
+    pub(crate) fn lookup_sibling_segment(&self, sidx: SegmentIndex) -> Option<&Segment> {
         self.inner.node_weight(sidx)?.sibling_segment(self)
     }
 

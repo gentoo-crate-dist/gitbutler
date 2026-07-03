@@ -36,13 +36,13 @@ impl Limit {
     /// leaving potential isles in the graph.
     /// This can happen if we have to track a lot of remotes, but since these are queued later, they are also
     /// secondary and may just work for the typical remote.
-    pub fn with_indirect_goal(mut self, goal: gix::ObjectId, goals: &mut Goals) -> Self {
+    pub(crate) fn with_indirect_goal(mut self, goal: gix::ObjectId, goals: &mut Goals) -> Self {
         self.goal = goals.flag_for(goal).unwrap_or_default();
         self
     }
 
     /// Set two or more goals, by setting `goal` directly as previously obtained by [Goals::flag_for()].
-    pub fn additional_goal(mut self, goal: CommitFlags) -> Self {
+    pub(crate) fn additional_goal(mut self, goal: CommitFlags) -> Self {
         self.goal |= goal;
         self
     }
@@ -52,7 +52,7 @@ impl Limit {
     /// with one commit so we know exactly where it stops.
     /// The problem with this is that we never get back the split limit when segments re-unite,
     /// so effectively we loose gas here.
-    pub fn per_parent(&self, num_parents: usize) -> Self {
+    pub(crate) fn per_parent(&self, num_parents: usize) -> Self {
         Limit {
             inner: self
                 .inner
@@ -62,7 +62,7 @@ impl Limit {
     }
 
     /// Assure this limit won't perform any traversal after reaching its goals.
-    pub fn without_allowance(mut self) -> Self {
+    pub(crate) fn without_allowance(mut self) -> Self {
         self.set_but_keep_goal(Limit::new(Some(0)));
         self
     }
@@ -74,7 +74,7 @@ impl Limit {
     ///
     /// `flags` are used to selectively decrement this limit.
     /// Thanks to flag-propagation there can be no runaways.
-    pub fn is_exhausted_or_decrement(&mut self, flags: CommitFlags, next: &Queue) -> bool {
+    pub(crate) fn is_exhausted_or_decrement(&mut self, flags: CommitFlags, next: &Queue) -> bool {
         // Keep going if the goal wasn't seen yet, unlimited gas.
         if let Some(maybe_goal) = self.goal_reachable(flags)
             && (maybe_goal.is_empty() || self.set_single_goal_reached_keep_searching(maybe_goal))
@@ -102,7 +102,7 @@ impl Limit {
     /// Out-of-band way to use commit-flags differently - they never set the earlier flags, so we
     /// can use them.
     /// Return `true` if all goals are reached now.
-    pub fn set_single_goal_reached_keep_searching(&mut self, goal: CommitFlags) -> bool {
+    pub(crate) fn set_single_goal_reached_keep_searching(&mut self, goal: CommitFlags) -> bool {
         self.goal.remove(goal);
         if self.goal.is_empty() {
             self.goal.insert(CommitFlags::Integrated);
@@ -114,7 +114,7 @@ impl Limit {
 
     /// If `other` has a higher limit as ourselves, apply the higher limit to us.
     /// Nothing else is affected.
-    pub fn adjust_limit_if_bigger(&mut self, other: Limit) {
+    pub(crate) fn adjust_limit_if_bigger(&mut self, other: Limit) {
         match (&mut self.inner, other.inner) {
             (inner @ Some(_), None) => *inner = None,
             (Some(x), Some(y)) => {
@@ -126,7 +126,7 @@ impl Limit {
         }
     }
 
-    pub fn goal_reached(&self) -> bool {
+    pub(crate) fn goal_reached(&self) -> bool {
         self.goal_unset() || self.goal.contains(CommitFlags::Integrated)
     }
 
@@ -137,7 +137,7 @@ impl Limit {
     /// meaning it was reached through the commit the flags belong to.
     /// This is useful to determine if a commit that is ahead was seen during traversal.
     #[inline]
-    pub fn goal_reachable(&self, flags: CommitFlags) -> Option<CommitFlags> {
+    pub(crate) fn goal_reachable(&self, flags: CommitFlags) -> Option<CommitFlags> {
         if self.goal_reached() {
             None
         } else {
@@ -146,21 +146,21 @@ impl Limit {
     }
 
     /// Return the goal flags, which may be empty.
-    pub fn goal_flags(&self) -> CommitFlags {
+    pub(crate) fn goal_flags(&self) -> CommitFlags {
         // Should only be one, at a time
         let all_goals = self.goal.bits() & !CommitFlags::all().bits();
         CommitFlags::from_bits_retain(all_goals)
     }
 
     /// Set our limit from `other`, but do not alter our goal.
-    pub fn set_but_keep_goal(&mut self, other: Limit) {
+    pub(crate) fn set_but_keep_goal(&mut self, other: Limit) {
         self.inner = other.inner;
     }
 }
 
 /// Lifecycle
 impl Queue {
-    pub fn new_with_limit(limit: Option<usize>) -> Self {
+    pub(crate) fn new_with_limit(limit: Option<usize>) -> Self {
         Queue {
             inner: Default::default(),
             count: 0,
@@ -210,7 +210,7 @@ impl Queue {
         }
     }
     #[must_use]
-    pub fn push_back_exhausted(&mut self, item: QueueItem) -> bool {
+    pub(crate) fn push_back_exhausted(&mut self, item: QueueItem) -> bool {
         if self.exhausted || self.record_hard_limit_if_exhausted() {
             return true;
         }
@@ -226,7 +226,7 @@ impl Queue {
         self.is_exhausted_after_increment()
     }
     #[must_use]
-    pub fn push_front_exhausted(&mut self, item: QueueItem) -> bool {
+    pub(crate) fn push_front_exhausted(&mut self, item: QueueItem) -> bool {
         if self.exhausted || self.record_hard_limit_if_exhausted() {
             return true;
         }
@@ -250,7 +250,7 @@ impl Queue {
         self.exhausted || self.record_hard_limit_if_exhausted()
     }
 
-    pub fn is_exhausted(&self) -> bool {
+    pub(crate) fn is_exhausted(&self) -> bool {
         self.exhausted || self.is_hard_limit_exhausted()
     }
 
@@ -274,7 +274,7 @@ impl Queue {
     }
 
     /// Add `goal` as additional goal to `id` or panic if `id` was not found.
-    pub fn add_goal_to(&mut self, id: gix::ObjectId, goal: CommitFlags) {
+    pub(crate) fn add_goal_to(&mut self, id: gix::ObjectId, goal: CommitFlags) {
         let limit = self
             .inner
             .iter_mut()
@@ -302,7 +302,7 @@ pub struct Goals(Vec<gix::ObjectId>);
 
 impl Goals {
     /// Return the bitflag for `goal`, or `None` if we can't track any more goals.
-    pub fn flag_for(&mut self, goal: gix::ObjectId) -> Option<CommitFlags> {
+    pub(crate) fn flag_for(&mut self, goal: gix::ObjectId) -> Option<CommitFlags> {
         let existing_flags = CommitFlags::all().iter().count();
         let max_goals = size_of::<CommitFlags>() * 8 - existing_flags;
 
@@ -386,7 +386,7 @@ pub struct TopoWalk {
 /// Lifecycle
 impl TopoWalk {
     /// Start a walk at `segment`, possibly only from `commit`.
-    pub fn start_from(
+    pub(crate) fn start_from(
         segment: SegmentIndex,
         commit: Option<CommitIndex>,
         direction: Direction,
@@ -409,7 +409,7 @@ impl TopoWalk {
 /// Builder
 impl TopoWalk {
     /// Call to not return the tip as part of the iteration.
-    pub fn skip_tip_segment(mut self) -> Self {
+    pub(crate) fn skip_tip_segment(mut self) -> Self {
         self.skip_tip = Some(());
         self
     }

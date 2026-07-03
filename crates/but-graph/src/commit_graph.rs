@@ -96,7 +96,7 @@ impl CommitGraph {
     /// Build from a set of commits (as produced by the gix traversal). Commits whose parents are
     /// outside the set are simply roots of this subgraph (a partial graph), mirroring how the
     /// StepGraph handles missing parents via `preserved_parents`.
-    pub fn from_commits(
+    pub(crate) fn from_commits(
         commits: impl IntoIterator<Item = Commit>,
         entrypoint: Option<gix::ObjectId>,
     ) -> Self {
@@ -181,7 +181,7 @@ impl CommitGraph {
     /// post-processing skipped, flattening the raw traversal segments into commits. This keeps the
     /// battle-tested traversal semantics — extents (limit cuts, integrated stop-early) and flags are
     /// exactly the walk's — while segments remain a derived view built on top.
-    pub fn from_walk<T: but_core::RefMetadata>(
+    pub(crate) fn from_walk<T: but_core::RefMetadata>(
         repo: &gix::Repository,
         meta: &T,
         tip: gix::ObjectId,
@@ -204,7 +204,7 @@ impl CommitGraph {
     }
 
     /// Like [`Self::from_walk`], but seeded from explicit `tips`.
-    pub fn from_walk_tips<T: but_core::RefMetadata>(
+    pub(crate) fn from_walk_tips<T: but_core::RefMetadata>(
         repo: &gix::Repository,
         meta: &T,
         tips: Vec<crate::init::Tip>,
@@ -227,7 +227,11 @@ impl CommitGraph {
     }
 
     /// Mark `id` as a GitButler-managed workspace commit when its message says so.
-    pub fn mark_managed_ws_commit_by_message(&mut self, repo: &gix::Repository, id: gix::ObjectId) {
+    pub(crate) fn mark_managed_ws_commit_by_message(
+        &mut self,
+        repo: &gix::Repository,
+        id: gix::ObjectId,
+    ) {
         if let Ok(commit) = repo.find_commit(id)
             && let Ok(message) = commit.message_raw()
             && crate::workspace::commit::is_managed_workspace_by_message(message)
@@ -248,7 +252,7 @@ impl CommitGraph {
     }
 
     /// Whether `id` is a GitButler-managed workspace commit (recognised by its message).
-    pub fn is_managed_ws_commit(&self, id: gix::ObjectId) -> bool {
+    pub(crate) fn is_managed_ws_commit(&self, id: gix::ObjectId) -> bool {
         self.managed_ws_commits.contains(&id)
     }
 
@@ -264,7 +268,7 @@ impl CommitGraph {
 
     /// The commit's CONNECTED parent list, first-parent first — parents the traversal severed
     /// (limits, integrated stop-early, display cuts) are omitted.
-    pub fn all_parent_ids(&self, id: gix::ObjectId) -> Vec<gix::ObjectId> {
+    pub(crate) fn all_parent_ids(&self, id: gix::ObjectId) -> Vec<gix::ObjectId> {
         self.node(id)
             .map(|n| {
                 n.commit
@@ -278,7 +282,7 @@ impl CommitGraph {
     }
 
     /// The commit that `ref_name` points at, if present in the graph.
-    pub fn commit_by_ref(&self, ref_name: &gix::refs::FullNameRef) -> Option<gix::ObjectId> {
+    pub(crate) fn commit_by_ref(&self, ref_name: &gix::refs::FullNameRef) -> Option<gix::ObjectId> {
         self.nodes
             .iter()
             .find(|n| {
@@ -291,7 +295,7 @@ impl CommitGraph {
     }
 
     /// The reference names pointing at `id`.
-    pub fn refs_at(&self, id: gix::ObjectId) -> Vec<gix::refs::FullName> {
+    pub(crate) fn refs_at(&self, id: gix::ObjectId) -> Vec<gix::refs::FullName> {
         self.node(id)
             .map(|n| n.commit.refs.iter().map(|r| r.ref_name.clone()).collect())
             .unwrap_or_default()
@@ -321,41 +325,6 @@ impl CommitGraph {
             .get(&id)
             .into_iter()
             .flat_map(move |&idx| self.children[idx].iter().map(|&c| self.nodes[c].commit.id))
-    }
-
-    /// Whether walking first-parent should *stop* before entering `id` — i.e. `id` begins a new
-    /// segment. Structural boundaries only (the projection layers its own: entrypoint, merge-base,
-    /// target). A new segment begins where:
-    /// * a local branch ref points at the commit (a named segment starts), or
-    /// * the commit is a merge (more than one parent), or
-    /// * the commit is a branch point (more than one child) — the paths are distinct segments.
-    pub fn is_segment_boundary(&self, id: gix::ObjectId) -> bool {
-        let Some(n) = self.node(id) else {
-            return false;
-        };
-        let has_local_branch_ref = n
-            .commit
-            .ref_name_iter()
-            .any(|rn| rn.category() == Some(gix::reference::Category::LocalBranch));
-        let is_merge = n.commit.parent_ids.len() > 1;
-        let is_branch_point = self.children(id).take(2).count() > 1;
-        has_local_branch_ref || is_merge || is_branch_point
-    }
-
-    /// Derive one segment's commits: the maximal first-parent run starting at `start` and continuing
-    /// while the next first-parent commit is not itself a boundary. This is the grouping the segment
-    /// graph used to store, recomputed on demand — the proof that segments are a *view*.
-    pub fn first_parent_run(&self, start: gix::ObjectId) -> Vec<gix::ObjectId> {
-        let mut run = Vec::new();
-        let mut cur = Some(start);
-        while let Some(id) = cur {
-            run.push(id);
-            match self.first_parent(id) {
-                Some(next) if !self.is_segment_boundary(next) => cur = Some(next),
-                _ => break,
-            }
-        }
-        run
     }
 
     /// Recompute `generation` for every node (longest path from a root, by Kahn order). Cheap; the
@@ -448,32 +417,5 @@ mod tests {
         // Generation increases with history depth.
         assert_eq!(g.node(id(1)).unwrap().generation, 0);
         assert_eq!(g.node(id(3)).unwrap().generation, 2);
-        // No boundaries on a plain linear chain → the whole thing is one run.
-        assert_eq!(g.first_parent_run(id(3)), vec![id(3), id(2), id(1)]);
-    }
-
-    #[test]
-    fn merge_is_a_segment_boundary_so_the_run_stops() {
-        // 4 is a merge of 2 and 3; both descend from 1.
-        //   4 -> [2, 3] ; 2 -> 1 ; 3 -> 1
-        let g = CommitGraph::from_commits(
-            [
-                commit(4, &[2, 3]),
-                commit(2, &[1]),
-                commit(3, &[1]),
-                commit(1, &[]),
-            ],
-            Some(id(4)),
-        );
-        assert!(
-            g.is_segment_boundary(id(4)),
-            "merge commit starts its own segment"
-        );
-        assert!(
-            g.is_segment_boundary(id(1)),
-            "1 has two children (2 and 3) → branch point, a boundary"
-        );
-        // First-parent run from the merge: 4, then first-parent 2, then stop before boundary 1.
-        assert_eq!(g.first_parent_run(id(4)), vec![id(4), id(2)]);
     }
 }

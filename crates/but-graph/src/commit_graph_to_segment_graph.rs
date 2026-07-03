@@ -40,7 +40,7 @@ pub fn graph_from_repository<T: but_core::RefMetadata>(
 
 /// Like [`graph_from_repository`], but serving `overlay` refs and metadata from memory — the flip
 /// counterpart of [`Graph::redo_traversal_with_overlay`](crate::Graph::redo_traversal_with_overlay).
-pub fn graph_from_repository_with_overlay<T: but_core::RefMetadata>(
+pub(crate) fn graph_from_repository_with_overlay<T: but_core::RefMetadata>(
     repo: &gix::Repository,
     meta: &T,
     entrypoint: Option<gix::ObjectId>,
@@ -109,7 +109,7 @@ pub fn graph_from_repository_with_overlay<T: but_core::RefMetadata>(
 /// Build a segment [`Graph`](crate::Graph) for a NON-managed checkout — a plain branch or detached
 /// HEAD, with no `gitbutler/workspace` merge. `head_tip` is the checked-out commit (the graph's tip).
 /// A detached HEAD is anonymized by `from_head`'s detach pass, not here.
-pub fn graph_from_repository_unmanaged<T: but_core::RefMetadata>(
+pub(crate) fn graph_from_repository_unmanaged<T: but_core::RefMetadata>(
     repo: &gix::Repository,
     meta: &T,
     head_tip: gix::ObjectId,
@@ -130,7 +130,7 @@ pub fn graph_from_repository_unmanaged<T: but_core::RefMetadata>(
 
 /// Like [`graph_from_repository_unmanaged`], but serving `overlay` refs and metadata from memory.
 #[allow(clippy::too_many_arguments)]
-pub fn graph_from_repository_unmanaged_with_overlay<T: but_core::RefMetadata>(
+pub(crate) fn graph_from_repository_unmanaged_with_overlay<T: but_core::RefMetadata>(
     repo: &gix::Repository,
     meta: &T,
     head_tip: gix::ObjectId,
@@ -173,7 +173,7 @@ pub fn graph_from_repository_unmanaged_with_overlay<T: but_core::RefMetadata>(
 /// [`Graph::from_commit_traversal_tips`](crate::Graph::from_commit_traversal_tips). The tips'
 /// normalized traversal roles are carried onto the returned graph (`traversal_tips`), which the
 /// projection reads for tips-built graphs.
-pub fn graph_from_repository_tips<T: but_core::RefMetadata>(
+pub(crate) fn graph_from_repository_tips<T: but_core::RefMetadata>(
     repo: &gix::Repository,
     meta: &T,
     tips: Vec<crate::init::Tip>,
@@ -640,7 +640,7 @@ fn facts<T: but_core::RefMetadata>(
 /// Inputs mirror the projection's enrichment: the workspace commit, the target that bounds/integrates,
 /// and the local→remote tracking map. `project_meta`/`options` are carried onto the `Graph`.
 #[allow(clippy::too_many_arguments)]
-pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
+pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
     cg: &CommitGraph,
     workspace_commit: gix::ObjectId,
     entrypoint: gix::ObjectId,

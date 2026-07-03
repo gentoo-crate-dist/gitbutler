@@ -941,7 +941,7 @@ impl Graph {
     /// Each outgoing edge is matched by its source commit id. If a matching
     /// hint exists, that edge is followed. Without a hint for the current source commit, the
     /// walk falls back to the first-parent edge.
-    pub fn visit_segments_downward_with_segment_hints_exclude_start(
+    pub(crate) fn visit_segments_downward_with_segment_hints_exclude_start(
         &self,
         start: SegmentIndex,
         preferred_next_segment_by_commit: &[(ObjectId, SegmentIndex)],
