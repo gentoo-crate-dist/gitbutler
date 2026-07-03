@@ -4,11 +4,7 @@
 //! one mess of git2 code to bring them all,
 //! and in the darknes bind them.
 
-pub(crate) mod canonical;
 mod creation;
-/// SPIKE: build a StepGraph straight from a commit-first `but_graph::CommitGraph`, no segment graph.
-mod from_commit_graph;
-pub(crate) mod native_creation;
 pub mod rebase;
 pub mod traverse;
 use std::collections::{BTreeMap, HashMap};
