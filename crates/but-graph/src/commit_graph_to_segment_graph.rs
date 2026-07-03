@@ -672,6 +672,24 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
         &project_meta,
         &options,
     );
+    // The workspace's lower bound — the base all lanes and the (stored/extra) target converge
+    // on, extended down to an older target position.
+    let ws_lower_bound =
+        effective_lower_bound(cg, workspace_commit, target, &project_meta, &options);
+    let plan = lane_plan(
+        cg,
+        &f,
+        workspace_commit,
+        entrypoint,
+        entrypoint_ref.as_ref(),
+        target,
+        remote_tracking,
+        stack_branches,
+        ws_lower_bound,
+        managed,
+        meta,
+        project_meta.target_ref.as_ref(),
+    );
     let Facts {
         in_set,
         ws_is_managed_merge,
@@ -690,57 +708,17 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
     // Create a local segment per tip, holding its first-parent commit run.
     for &tip in &tips {
         let commits = commit_run(cg, tip, &in_set, &is_boundary);
-        // The managed workspace tip is named by the workspace ref itself (a `gitbutler/*` ref that
-        // normal disambiguation skips). Every other tip — including a ref-less checkout's — is
-        // named by disambiguation, like the walk; a truly detached HEAD is anonymized afterwards
-        // by `from_head`'s detach pass, never here (a ref-less `from_commit_traversal` tip must
-        // keep its name, e.g. for a preview overlay adding a ref at the tip).
-        let ref_name = if tip == workspace_commit {
-            if ws_is_managed_merge {
-                // The real managed merge is named by EXACTLY the workspace ref (which normal
-                // disambiguation skips). Other transient `gitbutler/*` refs can be co-located —
-                // e.g. `gitbutler/edit` mid edit-mode — and must never name (or join) the
-                // workspace. The traversal can drop the ws ref from the commit (a checkout of
-                // another co-located ref makes it an empty raw segment) — the caller established
-                // it points here, so fall back to the well-known name.
-                cg.refs_at(tip)
-                    .into_iter()
-                    .find(|r| but_core::is_workspace_ref_name(r.as_ref()))
-                    .or_else(|| but_core::WORKSPACE_REF_NAME.try_into().ok())
-            } else {
-                // Co-located stack tip / advanced ref (managed) or a non-managed tip: name by
-                // disambiguation — a stack branch when present, else anonymous. For the managed cases
-                // the empty workspace segment is spliced in above afterward.
-                disambiguated_ref(
-                    cg,
-                    tip,
-                    remote_tracking,
-                    meta,
-                    Some(workspace_commit),
-                    project_meta.target_ref.as_ref(),
-                )
-            }
-        } else if entrypoint_forced_boundary && tip == entrypoint {
-            entrypoint_ref.clone().or_else(|| {
-                disambiguated_ref(
-                    cg,
-                    tip,
-                    remote_tracking,
-                    meta,
-                    None,
-                    project_meta.target_ref.as_ref(),
-                )
-            })
-        } else {
-            disambiguated_ref(
-                cg,
-                tip,
-                remote_tracking,
-                meta,
-                Some(workspace_commit),
-                project_meta.target_ref.as_ref(),
-            )
-        };
+        let ref_name = materialize_tip_name(
+            cg,
+            tip,
+            workspace_commit,
+            ws_is_managed_merge,
+            entrypoint_forced_boundary.then_some(entrypoint),
+            entrypoint_ref.as_ref(),
+            remote_tracking,
+            meta,
+            project_meta.target_ref.as_ref(),
+        );
         let ref_info = ref_name.map(|ref_name| RefInfo {
             ref_name,
             commit_id: Some(tip),
@@ -1109,15 +1087,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
         // A workspace-stack tip that another stack flows into (via first-parent) is a SHARED commit: it
         // is anonymized into its own segment and its ref floats up as an empty placeholder that the
         // workspace connects to (the dependent-branch pattern).
-        anonymize_shared_stack_tips(
-            cg,
-            &mut sg,
-            workspace_commit,
-            target,
-            &seg_of_tip,
-            &in_set,
-            stack_branches,
-        );
+        anonymize_shared_stack_tips(&mut sg, workspace_commit, &seg_of_tip, &plan.floats);
         // The empty workspace segment must exist BEFORE empty branches are spliced in, so each empty
         // stack routes from it (not from the stack segment the ws ref sits on — which would be degenerate).
         if empty_ws_case {
@@ -1140,12 +1110,6 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
         // Empty metadata branches (no commits) are spliced in at their place in the stack's branch order,
         // routing from the workspace segment (the empty one when present, else the ws-commit's segment).
         let ws_sidx = ws_empty_sidx.or_else(|| seg_of_tip.get(&workspace_commit).copied());
-        // The workspace's lower bound — the base all lanes and the (stored/extra) target converge
-        // on, extended down to an older target position. Stack branches resting there float as
-        // their own empty lanes instead of naming the boundary segment, when nothing else
-        // represents their stack.
-        let ws_lower_bound =
-            effective_lower_bound(cg, workspace_commit, target, &project_meta, &options);
         insert_empty_branches(
             &mut sg,
             cg,
@@ -1155,6 +1119,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
             &in_set,
             workspace_commit,
             ws_is_managed_merge,
+            &plan,
         );
         // `add_remote_segments` linked each remote to the local that named its commit's segment. When a
         // later pass (anonymize / empty-branch splicing) floats that local up into its own empty segment,
@@ -1420,6 +1385,310 @@ fn split_at_entrypoint_segment<T: but_core::RefMetadata>(
     sg.node_mut(new).expect("just added").id = new;
     sg.add_edge(sidx, Connection::new(new, None, None, None, None));
     Some(new)
+}
+
+/// One floated lane placeholder decided by [`lane_plan`]: `tip`'s segment goes anonymous, an
+/// empty segment named `name` splices in between the workspace and it, and `displaced` (a
+/// build-time name pushed aside by a metadata stack branch) returns to the commit as a passive
+/// ref.
+struct Float {
+    tip: gix::ObjectId,
+    name: gix::refs::FullName,
+    displaced: Option<gix::refs::FullName>,
+}
+
+/// The managed lane NAME decisions, computed before any segment mutation happens (phase 2 of
+/// gather-then-build). Models the naming state the passes would see — materialization names,
+/// then the anon-owner renames of the remote/target/explicit-tip passes — and decides purely:
+///
+/// * which shared workspace-parent tips float their name up as an empty lane placeholder
+///   (`anonymize_shared_stack_tips`),
+/// * which anchors are DEMOTED to anonymous (a shared base at/below the bound, the lower-bound
+///   float) so their stacks' branches form their own lanes (`insert_empty_branches`' demotions).
+///
+/// The group-naming decisions stay in `insert_empty_branches` for now: their "does this ref
+/// already name a segment" checks range over remote segments, which become plan data only when
+/// the remote passes are planned too.
+struct LanePlan {
+    floats: Vec<Float>,
+    demoted: HashSet<gix::ObjectId>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lane_plan<T: but_core::RefMetadata>(
+    cg: &CommitGraph,
+    facts: &Facts,
+    workspace_commit: gix::ObjectId,
+    entrypoint: gix::ObjectId,
+    entrypoint_ref: Option<&gix::refs::FullName>,
+    target: Option<gix::ObjectId>,
+    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
+    stack_branches: Option<&[Vec<gix::refs::FullName>]>,
+    ws_lower_bound: Option<gix::ObjectId>,
+    managed: bool,
+    meta: &T,
+    target_ref: Option<&gix::refs::FullName>,
+) -> LanePlan {
+    let mut plan = LanePlan {
+        floats: Vec::new(),
+        demoted: HashSet::new(),
+    };
+    if !managed {
+        return plan;
+    }
+    // The naming state as the lane passes will see it: materialization names first…
+    let mut name_of: HashMap<gix::ObjectId, gix::refs::FullName> = HashMap::new();
+    for &tip in &facts.tips {
+        if let Some(name) = materialize_tip_name(
+            cg,
+            tip,
+            workspace_commit,
+            facts.ws_is_managed_merge,
+            facts.entrypoint_forced_boundary.then_some(entrypoint),
+            entrypoint_ref,
+            remote_tracking,
+            meta,
+            target_ref,
+        ) {
+            name_of.insert(tip, name);
+        }
+    }
+    // …then the anon-owner renames of `add_remote_segments` (a remote pointing BEHIND/at an
+    // anonymous in-set segment names it), in materialization order like the pass.
+    for &tip in &facts.tips {
+        let Some(remote_ref) = name_of.get(&tip).and_then(|n| remote_tracking.get(n)) else {
+            continue;
+        };
+        let Some(remote_tip) = cg.commit_by_ref(remote_ref.as_ref()) else {
+            continue;
+        };
+        if !facts.in_set.contains(&remote_tip) {
+            continue;
+        }
+        let owner = facts
+            .owner_of
+            .get(&remote_tip)
+            .copied()
+            .unwrap_or(remote_tip);
+        if let std::collections::hash_map::Entry::Vacant(e) = name_of.entry(owner) {
+            e.insert(remote_ref.clone());
+        }
+    }
+    // …the target pass naming an anonymous in-set owner after the target ref…
+    if let Some(tr) = target_ref
+        && tr.as_ref().category() == Some(Category::RemoteBranch)
+        && !name_of.values().any(|n| n == tr)
+        && let Some(tip) = cg.commit_by_ref(tr.as_ref())
+        && facts.in_set.contains(&tip)
+    {
+        let owner = facts.owner_of.get(&tip).copied().unwrap_or(tip);
+        if let std::collections::hash_map::Entry::Vacant(e) = name_of.entry(owner) {
+            e.insert(tr.clone());
+        }
+    }
+    // …and the explicit-tip pass naming anonymous segments that START at a tip.
+    for t in cg.traversal_tips.iter().filter(|_| cg.explicit_tips) {
+        let Some(ref_name) = t.ref_name.clone() else {
+            continue;
+        };
+        if but_core::is_workspace_ref_name(ref_name.as_ref())
+            || name_of.values().any(|n| *n == ref_name)
+        {
+            continue;
+        }
+        if facts.boundaries.contains(&t.id)
+            && let std::collections::hash_map::Entry::Vacant(e) = name_of.entry(t.id)
+        {
+            e.insert(ref_name);
+        }
+    }
+
+    // ── anonymize_shared_stack_tips: which workspace-parent tips float ──
+    let is_stack_branch = |n: &gix::refs::FullName| {
+        stack_branches
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|b| b == n)
+    };
+    if facts.ws_is_managed_merge {
+        for parent in cg.parents(workspace_commit) {
+            // The target/base lane keeps its name even when other stacks depend on it.
+            if Some(parent) == target || !facts.boundaries.contains(&parent) {
+                continue;
+            }
+            let Some(current) = name_of.get(&parent).cloned() else {
+                continue;
+            };
+            // Shared iff some other IN-WORKSPACE commit's first parent is this tip.
+            let shared = facts.in_set.iter().any(|&c| {
+                c != workspace_commit
+                    && cg.first_parent(c) == Some(parent)
+                    && cg
+                        .node(c)
+                        .is_some_and(|n| n.commit.flags.contains(crate::CommitFlags::InWorkspace))
+            });
+            if !shared {
+                continue;
+            }
+            // When build-time disambiguation picked a NON-stack ref, float the unique metadata
+            // STACK branch instead and return the displaced name to the commit as a passive ref:
+            // an applied-but-empty stack must keep its own lane, or the projection's
+            // integration-prune swallows the whole stack with the shared base it would own.
+            let (float_name, displaced) = if is_stack_branch(&current) {
+                (current.clone(), None)
+            } else {
+                let mut stack_refs = cg
+                    .refs_at(parent)
+                    .into_iter()
+                    .filter(|r| is_plain_local_branch(r) && is_stack_branch(r));
+                match (stack_refs.next(), stack_refs.next()) {
+                    (Some(stack_ref), None)
+                        if !name_of.values().any(|n| *n == stack_ref)
+                            && !plan.floats.iter().any(|f| f.name == stack_ref) =>
+                    {
+                        (stack_ref, Some(current.clone()))
+                    }
+                    _ => (current.clone(), None),
+                }
+            };
+            name_of.remove(&parent);
+            plan.floats.push(Float {
+                tip: parent,
+                name: float_name,
+                displaced,
+            });
+        }
+    }
+
+    // ── insert_empty_branches' demotions ──
+    let Some(lists) = stack_branches else {
+        return plan;
+    };
+    let mut lists_per_commit: HashMap<gix::ObjectId, usize> = HashMap::new();
+    for list in lists {
+        let mut seen = HashSet::new();
+        for b in list {
+            if let Some(c) = cg.commit_by_ref(b.as_ref())
+                && seen.insert(c)
+            {
+                *lists_per_commit.entry(c).or_default() += 1;
+            }
+        }
+    }
+    let at_or_below_bound: Option<HashSet<gix::ObjectId>> =
+        ws_lower_bound.map(|lb| ancestor_set(cg, lb));
+    // A commit pointed at by branches of SEVERAL metadata stacks at/below the bound is a shared
+    // base: its segment stays anonymous and every stack's branches float above as their own lane.
+    for (&commit, &count) in &lists_per_commit {
+        if count <= 1 {
+            continue;
+        }
+        if let Some(below) = &at_or_below_bound
+            && !below.contains(&commit)
+        {
+            continue;
+        }
+        let anchor = facts.owner_of.get(&commit).copied().unwrap_or(commit);
+        if name_of
+            .get(&anchor)
+            .is_some_and(|n| lists.iter().flatten().any(|b| b == n))
+        {
+            name_of.remove(&anchor);
+            plan.demoted.insert(anchor);
+        }
+    }
+    // The workspace LOWER BOUND is where independent stacks rest: an otherwise-unrepresented
+    // stack's branch pointing there floats as its own empty lane and the boundary segment stays
+    // anonymous.
+    let floats_at_lower_bound = |list: &Vec<gix::refs::FullName>| -> bool {
+        let Some(lb) = ws_lower_bound else {
+            return false;
+        };
+        let mut at_lb = false;
+        for b in list {
+            match cg.commit_by_ref(b.as_ref()) {
+                Some(c) if c == lb => at_lb = true,
+                Some(c)
+                    if cg.node(c).is_some_and(|n| {
+                        !n.commit.flags.contains(crate::CommitFlags::Integrated)
+                    }) =>
+                {
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        at_lb
+    };
+    if let Some(lb) = ws_lower_bound
+        && facts.boundaries.contains(&lb)
+        && name_of.get(&lb).is_some_and(|n| {
+            lists
+                .iter()
+                .any(|l| l.contains(n) && floats_at_lower_bound(l))
+        })
+    {
+        name_of.remove(&lb);
+        plan.demoted.insert(lb);
+    }
+    plan
+}
+
+/// The name a boundary tip gets at MATERIALIZATION — shared with `lane_plan`'s modeling so plan
+/// and build cannot drift. The managed workspace tip is named by the workspace ref itself (a
+/// `gitbutler/*` ref that normal disambiguation skips); a forced entrypoint boundary keeps the
+/// split's precedence (checked-out ref first); every other tip is named by disambiguation. A
+/// truly detached HEAD is anonymized afterwards by `from_head`'s detach pass, never here.
+#[allow(clippy::too_many_arguments)]
+fn materialize_tip_name<T: but_core::RefMetadata>(
+    cg: &CommitGraph,
+    tip: gix::ObjectId,
+    workspace_commit: gix::ObjectId,
+    ws_is_managed_merge: bool,
+    forced_entrypoint: Option<gix::ObjectId>,
+    entrypoint_ref: Option<&gix::refs::FullName>,
+    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
+    meta: &T,
+    target_ref: Option<&gix::refs::FullName>,
+) -> Option<gix::refs::FullName> {
+    if tip == workspace_commit {
+        if ws_is_managed_merge {
+            // The real managed merge is named by EXACTLY the workspace ref. Other transient
+            // `gitbutler/*` refs can be co-located — e.g. `gitbutler/edit` mid edit-mode — and
+            // must never name (or join) the workspace. The traversal can drop the ws ref from
+            // the commit — the caller established it points here, so fall back to the
+            // well-known name.
+            cg.refs_at(tip)
+                .into_iter()
+                .find(|r| but_core::is_workspace_ref_name(r.as_ref()))
+                .or_else(|| but_core::WORKSPACE_REF_NAME.try_into().ok())
+        } else {
+            // Co-located stack tip / advanced ref (managed) or a non-managed tip: name by
+            // disambiguation; the empty workspace segment is spliced in above afterward.
+            disambiguated_ref(
+                cg,
+                tip,
+                remote_tracking,
+                meta,
+                Some(workspace_commit),
+                target_ref,
+            )
+        }
+    } else if forced_entrypoint == Some(tip) {
+        entrypoint_ref
+            .cloned()
+            .or_else(|| disambiguated_ref(cg, tip, remote_tracking, meta, None, target_ref))
+    } else {
+        disambiguated_ref(
+            cg,
+            tip,
+            remote_tracking,
+            meta,
+            Some(workspace_commit),
+            target_ref,
+        )
+    }
 }
 
 /// The first-parent commit run owned by `tip`: `tip` and each first-parent descendant-in-history until
@@ -1991,93 +2260,54 @@ fn add_empty_remote_root(
     remote_sidx
 }
 
-/// For each workspace-stack tip that another stack flows into via first-parent, anonymize the tip
-/// segment (drop its ref) and insert an empty segment carrying that ref between the workspace and the
-/// now-anonymous segment. This reproduces the dependent-branch shape (empty A → anon(shared) ← B).
+/// Apply the plan's FLOATS: each floated workspace-parent tip goes anonymous, its displaced
+/// name (if any) returns to the commit as a passive ref, and an empty placeholder segment
+/// carrying the floated name splices in between the workspace and the now-anonymous segment.
+/// This reproduces the dependent-branch shape (empty A → anon(shared) ← B). The decisions live
+/// in [`lane_plan`].
 fn anonymize_shared_stack_tips(
-    cg: &CommitGraph,
     sg: &mut SegmentGraph,
     workspace_commit: gix::ObjectId,
-    target: Option<gix::ObjectId>,
     seg_of_tip: &HashMap<gix::ObjectId, SegmentIndex>,
-    in_set: &HashSet<gix::ObjectId>,
-    stack_branches: Option<&[Vec<gix::refs::FullName>]>,
+    floats: &[Float],
 ) {
     let Some(&ws_sidx) = seg_of_tip.get(&workspace_commit) else {
         return;
     };
-    for parent in cg.parents(workspace_commit) {
-        // The target/base lane keeps its name even when other stacks depend on it — don't anonymize it.
-        if Some(parent) == target {
-            continue;
-        }
-        let Some(&p_sidx) = seg_of_tip.get(&parent) else {
+    for float in floats {
+        let Some(&p_sidx) = seg_of_tip.get(&float.tip) else {
             continue;
         };
-        let has_ref = sg.node(p_sidx).is_some_and(|s| s.ref_info.is_some());
-        // Shared iff some other IN-WORKSPACE commit's first parent is this tip (another stack
-        // depends on it). The in-set also carries the target's own local history (e.g. `main`
-        // merging the stack back) — the target flowing into a tip doesn't make it shared.
-        let shared = in_set.iter().any(|&c| {
-            c != workspace_commit
-                && cg.first_parent(c) == Some(parent)
-                && cg
-                    .node(c)
-                    .is_some_and(|n| n.commit.flags.contains(crate::CommitFlags::InWorkspace))
-        });
-        if !has_ref || !shared {
-            continue;
-        }
         if std::env::var_os("BUT_GRAPH_FLIP_DEBUG").is_some() {
-            eprintln!("FLIP anonymize_shared_stack_tips floats ref off segment of {parent}");
+            eprintln!(
+                "FLIP anonymize_shared_stack_tips floats ref off segment of {}",
+                float.tip
+            );
         }
-        // Float the ref onto a new empty placeholder segment. When build-time disambiguation
-        // picked a NON-stack ref (e.g. the remote-tracked `main` over the stack's `lane`), float
-        // the unique metadata STACK branch instead and return the displaced name to the commit as
-        // a passive ref: an applied-but-empty stack must keep its own lane, or the projection's
-        // integration-prune swallows the whole stack with the shared base it would otherwise own.
-        let mut ref_info = sg.node_mut(p_sidx).expect("present").ref_info.take();
-        let is_stack_branch = |n: &gix::refs::FullName| {
-            stack_branches
-                .into_iter()
-                .flatten()
-                .flatten()
-                .any(|b| b == n)
-        };
-        if ref_info
-            .as_ref()
-            .is_none_or(|ri| !is_stack_branch(&ri.ref_name))
+        if let Some(displaced) = &float.displaced
+            && let Some(c0) = sg.node_mut(p_sidx).and_then(|s| s.commits.first_mut())
+            && !c0.refs.iter().any(|r| r.ref_name == *displaced)
         {
-            let mut stack_refs = cg
-                .refs_at(parent)
-                .into_iter()
-                .filter(|r| is_plain_local_branch(r) && is_stack_branch(r));
-            if let Some(stack_ref) = stack_refs.next()
-                && stack_refs.next().is_none()
-                && segment_by_ref(sg, &stack_ref).is_none()
-            {
-                let displaced = ref_info.replace(RefInfo {
-                    ref_name: stack_ref,
-                    commit_id: Some(parent),
-                    worktree: None,
-                });
-                if let Some(displaced) = displaced
-                    && let Some(c0) = sg.node_mut(p_sidx).and_then(|s| s.commits.first_mut())
-                    && !c0.refs.iter().any(|r| r.ref_name == displaced.ref_name)
-                {
-                    c0.refs.push(displaced);
-                    c0.refs.sort_by(|a, b| a.ref_name.cmp(&b.ref_name));
-                }
-            }
+            c0.refs.push(RefInfo {
+                ref_name: displaced.clone(),
+                commit_id: Some(float.tip),
+                worktree: None,
+            });
+            c0.refs.sort_by(|a, b| a.ref_name.cmp(&b.ref_name));
         }
         if let Some(s) = sg.node_mut(p_sidx) {
+            s.ref_info = None;
             s.remote_tracking_ref_name = None;
             s.remote_tracking_branch_segment_id = None;
         }
         let placeholder = sg.add_node(Segment {
             id: 0,
             generation: 0,
-            ref_info,
+            ref_info: Some(RefInfo {
+                ref_name: float.name.clone(),
+                commit_id: Some(float.tip),
+                worktree: None,
+            }),
             remote_tracking_ref_name: None,
             sibling_segment_id: None,
             remote_tracking_branch_segment_id: None,
@@ -2098,7 +2328,7 @@ fn anonymize_shared_stack_tips(
         // Placeholder → the anonymized shared segment.
         sg.add_edge(
             placeholder,
-            Connection::new(p_sidx, None, None, None, Some(parent)),
+            Connection::new(p_sidx, None, None, None, Some(float.tip)),
         );
     }
 }
@@ -2263,6 +2493,7 @@ fn insert_empty_branches(
     in_set: &HashSet<gix::ObjectId>,
     workspace_commit: gix::ObjectId,
     ws_is_managed_merge: bool,
+    plan: &LanePlan,
 ) {
     let Some(lists) = stack_branches else {
         return;
@@ -2281,46 +2512,27 @@ fn insert_empty_branches(
             }
         }
     }
-    // A commit pointed at by branches of SEVERAL metadata stacks is a shared base: its segment stays
-    // anonymous and every stack's branches float above as their own lane. Build-time disambiguation
-    // may have named it after one of those branches (e.g. the remote-tracked `main`) — demote that
-    // name so it floats like its peers; its remote links are re-established on the floated segment
-    // by `reconcile_remote_siblings`.
-    // Where several stacks' branches share a commit ABOVE the lower bound, ONE stack genuinely
-    // owns it (its branch keeps the name) and the other stacks' branches splice in as empties on
-    // the same lane — e.g. a just-applied branch resting on the target's tip next to `main`. Only
-    // at/below the bound — or with no bound at all (no target) — is the commit a true shared base
-    // whose name floats while every stack forms its own lane.
+    // DEMOTIONS, decided by `lane_plan`: a shared base at/below the bound stays anonymous while
+    // every stack's branches float above as their own lane; the lower-bound anchor of an
+    // otherwise-unrepresented stack floats likewise. Remote links of a demoted name are
+    // re-established on the floated segment by `reconcile_remote_siblings`.
     let at_or_below_bound: Option<HashSet<gix::ObjectId>> =
         ws_lower_bound.map(|lb| ancestor_set(cg, lb));
-    for (&commit, &count) in &lists_per_commit {
-        if count <= 1 {
-            continue;
-        }
-        if let Some(below) = &at_or_below_bound
-            && !below.contains(&commit)
-        {
-            continue;
-        }
-        let Some(anchor) = segment_by_commit(sg, commit) else {
+    for &tip in &plan.demoted {
+        let Some(anchor) = segment_by_commit(sg, tip) else {
             continue;
         };
-        if sg
-            .node(anchor)
-            .and_then(|s| s.ref_info.as_ref())
-            .is_some_and(|ri| lists.iter().flatten().any(|b| *b == ri.ref_name))
-            && let Some(s) = sg.node_mut(anchor)
-        {
+        if std::env::var_os("BUT_GRAPH_FLIP_DEBUG").is_some() {
+            eprintln!("FLIP lane-plan demotion at {tip}");
+        }
+        if let Some(s) = sg.node_mut(anchor) {
             s.ref_info = None;
             s.remote_tracking_ref_name = None;
             s.remote_tracking_branch_segment_id = None;
         }
     }
-    // The workspace LOWER BOUND (the base all lanes and the target converge on) is where independent
-    // stacks rest: the walk floats a stack branch pointing there up as its own empty lane — preserving
-    // the metadata stack entry — and keeps the boundary segment anonymous (`workspace_upgrades` →
-    // `create_independent_segments`). Only OTHERWISE-UNREPRESENTED stacks float: a stack with another
-    // branch alive above the bound is already visible, and its bound-resting branch stays put.
+    // Otherwise-unrepresented stacks float at the lower bound (the demotion above freed the
+    // name); the same predicate steers the group threading below.
     let floats_at_lower_bound = |list: &Vec<gix::refs::FullName>| -> bool {
         let Some(lb) = ws_lower_bound else {
             return false;
@@ -2341,28 +2553,6 @@ fn insert_empty_branches(
         }
         at_lb
     };
-    if let Some(lb) = ws_lower_bound
-        && let Some(anchor) = segment_by_commit(sg, lb)
-        && sg
-            .node(anchor)
-            .is_some_and(|s| s.commits.first().is_some_and(|c| c.id == lb))
-        && sg
-            .node(anchor)
-            .and_then(|s| s.ref_info.as_ref())
-            .is_some_and(|ri| {
-                lists
-                    .iter()
-                    .any(|l| l.contains(&ri.ref_name) && floats_at_lower_bound(l))
-            })
-        && let Some(s) = sg.node_mut(anchor)
-    {
-        if std::env::var_os("BUT_GRAPH_FLIP_DEBUG").is_some() {
-            eprintln!("FLIP lower-bound demotion at {ws_lower_bound:?}");
-        }
-        s.ref_info = None;
-        s.remote_tracking_ref_name = None;
-        s.remote_tracking_branch_segment_id = None;
-    }
     for list in lists {
         // Branches whose ref does not resolve contribute nothing — and must not SPLIT a same-commit
         // group (e.g. a nonexistent branch listed between two branches on the same commit would
