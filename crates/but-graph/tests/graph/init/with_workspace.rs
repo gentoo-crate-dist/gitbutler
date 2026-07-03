@@ -7694,32 +7694,6 @@ type StackShape = (
     )>,
 );
 
-fn cg_projection_shape(
-    stacks: &[but_graph::commit_graph_projection::StackView],
-) -> Vec<StackShape> {
-    stacks
-        .iter()
-        .map(|s| {
-            (
-                s.base,
-                s.segments
-                    .iter()
-                    .map(|seg| {
-                        (
-                            seg.ref_name.as_ref().map(|r| r.as_bstr().to_string()),
-                            seg.remote_tracking_ref_name
-                                .as_ref()
-                                .map(|r| r.as_bstr().to_string()),
-                            seg.commits.clone(),
-                            seg.commits_on_remote.clone(),
-                        )
-                    })
-                    .collect(),
-            )
-        })
-        .collect()
-}
-
 /// The same shape from the segment-based `Workspace`.
 fn segment_projection_shape(ws: &but_graph::Workspace) -> Vec<StackShape> {
     ws.stacks
@@ -7743,54 +7717,6 @@ fn segment_projection_shape(ws: &but_graph::Workspace) -> Vec<StackShape> {
             )
         })
         .collect()
-}
-
-/// Each in-workspace stack's ordered branch refs, read from the workspace metadata.
-fn stack_branches_from_meta(
-    meta: &impl RefMetadata,
-) -> anyhow::Result<Vec<Vec<gix::refs::FullName>>> {
-    let ws = meta.workspace(WORKSPACE_REF_NAME.try_into()?)?;
-    Ok(ws
-        .stacks
-        .iter()
-        .filter(|s| s.is_in_workspace())
-        .map(|s| s.branches.iter().map(|b| b.ref_name.clone()).collect())
-        .collect())
-}
-
-/// The target (e.g. `origin/main`) commit that bounds the workspace base: the metadata's target ref,
-/// falling back to `origin/main`.
-fn target_commit(repo: &gix::Repository, meta: &impl RefMetadata) -> Option<gix::ObjectId> {
-    let target_ref = project_meta(meta)
-        .target_ref
-        .or_else(|| "refs/remotes/origin/main".try_into().ok())?;
-    Some(
-        repo.find_reference(&target_ref)
-            .ok()?
-            .peel_to_commit()
-            .ok()?
-            .id()
-            .detach(),
-    )
-}
-
-/// Enrichment data for the projection: local branch -> its remote-tracking branch, deduced by name
-/// (`refs/remotes/origin/<X>` for `refs/heads/<X>`) for every origin remote branch that exists. This
-/// mirrors the segment graph's name-based deduction for these fixtures (all use the `origin` remote).
-fn remote_tracking_map(
-    repo: &gix::Repository,
-) -> anyhow::Result<std::collections::HashMap<gix::refs::FullName, gix::refs::FullName>> {
-    let mut map = std::collections::HashMap::new();
-    for reference in repo.references()?.all()?.filter_map(Result::ok) {
-        let full = reference.name().as_bstr();
-        if let Some(short) = full.strip_prefix(b"refs/remotes/origin/") {
-            let local = format!("refs/heads/{}", String::from_utf8_lossy(short));
-            if let Ok(local_ref) = gix::refs::FullName::try_from(local) {
-                map.insert(local_ref, reference.name().to_owned());
-            }
-        }
-    }
-    Ok(map)
 }
 
 /// A canonical, `SegmentIndex`-free structural fingerprint of a segment `Graph`: one sorted line per
@@ -8271,77 +8197,4 @@ fn graph_structure_is_stable_and_discriminating() -> anyhow::Result<()> {
         "structurally different workspaces fingerprint differently"
     );
     Ok(())
-}
-
-/// Bridge-only parity (the entrypoint can't be replicated by `from_repository`, which pins it to the
-/// workspace commit): project the `from_segment_graph` CommitGraph and compare to the segment-based
-/// stacks.
-fn assert_bridge_projection_parity(
-    repo: &gix::Repository,
-    graph: but_graph::Graph,
-    stack_branches: &[Vec<gix::refs::FullName>],
-    target: Option<gix::ObjectId>,
-) -> anyhow::Result<()> {
-    let ws_ref: gix::refs::FullName = WORKSPACE_REF_NAME.try_into()?;
-    let ws_commit = repo
-        .find_reference(&ws_ref)?
-        .peel_to_commit()?
-        .id()
-        .detach();
-    let remote_tracking = remote_tracking_map(repo)?;
-    let bridge = but_graph::commit_graph_projection::project(
-        &but_graph::CommitGraph::from_segment_graph(&graph),
-        ws_commit,
-        Some(stack_branches),
-        target,
-        &remote_tracking,
-    );
-    let ws = graph.into_workspace()?;
-    assert_eq!(
-        cg_projection_shape(&bridge),
-        segment_projection_shape(&ws),
-        "commit-graph projection (bridge) with an entrypoint should reproduce the segment-based stacks"
-    );
-    Ok(())
-}
-
-#[test]
-fn cg_proj_parity_entrypoint_splits_segment() -> anyhow::Result<()> {
-    // Checking out B-empty (2a31450) inside the single ambiguous B segment forces a boundary there: B
-    // keeps its upper commits, and the entrypoint starts a new anonymous segment (B-empty/ambiguous-01
-    // are ambiguous), matching the segment graph's 👉 split.
-    let (repo, mut meta) = read_only_in_memory_scenario("ws/single-stack-ambiguous")?;
-    add_workspace(&mut meta);
-    let (ep_id, _ref) = id_at(&repo, "B-empty");
-    let graph = Graph::from_commit_traversal(
-        ep_id,
-        None,
-        &*meta,
-        project_meta(&*meta),
-        standard_options(),
-    )?
-    .validated()?;
-    let stack_branches = stack_branches_from_meta(&*meta)?;
-    let target = target_commit(&repo, &*meta);
-    assert_bridge_projection_parity(&repo, graph, &stack_branches, target)
-}
-
-#[test]
-fn cg_proj_parity_entrypoint_named_segment() -> anyhow::Result<()> {
-    // Same checkout, but with the B-empty ref passed: the entrypoint segment is NAMED B-empty even
-    // though the commit is ambiguous, overriding disambiguation.
-    let (repo, mut meta) = read_only_in_memory_scenario("ws/single-stack-ambiguous")?;
-    add_workspace(&mut meta);
-    let (ep_id, ep_ref) = id_at(&repo, "B-empty");
-    let graph = Graph::from_commit_traversal(
-        ep_id,
-        ep_ref,
-        &*meta,
-        project_meta(&*meta),
-        standard_options(),
-    )?
-    .validated()?;
-    let stack_branches = stack_branches_from_meta(&*meta)?;
-    let target = target_commit(&repo, &*meta);
-    assert_bridge_projection_parity(&repo, graph, &stack_branches, target)
 }

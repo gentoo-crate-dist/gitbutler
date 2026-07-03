@@ -26,7 +26,7 @@ fn local_branches_by_id(
 /// references on that object.
 /// Note that `ref_name` should only be set if you are sure that it is unambiguous, and otherwise won't interfere with
 /// the post-processing or the workspace projection later.
-pub fn branch_segment_from_name_and_meta<T: RefMetadata>(
+pub(crate) fn branch_segment_from_name_and_meta<T: RefMetadata>(
     ref_name: Option<(gix::refs::FullName, Option<SegmentMetadata>)>,
     meta: &OverlayMetadata<'_, T>,
     refs_by_id_lookup: Option<(&RefsById, gix::ObjectId)>,
@@ -43,7 +43,7 @@ pub fn branch_segment_from_name_and_meta<T: RefMetadata>(
 
 /// Like `branch_segment_from_name_and_meta`, but allows to set `sibling_sidx` as well to link
 /// a new remote tracking segment to a local tracking segment.
-pub fn branch_segment_from_name_and_meta_sibling<T: RefMetadata>(
+pub(crate) fn branch_segment_from_name_and_meta_sibling<T: RefMetadata>(
     ref_name: Option<(gix::refs::FullName, Option<SegmentMetadata>)>,
     sibling_sidx: Option<SegmentIndex>,
     meta: &OverlayMetadata<'_, T>,
@@ -94,7 +94,7 @@ pub(crate) fn disambiguate_refs_by_branch_metadata_with_lookup<T: RefMetadata>(
     disambiguate_refs_by_branch_metadata(branches, meta)
 }
 
-pub fn disambiguate_refs_by_branch_metadata<'a, T: RefMetadata>(
+pub(crate) fn disambiguate_refs_by_branch_metadata<'a, T: RefMetadata>(
     branches: impl Iterator<Item = &'a gix::refs::FullName>,
     meta: &OverlayMetadata<'_, T>,
 ) -> Option<(gix::refs::FullName, Option<SegmentMetadata>)> {
@@ -292,7 +292,7 @@ pub fn find(
 /// That way we can discover the workspace containing any starting point, but only if needed.
 /// This means we process all workspaces if we aren't currently and clearly looking at a workspace.
 /// Also prune all non-standard workspaces early, or those that don't have a tip.
-pub fn obtain_workspace_infos<T: RefMetadata>(
+pub(crate) fn obtain_workspace_infos<T: RefMetadata>(
     repo: &OverlayRepo<'_>,
     maybe_ref_name: Option<&gix::refs::FullNameRef>,
     meta: &OverlayMetadata<'_, T>,
@@ -331,7 +331,7 @@ pub fn obtain_workspace_infos<T: RefMetadata>(
     Ok(out)
 }
 
-pub fn try_refname_to_id(
+pub(crate) fn try_refname_to_id(
     repo: &OverlayRepo<'_>,
     refname: &gix::refs::FullNameRef,
 ) -> anyhow::Result<Option<gix::ObjectId>> {

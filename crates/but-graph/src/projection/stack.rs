@@ -47,11 +47,6 @@ impl Stack {
     pub fn base(&self) -> Option<gix::ObjectId> {
         self.segments.last().and_then(|s| s.base)
     }
-
-    /// The [base_segment_id](StackSegment::base_segment_id) of the last of our segments.
-    pub fn base_segment_id(&self) -> Option<SegmentIndex> {
-        self.segments.last().and_then(|s| s.base_segment_id)
-    }
 }
 
 impl Stack {
@@ -255,20 +250,6 @@ impl StackSegment {
     /// Return the name of the stack segment, if present.
     pub fn ref_name(&self) -> Option<&gix::refs::FullNameRef> {
         self.ref_info.as_ref().map(|ri| ri.ref_name.as_ref())
-    }
-
-    /// Returns an iterator over all reachable reference names, that is the name of the segment if present
-    /// and all ref-names pointing to/stored in local commits.
-    pub fn ref_names(&self) -> impl Iterator<Item = &gix::refs::FullNameRef> {
-        self.ref_info
-            .as_ref()
-            .map(|ri| ri.ref_name.as_ref())
-            .into_iter()
-            .chain(
-                self.commits
-                    .iter()
-                    .flat_map(|c| c.refs.iter().map(|ri| ri.ref_name.as_ref())),
-            )
     }
 
     /// Return `true` if this segment *would* be anonymous if it wasn't for the out-of-workspace segment to be projected onto this one.
@@ -501,7 +482,7 @@ impl StackCommit {
     }
 
     /// Collect additional information on `commit` using `repo`.
-    pub fn from_graph_commit(commit: &crate::Commit) -> Self {
+    pub(crate) fn from_graph_commit(commit: &crate::Commit) -> Self {
         StackCommit {
             id: commit.id,
             parent_ids: commit.parent_ids.clone(),

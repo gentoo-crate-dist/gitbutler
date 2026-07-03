@@ -40,7 +40,7 @@ pub fn graph_from_repository<T: but_core::RefMetadata>(
 
 /// Like [`graph_from_repository`], but serving `overlay` refs and metadata from memory — the flip
 /// counterpart of [`Graph::redo_traversal_with_overlay`](crate::Graph::redo_traversal_with_overlay).
-pub fn graph_from_repository_with_overlay<T: but_core::RefMetadata>(
+pub(crate) fn graph_from_repository_with_overlay<T: but_core::RefMetadata>(
     repo: &gix::Repository,
     meta: &T,
     entrypoint: Option<gix::ObjectId>,
@@ -74,7 +74,7 @@ pub fn graph_from_repository_with_overlay<T: but_core::RefMetadata>(
     } else {
         entrypoint_ref.clone()
     };
-    let mut cg = CommitGraph::from_walk(
+    let cg = CommitGraph::from_walk(
         repo,
         meta,
         walk_tip,
@@ -85,7 +85,7 @@ pub fn graph_from_repository_with_overlay<T: but_core::RefMetadata>(
     )?;
     let ep = entrypoint.unwrap_or(ws_commit);
     let graph = assemble_managed(
-        &mut cg,
+        cg,
         repo,
         &overlay_repo,
         &overlay_meta,
@@ -109,7 +109,7 @@ pub fn graph_from_repository_with_overlay<T: but_core::RefMetadata>(
 /// Build a segment [`Graph`](crate::Graph) for a NON-managed checkout — a plain branch or detached
 /// HEAD, with no `gitbutler/workspace` merge. `head_tip` is the checked-out commit (the graph's tip).
 /// A detached HEAD is anonymized by `from_head`'s detach pass, not here.
-pub fn graph_from_repository_unmanaged<T: but_core::RefMetadata>(
+pub(crate) fn graph_from_repository_unmanaged<T: but_core::RefMetadata>(
     repo: &gix::Repository,
     meta: &T,
     head_tip: gix::ObjectId,
@@ -130,7 +130,7 @@ pub fn graph_from_repository_unmanaged<T: but_core::RefMetadata>(
 
 /// Like [`graph_from_repository_unmanaged`], but serving `overlay` refs and metadata from memory.
 #[allow(clippy::too_many_arguments)]
-pub fn graph_from_repository_unmanaged_with_overlay<T: but_core::RefMetadata>(
+pub(crate) fn graph_from_repository_unmanaged_with_overlay<T: but_core::RefMetadata>(
     repo: &gix::Repository,
     meta: &T,
     head_tip: gix::ObjectId,
@@ -158,7 +158,7 @@ pub fn graph_from_repository_unmanaged_with_overlay<T: but_core::RefMetadata>(
     )?;
     let (overlay_repo, overlay_meta, _overlay_entrypoint) = overlay.into_parts(repo, meta);
     assemble_unmanaged(
-        &cg,
+        cg,
         repo,
         &overlay_repo,
         &overlay_meta,
@@ -173,7 +173,7 @@ pub fn graph_from_repository_unmanaged_with_overlay<T: but_core::RefMetadata>(
 /// [`Graph::from_commit_traversal_tips`](crate::Graph::from_commit_traversal_tips). The tips'
 /// normalized traversal roles are carried onto the returned graph (`traversal_tips`), which the
 /// projection reads for tips-built graphs.
-pub fn graph_from_repository_tips<T: but_core::RefMetadata>(
+pub(crate) fn graph_from_repository_tips<T: but_core::RefMetadata>(
     repo: &gix::Repository,
     meta: &T,
     tips: Vec<crate::init::Tip>,
@@ -181,7 +181,7 @@ pub fn graph_from_repository_tips<T: but_core::RefMetadata>(
     options: crate::init::Options,
 ) -> anyhow::Result<crate::Graph> {
     let overlay = crate::init::Overlay::default();
-    let mut cg = CommitGraph::from_walk_tips(
+    let cg = CommitGraph::from_walk_tips(
         repo,
         meta,
         tips,
@@ -212,7 +212,7 @@ pub fn graph_from_repository_tips<T: but_core::RefMetadata>(
             .clone()
             .filter(|r| !but_core::is_workspace_ref_name(r.as_ref()));
         assemble_managed(
-            &mut cg,
+            cg,
             repo,
             &overlay_repo,
             &overlay_meta,
@@ -226,7 +226,7 @@ pub fn graph_from_repository_tips<T: but_core::RefMetadata>(
         )?
     } else {
         assemble_unmanaged(
-            &cg,
+            cg,
             repo,
             &overlay_repo,
             &overlay_meta,
@@ -287,8 +287,7 @@ fn enrichment_inputs(
                 .detach(),
         )
     });
-    let (remote_tracking, symbolic_remotes) =
-        crate::commit_graph_projection::remote_tracking_from_repository(repo, project_meta)?;
+    let (remote_tracking, symbolic_remotes) = remote_tracking_from_repository(repo, project_meta)?;
     let worktree_by_branch = overlay_repo.worktree_branches(main_head_ref.map(|r| r.as_ref()))?;
     Ok(EnrichmentInputs {
         target,
@@ -325,7 +324,7 @@ fn in_workspace_stack_branches(
 /// future state, not the on-disk one.
 #[allow(clippy::too_many_arguments)]
 fn assemble_managed<T: but_core::RefMetadata>(
-    cg: &mut CommitGraph,
+    mut cg: CommitGraph,
     repo: &gix::Repository,
     overlay_repo: &OverlayRepo<'_>,
     overlay_meta: &OverlayMetadata<'_, T>,
@@ -341,8 +340,8 @@ fn assemble_managed<T: but_core::RefMetadata>(
     let ws_meta = overlay_meta.workspace(ws_ref.as_ref())?;
     let stack_branches = in_workspace_stack_branches(&ws_meta);
     let inputs = enrichment_inputs(repo, overlay_repo, &project_meta, main_head_ref)?;
-    Ok(graph_from_commit_graph(
-        cg,
+    let mut graph = graph_from_commit_graph(
+        &cg,
         ws_commit,
         entrypoint,
         entrypoint_ref,
@@ -355,7 +354,9 @@ fn assemble_managed<T: but_core::RefMetadata>(
         overlay_meta,
         project_meta,
         options,
-    ))
+    );
+    graph.commit_graph = Some(cg);
+    Ok(graph)
 }
 
 /// Assemble the NON-managed graph from `cg`: no stack or workspace-ref passes, plus the
@@ -363,7 +364,7 @@ fn assemble_managed<T: but_core::RefMetadata>(
 /// generations after the rebuilt chain.
 #[allow(clippy::too_many_arguments)]
 fn assemble_unmanaged<T: but_core::RefMetadata>(
-    cg: &CommitGraph,
+    cg: CommitGraph,
     repo: &gix::Repository,
     overlay_repo: &OverlayRepo<'_>,
     overlay_meta: &OverlayMetadata<'_, T>,
@@ -374,7 +375,7 @@ fn assemble_unmanaged<T: but_core::RefMetadata>(
 ) -> anyhow::Result<crate::Graph> {
     let inputs = enrichment_inputs(repo, overlay_repo, &project_meta, entrypoint_ref.as_ref())?;
     let mut graph = graph_from_commit_graph(
-        cg,
+        &cg,
         head_tip,
         head_tip,
         entrypoint_ref,
@@ -390,6 +391,7 @@ fn assemble_unmanaged<T: but_core::RefMetadata>(
     );
     graph.ad_hoc_branch_stack_upgrades(overlay_repo, overlay_meta, &inputs.worktree_by_branch)?;
     graph.compute_generation_numbers();
+    graph.commit_graph = Some(cg);
     Ok(graph)
 }
 
@@ -638,7 +640,7 @@ fn facts<T: but_core::RefMetadata>(
 /// Inputs mirror the projection's enrichment: the workspace commit, the target that bounds/integrates,
 /// and the local→remote tracking map. `project_meta`/`options` are carried onto the `Graph`.
 #[allow(clippy::too_many_arguments)]
-pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
+pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
     cg: &CommitGraph,
     workspace_commit: gix::ObjectId,
     entrypoint: gix::ObjectId,
@@ -3193,4 +3195,97 @@ fn segment_metadata<T: but_core::RefMetadata>(
         return Some(crate::SegmentMetadata::Workspace((*ws).clone()));
     }
     None
+}
+
+/// Local branch -> its remote-tracking branch, mirroring the walk's
+/// `lookup_remote_tracking_branch_or_deduce_it`, plus the SYMBOLIC remote names in play:
+/// 1. A branch CONFIGURED in git (`branch.<name>.remote`/`merge`) tracks that remote branch.
+/// 2. Otherwise the relationship is deduced by name (`refs/remotes/<remote>/<X>` for `refs/heads/<X>`),
+///    but ONLY against remotes the workspace configuration implies — the `push_remote` (highest
+///    priority: "the push-remote overrides the remote we use for listing, even if a fetch remote is
+///    available"), then the remote of the configured `target_ref`. A workspace with neither deduces
+///    NO name-based relationships at all.
+///
+/// The returned symbolic names also gate which remotes' AHEAD regions the graph traverses — a
+/// config-only tracking link keeps its name, but its remote's own commits stay out of the graph,
+/// matching what the walk's traversal reaches.
+pub(crate) fn remote_tracking_from_repository(
+    repo: &gix::Repository,
+    project_meta: &but_core::ref_metadata::ProjectMeta,
+) -> anyhow::Result<(
+    HashMap<gix::refs::FullName, gix::refs::FullName>,
+    Vec<String>,
+)> {
+    let mut remotes: Vec<String> = Vec::new();
+    if let Some(push_remote) = project_meta.push_remote.as_deref() {
+        remotes.push(push_remote.to_string());
+    }
+    if let Some(target_ref) = project_meta.target_ref.as_ref()
+        && let Some((remote, _short)) =
+            but_core::extract_remote_name_and_short_name(target_ref.as_ref(), &repo.remote_names())
+        && !remotes.contains(&remote)
+    {
+        remotes.push(remote);
+    }
+
+    let remote_refs: Vec<gix::refs::FullName> = repo
+        .references()?
+        .all()?
+        .filter_map(Result::ok)
+        .filter(|r| r.name().as_bstr().starts_with(b"refs/remotes/"))
+        .map(|r| r.name().to_owned())
+        .collect();
+    let mut map = HashMap::new();
+    // Name-deduction against the symbolic remotes.
+    for remote in &remotes {
+        let prefix = format!("refs/remotes/{remote}/");
+        for name in &remote_refs {
+            if let Some(short) = name.as_bstr().strip_prefix(prefix.as_bytes()) {
+                let local = format!("refs/heads/{}", String::from_utf8_lossy(short));
+                if let Ok(local_ref) = gix::refs::FullName::try_from(local) {
+                    // The first (highest-priority) remote to claim a local branch wins.
+                    map.entry(local_ref).or_insert_with(|| name.clone());
+                }
+            }
+        }
+    }
+    // Git-configured tracking branches win over name-deduction.
+    for reference in repo.references()?.local_branches()?.filter_map(Result::ok) {
+        let local = reference.name().to_owned();
+        // The configured NAME counts even when the remote ref does not exist (yet) — the link is
+        // name-only then, and passes that need the remote's commits skip unresolvable refs anyway.
+        if let Some(Ok(rt)) =
+            repo.branch_remote_tracking_ref_name(local.as_ref(), gix::remote::Direction::Fetch)
+        {
+            let rt = rt.into_owned();
+            // The walk also traverses the remotes of git-configured tracking branches — their remote
+            // names join the eligibility set.
+            let rest = &rt.as_bstr()[b"refs/remotes/".len()..];
+            if let Some(slash) = rest.iter().position(|&b| b == b'/') {
+                let remote = String::from_utf8_lossy(&rest[..slash]).into_owned();
+                if !remotes.contains(&remote) {
+                    remotes.push(remote);
+                }
+            }
+            map.insert(local, rt);
+        }
+    }
+    // A remote tracks ONE local: a git-CONFIGURED binding evicts a name-deduced pair for the same
+    // remote (e.g. `base-of-A` configured to track `origin/A` after `A` was rebased away from it —
+    // `A` no longer tracks anything).
+    let mut config_bound: HashMap<gix::refs::FullName, gix::refs::FullName> = HashMap::new();
+    for reference in repo.references()?.local_branches()?.filter_map(Result::ok) {
+        let local = reference.name().to_owned();
+        if let Some(Ok(rt)) =
+            repo.branch_remote_tracking_ref_name(local.as_ref(), gix::remote::Direction::Fetch)
+        {
+            config_bound.insert(rt.into_owned(), local);
+        }
+    }
+    map.retain(|local, rt| {
+        config_bound
+            .get(rt)
+            .is_none_or(|config_local| config_local == local)
+    });
+    Ok((map, remotes))
 }

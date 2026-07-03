@@ -96,7 +96,7 @@ impl Workspace {
     ///
     /// This follows target ref, then stored target commit, then the first
     /// integrated traversal tip in that order.
-    pub fn effective_target_segment_index(&self) -> Option<SegmentIndex> {
+    pub(crate) fn effective_target_segment_index(&self) -> Option<SegmentIndex> {
         self.target_ref
             .as_ref()
             .map(|target| target.segment_index)

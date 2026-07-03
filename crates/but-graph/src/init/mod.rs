@@ -155,7 +155,7 @@ impl Tip {
     }
 
     /// Set whether this tip is the traversal entrypoint.
-    pub fn with_is_entrypoint(mut self, is_entrypoint: bool) -> Self {
+    pub(crate) fn with_is_entrypoint(mut self, is_entrypoint: bool) -> Self {
         self.is_entrypoint = is_entrypoint;
         self
     }
@@ -173,7 +173,7 @@ impl Tip {
     }
 
     /// Mark this entrypoint as detached for segment presentation.
-    pub fn with_detached_entrypoint(mut self) -> Self {
+    pub(crate) fn with_detached_entrypoint(mut self) -> Self {
         self = self.with_is_entrypoint(true).with_is_detached(true);
         self
     }

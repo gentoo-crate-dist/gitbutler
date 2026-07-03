@@ -119,23 +119,6 @@ impl Graph {
         }
         Ok(self)
     }
-    /// Produce a string that concisely represents `commit`, adding `extra` information as needed.
-    pub fn commit_debug_string(
-        commit: &crate::Commit,
-        is_entrypoint: bool,
-        stop_condition: Option<StopCondition>,
-        hard_limit: bool,
-        max_goals: Option<usize>,
-    ) -> String {
-        Self::commit_debug_string_inner(
-            commit,
-            is_entrypoint,
-            stop_condition,
-            hard_limit,
-            max_goals,
-            false,
-        )
-    }
 
     /// Like [`Self::commit_debug_string()`], but includes graph-contextual worktree ownership markers.
     pub fn commit_debug_string_with_graph_context(
@@ -204,7 +187,7 @@ impl Graph {
     }
 
     /// Shorten the given `name` so it's still clear if it is a special ref (like tag) or not.
-    pub fn ref_debug_string(
+    pub(crate) fn ref_debug_string(
         ref_name: &gix::refs::FullNameRef,
         worktree: Option<&crate::Worktree>,
     ) -> String {
@@ -246,7 +229,7 @@ impl Graph {
 
     /// Return a useful one-line string showing the relationship between `ref_name`, `remote_ref_name` and how
     /// they are linked with `sibling_id` and `remote_tracking_branch_id`.
-    pub fn ref_and_remote_debug_string(
+    pub(crate) fn ref_and_remote_debug_string(
         ref_info: Option<&crate::RefInfo>,
         remote_ref_name: Option<&gix::refs::FullName>,
         sibling_id: Option<SegmentIndex>,
