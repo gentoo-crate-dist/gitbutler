@@ -8198,3 +8198,141 @@ fn graph_structure_is_stable_and_discriminating() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+mod applied_main {
+    //! The applied-main corner specs (see graph-unify-plan.md "MAIN AS AN ORDINARY BRANCH"):
+    //! what the projection currently says when metadata declares the target's LOCAL tracking
+    //! branch as a workspace stack. These renders are the baseline for lifting the
+    //! target-local apply-blocker — behavior changes must show up here first.
+    use super::*;
+
+    /// (a) main rests at the workspace base and is not a workspace-commit parent:
+    /// membership comes from metadata alone, via the empty-lane machinery.
+    #[test]
+    fn at_base() -> anyhow::Result<()> {
+        let (repo, mut meta) = read_only_in_memory_scenario("ws/applied-main-at-base")?;
+        insta::assert_snapshot!(visualize_commit_graph_all(&repo)?, @r"
+        *   5edc691 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+        |\  
+        | * f57c528 (B) B1
+        * | 49d4b34 (A) A1
+        |/  
+        * 3183e43 (origin/main, main) M1
+        ");
+
+        add_stack_with_segments(&mut meta, 0, "A", StackState::InWorkspace, &[]);
+        add_stack_with_segments(&mut meta, 1, "B", StackState::InWorkspace, &[]);
+        add_stack_with_segments(&mut meta, 2, "main", StackState::InWorkspace, &[]);
+
+        let graph = Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?
+            .validated()?;
+        let ws = &graph.into_workspace()?;
+        insta::assert_snapshot!(graph_workspace(ws), @"
+        📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        ├── ≡📙:1:A on 3183e43 {0}
+        │   └── 📙:1:A
+        │       └── ·49d4b34 (🏘️)
+        ├── ≡📙:2:B on 3183e43 {1}
+        │   └── 📙:2:B
+        │       └── ·f57c528 (🏘️)
+        └── ≡📙:4:main <> origin/main →:5: on 3183e43 {2}
+            └── 📙:4:main <> origin/main →:5:
+        ");
+        Ok(())
+    }
+
+    /// (b) main has its own commit ahead of origin/main and is the workspace commit's first
+    /// parent — a lane with commits, ahead of its remote like any branch.
+    #[test]
+    fn ahead_of_remote() -> anyhow::Result<()> {
+        let (repo, mut meta) = read_only_in_memory_scenario("ws/applied-main-ahead")?;
+        insta::assert_snapshot!(visualize_commit_graph_all(&repo)?, @r"
+        *   e8484be (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+        |\  
+        | * 49d4b34 (A) A1
+        * | bce0c5e (main) M2
+        |/  
+        * 3183e43 (origin/main) M1
+        ");
+
+        add_stack_with_segments(&mut meta, 0, "main", StackState::InWorkspace, &[]);
+        add_stack_with_segments(&mut meta, 1, "A", StackState::InWorkspace, &[]);
+
+        let graph = Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?
+            .validated()?;
+        let ws = &graph.into_workspace()?;
+        insta::assert_snapshot!(graph_workspace(ws), @"
+        📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        ├── ≡📙:2:main <> origin/main →:3:⇡1 on 3183e43 {0}
+        │   └── 📙:2:main <> origin/main →:3:⇡1
+        │       └── ·bce0c5e (🏘️)
+        └── ≡📙:1:A on 3183e43 {1}
+            └── 📙:1:A
+                └── ·49d4b34 (🏘️)
+        ");
+        Ok(())
+    }
+
+    /// (c) main is a workspace-commit parent at the base while origin/main moved ahead:
+    /// the applied lane is behind its remote.
+    #[test]
+    fn behind_remote() -> anyhow::Result<()> {
+        let (repo, mut meta) = read_only_in_memory_scenario("ws/applied-main-behind")?;
+        insta::assert_snapshot!(visualize_commit_graph_all(&repo)?, @r"
+        *   1943cdc (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+        |\  
+        | * 49d4b34 (A) A1
+        |/  
+        | * 73c46a6 (origin/main) RM1
+        |/  
+        * 3183e43 (main) M1
+        ");
+
+        add_stack_with_segments(&mut meta, 0, "main", StackState::InWorkspace, &[]);
+        add_stack_with_segments(&mut meta, 1, "A", StackState::InWorkspace, &[]);
+
+        let graph = Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?
+            .validated()?;
+        let ws = &graph.into_workspace()?;
+        insta::assert_snapshot!(graph_workspace(ws), @"
+        📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on 3183e43
+        ├── ≡📙:3:main <> origin/main →:4:⇣1 on 3183e43 {0}
+        │   └── 📙:3:main <> origin/main →:4:⇣1
+        │       └── 🟣73c46a6 (✓)
+        └── ≡📙:1:A on 3183e43 {1}
+            └── 📙:1:A
+                └── ·49d4b34 (🏘️)
+        ");
+        Ok(())
+    }
+
+    /// (d) main (and its remote) advanced above A's fork point: the stale-fork corner.
+    #[test]
+    fn above_stack_fork_point() -> anyhow::Result<()> {
+        let (repo, mut meta) = read_only_in_memory_scenario("ws/applied-main-above-fork")?;
+        insta::assert_snapshot!(visualize_commit_graph_all(&repo)?, @r"
+        *   e8484be (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+        |\  
+        | * 49d4b34 (A) A1
+        * | bce0c5e (origin/main, main) M2
+        |/  
+        * 3183e43 M1
+        ");
+
+        add_stack_with_segments(&mut meta, 0, "main", StackState::InWorkspace, &[]);
+        add_stack_with_segments(&mut meta, 1, "A", StackState::InWorkspace, &[]);
+
+        let graph = Graph::from_head(&repo, &*meta, project_meta(&*meta), standard_options())?
+            .validated()?;
+        let ws = &graph.into_workspace()?;
+        insta::assert_snapshot!(graph_workspace(ws), @"
+        📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
+        ├── ≡📙:2:main <> origin/main →:4: on 3183e43 {0}
+        │   └── 📙:2:main <> origin/main →:4:
+        └── ≡📙:1:A on 3183e43 {1}
+            └── 📙:1:A
+                └── ·49d4b34 (🏘️)
+        ");
+        Ok(())
+    }
+}
