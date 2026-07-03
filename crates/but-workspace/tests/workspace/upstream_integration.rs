@@ -2098,9 +2098,9 @@ fn empty_branch_above_integrated_branch_is_preserved() -> Result<()> {
     let mut workspace = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&workspace), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on 563a7fc
-    └── ≡📙:7:top <> origin/top →:6: on 563a7fc {1}
-        ├── 📙:7:top <> origin/top →:6:
-        └── 📙:2:bottom <> origin/bottom →:5:
+    └── ≡📙:4:top <> origin/top →:7: on 563a7fc {1}
+        ├── 📙:4:top <> origin/top →:7:
+        └── 📙:2:bottom <> origin/bottom →:6:
             └── ❄️141de4f (🏘️|✓)
     ");
 

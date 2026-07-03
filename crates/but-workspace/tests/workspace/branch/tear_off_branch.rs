@@ -369,8 +369,8 @@ fn tear_off_empty_branch() -> anyhow::Result<()> {
     let mut ws = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&ws), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 85efbe4
-    └── ≡📙:4:B on 85efbe4 {1}
-        ├── 📙:4:B
+    └── ≡📙:3:B on 85efbe4 {1}
+        ├── 📙:3:B
         └── 📙:1:A
             └── ·09d8e52 (🏘️)
     ");
@@ -403,8 +403,8 @@ fn tear_off_empty_branch() -> anyhow::Result<()> {
     ├── ≡📙:1:A on 85efbe4 {1}
     │   └── 📙:1:A
     │       └── ·09d8e52 (🏘️)
-    └── ≡📙:4:B on 85efbe4 {3}
-        └── 📙:4:B
+    └── ≡📙:3:B on 85efbe4 {3}
+        └── 📙:3:B
     ");
 
     Ok(())
@@ -428,8 +428,8 @@ fn tear_off_non_empty_branch() -> anyhow::Result<()> {
     let mut ws = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&ws), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 85efbe4
-    └── ≡📙:4:B on 85efbe4 {1}
-        ├── 📙:4:B
+    └── ≡📙:3:B on 85efbe4 {1}
+        ├── 📙:3:B
         └── 📙:1:A
             └── ·09d8e52 (🏘️)
     ");
@@ -459,8 +459,8 @@ fn tear_off_non_empty_branch() -> anyhow::Result<()> {
 
     insta::assert_snapshot!(graph_workspace(&ws), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 85efbe4
-    ├── ≡📙:4:B on 85efbe4 {1}
-    │   └── 📙:4:B
+    ├── ≡📙:3:B on 85efbe4 {1}
+    │   └── 📙:3:B
     └── ≡📙:1:A on 85efbe4 {3}
         └── 📙:1:A
             └── ·09d8e52 (🏘️)
