@@ -1726,7 +1726,7 @@ fn lane_plan<T: but_core::RefMetadata>(
         }
     }
     let at_or_below_bound: Option<HashSet<gix::ObjectId>> =
-        ws_lower_bound.map(|lb| ancestor_set(cg, lb));
+        ws_lower_bound.map(|lb| cg.ancestor_set(lb));
     // A commit pointed at by branches of SEVERAL metadata stacks at/below the bound is a shared
     // base: its segment stays anonymous and every stack's branches float above as their own lane.
     for (&commit, &count) in &lists_per_commit {
@@ -2711,7 +2711,7 @@ fn insert_empty_branches(
     // otherwise-unrepresented stack floats likewise. Remote links of a demoted name are
     // established on the floated segment by the remote creators.
     let at_or_below_bound: Option<HashSet<gix::ObjectId>> =
-        ws_lower_bound.map(|lb| ancestor_set(cg, lb));
+        ws_lower_bound.map(|lb| cg.ancestor_set(lb));
     for &tip in &plan.demoted {
         let Some(anchor) = segment_by_commit(sg, tip) else {
             continue;
@@ -2864,16 +2864,6 @@ fn segment_by_commit(sg: &SegmentGraph, commit: gix::ObjectId) -> Option<Segment
 }
 
 /// All ancestors of `tip` (inclusive), over all parents.
-fn ancestor_set(cg: &CommitGraph, tip: gix::ObjectId) -> HashSet<gix::ObjectId> {
-    let mut set = HashSet::new();
-    let mut queue = std::collections::VecDeque::from([tip]);
-    while let Some(c) = queue.pop_front() {
-        if set.insert(c) {
-            queue.extend(cg.all_parent_ids(c));
-        }
-    }
-    set
-}
 
 /// The workspace's LOWER BOUND: the nearest commit common to the target and EVERY workspace lane
 /// (the walk's `compute_lowest_base` — the base all stacks and the target converge on). BFS from the
@@ -2883,9 +2873,9 @@ fn workspace_lower_bound(
     workspace_commit: gix::ObjectId,
     target: gix::ObjectId,
 ) -> Option<gix::ObjectId> {
-    let mut common = ancestor_set(cg, target);
+    let mut common = cg.ancestor_set(target);
     for parent in cg.all_parent_ids(workspace_commit) {
-        let lane = ancestor_set(cg, parent);
+        let lane = cg.ancestor_set(parent);
         common.retain(|c| lane.contains(c));
     }
     let mut seen = HashSet::new();
@@ -2923,7 +2913,7 @@ fn effective_lower_bound(
     .into_iter()
     .flatten()
     {
-        if candidate != lb && ancestor_set(cg, lb).contains(&candidate) {
+        if candidate != lb && cg.ancestor_set(lb).contains(&candidate) {
             lb = candidate;
         }
     }

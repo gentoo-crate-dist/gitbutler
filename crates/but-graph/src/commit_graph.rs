@@ -281,6 +281,32 @@ impl CommitGraph {
             .unwrap_or_default()
     }
 
+    /// All ancestors of `tip` (inclusive), following CONNECTED parent edges — history the
+    /// traversal severed is not rejoined. Bounded by the graph, which is the traversal-limited
+    /// window, not the repository.
+    pub fn ancestor_set(&self, tip: gix::ObjectId) -> HashSet<gix::ObjectId> {
+        let mut set = HashSet::new();
+        let mut queue = std::collections::VecDeque::from([tip]);
+        while let Some(c) = queue.pop_front() {
+            if set.insert(c) {
+                queue.extend(self.all_parent_ids(c));
+            }
+        }
+        set
+    }
+
+    /// Return `true` if any of `id`'s recorded parents is not CONNECTED in this graph — the
+    /// traversal cut history here (limits, integrated stop-early), so ancestry continues
+    /// beyond what the graph can see.
+    pub fn has_cut_parents(&self, id: gix::ObjectId) -> bool {
+        self.node(id).is_some_and(|n| {
+            n.commit
+                .parent_ids
+                .iter()
+                .any(|p| !self.is_connected(id, *p))
+        })
+    }
+
     /// The commit that `ref_name` points at, if present in the graph.
     pub fn commit_by_ref(&self, ref_name: &gix::refs::FullNameRef) -> Option<gix::ObjectId> {
         self.nodes
