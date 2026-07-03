@@ -719,10 +719,13 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
     for &tip in &tips {
         let mut commits = commit_run(cg, tip, &in_set, &is_boundary);
         let suppressed = floated.contains_key(&tip) || plan.demoted.contains(&tip);
-        let ref_name = if suppressed {
+        let named = if suppressed {
             None
         } else {
-            plan.base_name_of.get(&tip).cloned()
+            plan.base_name_of
+                .get(&tip)
+                .map(|n| (n.clone(), tip))
+                .or_else(|| plan.renames.get(&tip).cloned())
         };
         if let Some(displaced) = floated.get(&tip).and_then(|fl| fl.displaced.as_ref())
             && let Some(c0) = commits.first_mut()
@@ -735,9 +738,9 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
             });
             c0.refs.sort_by(|a, b| a.ref_name.cmp(&b.ref_name));
         }
-        let ref_info = ref_name.map(|ref_name| RefInfo {
+        let ref_info = named.map(|(ref_name, commit_id)| RefInfo {
             ref_name,
-            commit_id: Some(tip),
+            commit_id: Some(commit_id),
             worktree: None,
         });
         let remote_tracking_ref_name = ref_info
@@ -864,7 +867,7 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
     // lane structure and keyed on the pre-lane names — the overlay carries exactly that view
     // (materialization names plus the passes' own renames), so the lane reorder cannot change
     // their decisions.
-    let mut pre_lane_names: HashMap<gix::ObjectId, gix::refs::FullName> = plan.base_name_of.clone();
+    let pre_lane_names: HashMap<gix::ObjectId, gix::refs::FullName> = plan.base_name_of.clone();
     // Remote refs some creator will consume as a segment name: the region builder cuts its run
     // at interior remote refs only when unclaimed. Plan-modeled names (`remote_used` covers the
     // walk seeds) plus the ahead-case remotes of EVERY boundary-tip local (`add_remote_segments`
@@ -910,7 +913,8 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
         stack_branches,
         &region_pinned,
         remote_tracking,
-        &mut pre_lane_names,
+        &pre_lane_names,
+        &plan.renames,
         &claimed_remote_names,
         &mut pending_edges,
     );
@@ -930,22 +934,15 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
     // remote segment.
     if let Some(tr) = project_meta.target_ref.as_ref()
         && tr.as_ref().category() == Some(Category::RemoteBranch)
-        && segment_by_ref(&sg, tr).is_none()
         && let Some(tip) = cg.commit_by_ref(tr.as_ref())
     {
         if in_set.contains(&tip) {
             let owner_tip = owner_of.get(&tip).copied().unwrap_or(tip);
-            if let Some(owner_sidx) = segment_by_commit(&sg, tip)
-                && !pre_lane_names.contains_key(&owner_tip)
+            // Materialization applied the plan's rename when the target NAMES the (previously
+            // anonymous) owner; this pass only adds the sibling link.
+            if plan.renames.get(&owner_tip).is_some_and(|(n, _)| n == tr)
+                && let Some(owner_sidx) = segment_by_commit(&sg, tip)
             {
-                pre_lane_names.insert(owner_tip, tr.clone());
-                if let Some(s) = sg.node_mut(owner_sidx) {
-                    s.ref_info = Some(RefInfo {
-                        ref_name: tr.clone(),
-                        commit_id: Some(tip),
-                        worktree: None,
-                    });
-                }
                 // Sibling: the segment whose FIRST commit is the local tracking ref's position.
                 let local_sidx = remote_tracking
                     .iter()
@@ -965,7 +962,7 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
                     s.sibling_segment_id = Some(local_sidx);
                 }
             }
-        } else {
+        } else if segment_by_ref(&sg, tr).is_none() {
             // The target's own (remote) commits: segment its region like any remote's — split at
             // merges, connect every rejoin (including a merge's second parent) back into the
             // workspace — so the projection can find the common base. No tracking local, no links.
@@ -1122,23 +1119,17 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
                 {
                     continue;
                 }
-                // An ANONYMOUS segment starting at the tip takes the tip's name directly — the
-                // walk names tip-seeded segments; the empty splice is only for a commit already
-                // named by another ref.
-                if sg
-                    .node(owner_sidx)
-                    .is_some_and(|s| s.commits.first().is_some_and(|c| c.id == t.id))
-                    && !pre_lane_names.contains_key(&t.id)
-                {
-                    pre_lane_names.insert(t.id, ref_name.clone());
-                    if let Some(s) = sg.node_mut(owner_sidx) {
-                        s.remote_tracking_ref_name = remote_tracking.get(&ref_name).cloned();
-                        s.ref_info = Some(RefInfo {
-                            ref_name,
-                            commit_id: Some(t.id),
-                            worktree: None,
-                        });
-                    }
+                // An ANONYMOUS segment starting at the tip takes the tip's name — applied by
+                // MATERIALIZATION from the plan's renames; a still-anonymous tip start here
+                // means the plan and the build disagree.
+                if sg.node(owner_sidx).is_some_and(|s| {
+                    s.commits.first().is_some_and(|c| c.id == t.id) && s.ref_info.is_none()
+                }) {
+                    debug_assert!(
+                        false,
+                        "the plan names every anonymous tip-started segment ({ref_name} at {})",
+                        t.id
+                    );
                     continue;
                 }
                 let empty_sidx = sg.add_node(Segment {
@@ -1506,6 +1497,12 @@ struct LanePlan {
     /// segment). The remote/target passes historically ran before the lane shape existed and
     /// keyed their decisions on these — they read them through [`LanePlan::effective_name`].
     base_name_of: HashMap<gix::ObjectId, gix::refs::FullName>,
+    /// Names the remote/target/explicit-tip passes give to ANONYMOUS boundary tips (a remote
+    /// pointing behind/at an anonymous owner names it; the target and explicit tips likewise).
+    /// Modeled here in pass order so materialization can mint segments with their FINAL names;
+    /// the passes only add links. The value carries the named ref's actual position (a behind
+    /// remote can point mid-run, below the owner's tip).
+    renames: HashMap<gix::ObjectId, (gix::refs::FullName, gix::ObjectId)>,
     /// Every remote-ref name the remote passes will consume (renames, empty roots, ahead
     /// regions, untracked surfacing, the target). With the lane structure built FIRST, the
     /// empties filter consults this instead of finding the remote segments in the graph.
@@ -1534,6 +1531,7 @@ fn lane_plan<T: but_core::RefMetadata>(
         demoted: HashSet::new(),
         group_names: HashMap::new(),
         base_name_of: HashMap::new(),
+        renames: HashMap::new(),
         remote_used: HashSet::new(),
     };
     // The naming state as the lane passes will see it: materialization names first…
@@ -1554,9 +1552,6 @@ fn lane_plan<T: but_core::RefMetadata>(
         }
     }
     plan.base_name_of = name_of.clone();
-    if !managed {
-        return plan;
-    }
     // …then the anon-owner renames of `add_remote_segments` (a remote pointing BEHIND/at an
     // anonymous in-set segment names it), in materialization order like the pass. Every remote
     // name the pass consumes — a rename, an empty root, an ahead region — is tracked, because
@@ -1585,6 +1580,7 @@ fn lane_plan<T: but_core::RefMetadata>(
                 .unwrap_or(remote_tip);
             if let std::collections::hash_map::Entry::Vacant(e) = name_of.entry(owner) {
                 e.insert(remote_ref.clone());
+                plan.renames.insert(owner, (remote_ref.clone(), remote_tip));
             }
             remote_used.insert(remote_ref.clone());
         } else if in_play(remote_ref) && !is_meta_stack_branch(remote_ref) {
@@ -1631,6 +1627,7 @@ fn lane_plan<T: but_core::RefMetadata>(
             let owner = facts.owner_of.get(&tip).copied().unwrap_or(tip);
             if let std::collections::hash_map::Entry::Vacant(e) = name_of.entry(owner) {
                 e.insert(tr.clone());
+                plan.renames.insert(owner, (tr.clone(), tip));
             }
         }
         remote_used.insert(tr.clone());
@@ -1648,8 +1645,14 @@ fn lane_plan<T: but_core::RefMetadata>(
         if facts.boundaries.contains(&t.id)
             && let std::collections::hash_map::Entry::Vacant(e) = name_of.entry(t.id)
         {
-            e.insert(ref_name);
+            e.insert(ref_name.clone());
+            plan.renames.insert(t.id, (ref_name, t.id));
         }
+    }
+
+    if !managed {
+        plan.remote_used = remote_used;
+        return plan;
     }
 
     // ── anonymize_shared_stack_tips: which workspace-parent tips float ──
@@ -2035,7 +2038,8 @@ fn add_remote_segments(
     stack_branches: Option<&[Vec<gix::refs::FullName>]>,
     pinned_commits: &HashSet<gix::ObjectId>,
     remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
-    pre_lane_names: &mut HashMap<gix::ObjectId, gix::refs::FullName>,
+    pre_lane_names: &HashMap<gix::ObjectId, gix::refs::FullName>,
+    renames: &HashMap<gix::ObjectId, (gix::refs::FullName, gix::ObjectId)>,
     claimed_remote_names: &HashSet<gix::refs::FullName>,
     pending_edges: &mut Vec<(SegmentIndex, gix::ObjectId)>,
 ) {
@@ -2064,15 +2068,13 @@ fn add_remote_segments(
         if in_set.contains(&remote_tip) {
             let owner = owner_of.get(&remote_tip).copied().unwrap_or(remote_tip);
             let owner_sidx = seg_of_tip[&owner];
-            let owner_is_anon = !pre_lane_names.contains_key(&owner);
-            if owner_is_anon {
-                pre_lane_names.insert(owner, remote_ref.clone());
+            // Materialization applied the plan's rename when this remote NAMES the (previously
+            // anonymous) owner; this pass only adds the links.
+            let named_by_this = renames
+                .get(&owner)
+                .is_some_and(|(name, _)| name == &remote_ref);
+            if named_by_this {
                 if let Some(s) = sg.node_mut(owner_sidx) {
-                    s.ref_info = Some(RefInfo {
-                        ref_name: remote_ref.clone(),
-                        commit_id: Some(remote_tip),
-                        worktree: None,
-                    });
                     s.sibling_segment_id = Some(local_sidx);
                 }
                 sg.node_mut(local_sidx)
