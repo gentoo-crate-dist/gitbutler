@@ -790,15 +790,14 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
             .unwrap_or(tip);
         for parent in cg.all_parent_ids(bottom) {
             if let Some(&owner) = owner_of.get(&parent) {
-                let conn = if tip == workspace_commit
+                let dst = if tip == workspace_commit
                     && let Some(&ph) = placeholder_of.get(&parent)
                 {
-                    Connection::new(ph, None, Some(bottom), None, None)
+                    ph
                 } else {
-                    let dst = seg_of_tip[&owner];
-                    Connection::new(dst, None, Some(bottom), None, Some(parent))
+                    seg_of_tip[&owner]
                 };
-                sg.add_edge(src, conn);
+                connect(&mut sg, src, dst);
             }
         }
     }
@@ -809,10 +808,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
         else {
             continue;
         };
-        sg.add_edge(
-            ph,
-            Connection::new(tip_sidx, None, None, None, Some(float.tip)),
-        );
+        connect(&mut sg, ph, tip_sidx);
     }
 
     // The lane STRUCTURE (empty-ws segment, advanced-outside branches, empty-branch splices)
@@ -1019,10 +1015,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
                 if let Some(s) = sg.node_mut(owner_sidx) {
                     s.remote_tracking_branch_segment_id = Some(remote_sidx);
                 }
-                sg.add_edge(
-                    remote_sidx,
-                    Connection::new(owner_sidx, None, None, None, Some(tip)),
-                );
+                connect(&mut sg, remote_sidx, owner_sidx);
             }
         }
     }
@@ -1153,10 +1146,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
                     connections: Vec::new(),
                 });
                 sg.node_mut(empty_sidx).expect("just added").id = empty_sidx;
-                sg.add_edge(
-                    empty_sidx,
-                    Connection::new(owner_sidx, None, None, None, Some(t.id)),
-                );
+                connect(&mut sg, empty_sidx, owner_sidx);
             }
         }
     }
@@ -1182,11 +1172,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
         }) else {
             continue;
         };
-        let src_last = sg.node(src).and_then(|s| s.commits.last().map(|c| c.id));
-        sg.add_edge(
-            src,
-            Connection::new(dst, None, src_last, None, Some(parent)),
-        );
+        connect(&mut sg, src, dst);
     }
 
     // A no-ref checkout at a REMOTE-named segment's tip: the walk's anonymous entrypoint tip owns
@@ -1240,15 +1226,13 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
                 for conn in &mut s.connections {
                     if conn.target == ep_sidx {
                         conn.target = floated;
+                        conn.dst = None;
                         conn.dst_id = None;
                     }
                 }
             }
         }
-        sg.add_edge(
-            floated,
-            Connection::new(ep_sidx, None, None, None, Some(entrypoint)),
-        );
+        connect(&mut sg, floated, ep_sidx);
     }
 
     if managed {
@@ -1366,10 +1350,6 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
         }
     }
 
-    // Normalize every connection's endpoints (src = source's last commit, dst = target's first) so the
-    // graph passes `check_edge` validation — we only set the ids while building, not the indices.
-    normalize_connections(&mut sg);
-
     // Generations: longest path from a root (a segment with no incoming connections).
     assign_generations(&mut sg);
 
@@ -1468,15 +1448,13 @@ fn split_at_entrypoint_segment<T: but_core::RefMetadata>(
                             for conn in &mut s.connections {
                                 if conn.target == sidx {
                                     conn.target = empty;
+                                    conn.dst = None;
                                     conn.dst_id = None;
                                 }
                             }
                         }
                     }
-                    sg.add_edge(
-                        empty,
-                        Connection::new(sidx, None, None, None, Some(entrypoint)),
-                    );
+                    connect(sg, empty, sidx);
                     return Some(empty);
                 }
                 Some(_) => {}
@@ -1504,10 +1482,31 @@ fn split_at_entrypoint_segment<T: but_core::RefMetadata>(
         remote_tracking_branch_segment_id: None,
         commits: lower_commits,
         metadata: None,
-        connections: moved_conns,
+        connections: Vec::new(),
     });
     sg.node_mut(new).expect("just added").id = new;
-    sg.add_edge(sidx, Connection::new(new, None, None, None, None));
+    // The moved connections' source commits moved with them; re-anchor their endpoints. Edges
+    // into the shortened upper segment re-aim at its remaining reality (an aim below the cut
+    // has no representable target on the upper half).
+    for conn in moved_conns {
+        let adj = conn.adjusted_for(new, conn.target, sg);
+        sg.add_edge(new, adj);
+    }
+    for other in sg.node_indices().collect::<Vec<_>>() {
+        let conns = sg
+            .node(other)
+            .map(|s| s.connections.clone())
+            .unwrap_or_default();
+        for (i, c) in conns.into_iter().enumerate() {
+            if c.target == sidx {
+                let adj = c.adjusted_for(other, sidx, sg);
+                if let Some(s) = sg.node_mut(other) {
+                    s.connections[i] = adj;
+                }
+            }
+        }
+    }
+    connect(sg, sidx, new);
     Some(new)
 }
 
@@ -2118,10 +2117,7 @@ fn add_remote_segments(
                     .remote_tracking_branch_segment_id = Some(owner_sidx);
             } else {
                 let remote_sidx = add_empty_remote_root(sg, &remote_ref, remote_tip, local_sidx);
-                sg.add_edge(
-                    remote_sidx,
-                    Connection::new(owner_sidx, None, None, None, Some(remote_tip)),
-                );
+                connect(sg, remote_sidx, owner_sidx);
             }
             continue;
         }
@@ -2403,10 +2399,7 @@ fn segment_ahead_region(
                     .copied()
             };
             if let Some(dst) = dst {
-                sg.add_edge(
-                    src,
-                    Connection::new(dst, None, Some(bottom), None, Some(parent)),
-                );
+                connect(sg, src, dst);
             } else if ahead_set.contains(&parent) {
                 // The parent is beyond the stop: another creator's region owns it, and its
                 // segment may not exist yet — wire once every creator ran.
@@ -2480,10 +2473,7 @@ fn add_untracked_remote_segments(
                 connections: Vec::new(),
             });
             sg.node_mut(remote_sidx).expect("just added").id = remote_sidx;
-            sg.add_edge(
-                remote_sidx,
-                Connection::new(owner_sidx, None, None, None, Some(tip)),
-            );
+            connect(sg, remote_sidx, owner_sidx);
             link_remote_to_local(sg, remote_sidx, &r, remote_tracking);
         }
     }
@@ -2531,10 +2521,7 @@ fn add_co_located_remote_empties(
                 connections: Vec::new(),
             });
             sg.node_mut(empty).expect("just added").id = empty;
-            sg.add_edge(
-                empty,
-                Connection::new(sidx, None, None, None, Some(first.id)),
-            );
+            connect(sg, empty, sidx);
             let name = ri.ref_name.clone();
             link_remote_to_local(sg, empty, &name, remote_tracking);
         }
@@ -2607,10 +2594,7 @@ fn insert_empty_workspace_segment(
         connections: Vec::new(),
     });
     sg.node_mut(ws_seg).expect("just added").id = ws_seg;
-    sg.add_edge(
-        ws_seg,
-        Connection::new(stack_sidx, None, None, None, Some(workspace_commit)),
-    );
+    connect(sg, ws_seg, stack_sidx);
     Some(ws_seg)
 }
 
@@ -2709,10 +2693,7 @@ fn add_advanced_outside_branches<T: but_core::RefMetadata>(
             connections: Vec::new(),
         });
         sg.node_mut(seg).expect("just added").id = seg;
-        sg.add_edge(
-            seg,
-            Connection::new(owner_sidx, None, None, None, Some(rejoin)),
-        );
+        connect(sg, seg, owner_sidx);
         // Only a NAMED advanced branch is the in-workspace segment's sibling (the projection shows
         // that segment under the advanced branch's name); a floating anonymous run stays unlinked,
         // and the workspace position itself never links to outside content.
@@ -3056,6 +3037,7 @@ fn insert_empty_chain_above(
                 for conn in &mut from.connections {
                     if conn.target == anchor {
                         conn.target = top;
+                        conn.dst = None;
                         conn.dst_id = None;
                         redirected = true;
                     }
@@ -3086,66 +3068,30 @@ fn insert_empty_chain_above(
                         for conn in &mut parent.connections {
                             if conn.target == anchor {
                                 conn.target = top;
+                                conn.dst = None;
                                 conn.dst_id = None;
                             }
                         }
                     }
                 }
                 None => {
-                    sg.add_edge(from_sidx, Connection::new(top, None, None, None, None));
+                    connect(sg, from_sidx, top);
                 }
             }
         }
     }
     for i in 0..seg_ids.len() {
         let next = seg_ids.get(i + 1).copied().unwrap_or(anchor);
-        sg.add_edge(seg_ids[i], Connection::new(next, None, None, None, None));
+        connect(sg, seg_ids[i], next);
     }
 }
 
-/// Re-normalize each connection's endpoints against the final segments (src = source's last commit,
-/// dst = target's first), matching what `check_edge` validates.
-/// Assert-mode gate for the transitional repair passes: `BUT_GRAPH_NOOP_ASSERT=1` arms all,
-/// a keyword (`interior`/`stacked`/`normalize`) arms one.
-fn noop_assert(pass: &str) -> bool {
-    std::env::var("BUT_GRAPH_NOOP_ASSERT").is_ok_and(|v| v == "1" || v.contains(pass))
-}
-
-fn normalize_connections(sg: &mut SegmentGraph) {
-    let census = noop_assert("normalize");
-    let mut violations: Vec<String> = Vec::new();
-    let mut updates: Vec<(SegmentIndex, usize, Connection)> = Vec::new();
-    for src in sg.node_indices().collect::<Vec<_>>() {
-        let conns = sg
-            .node(src)
-            .map(|s| s.connections.clone())
-            .unwrap_or_default();
-        for (i, c) in conns.into_iter().enumerate() {
-            let target = c.target;
-            let adj = c.adjusted_for(src, target, sg);
-            if adj != c && census {
-                let class = if adj.src_id != c.src_id || adj.dst_id != c.dst_id {
-                    "id"
-                } else {
-                    "idx"
-                };
-                let src_name = sg.node(src).and_then(|s| s.ref_info.as_ref());
-                let dst_name = sg.node(target).and_then(|s| s.ref_info.as_ref());
-                violations.push(format!(
-                    "NOOP_VIOLATION normalize_connections [{class}]: {src}{src_name:?} -> {target}{dst_name:?} was {c:?} now {adj:?}"
-                ));
-            }
-            updates.push((src, i, adj));
-        }
-    }
-    if !violations.is_empty() {
-        panic!("{}", violations.join("\n"));
-    }
-    for (src, i, adj) in updates {
-        if let Some(s) = sg.node_mut(src) {
-            s.connections[i] = adj;
-        }
-    }
+/// Connect `src` → `dst` with final endpoints: the source's last commit and the target's
+/// first. Every builder edge is created after both segments hold their final commits, so
+/// endpoints never need repair.
+fn connect(sg: &mut SegmentGraph, src: SegmentIndex, dst: SegmentIndex) {
+    let conn = Connection::new(dst, None, None, None, None).adjusted_for(src, dst, sg);
+    sg.add_edge(src, conn);
 }
 
 /// Longest path from a root (segment with no incoming connection); roots are generation 0.
