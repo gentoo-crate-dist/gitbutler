@@ -52,16 +52,99 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
         repo: &gix::Repository,
         options: &GraphEditorOptions,
     ) -> Result<Self> {
-        // This first creates runs of nodes and associates them with the
-        // but-graph segments. We then do a second pass over all the segments
-        // and use the but_graph to connect up the runs. Finally, we validate
-        // that each Pick step's parents match the commit's actual parents,
-        // and if not, we disconnect and rewire directly to the correct
-        // parent commits.
+        let native = super::native_creation::create_native(workspace, repo, options, meta)?;
+        // Transitional oracle: BUT_REBASE_NATIVE=assert also runs the legacy segment walk and
+        // panics with precise diffs if it disagrees in canonical form (see canonical.rs).
+        if std::env::var("BUT_REBASE_NATIVE").ok().as_deref() == Some("assert") {
+            let (graph, references, head_selectors, immutable_references) =
+                segment_walk_parts(workspace, repo, options)?;
+            let old_c = super::canonical::canonical_form(&graph);
+            let new_c = super::canonical::canonical_form(&native.graph);
+            let mut diffs = new_c.diff_against(&old_c);
+            let sorted = |v: &[gix::refs::FullName]| {
+                let mut v: Vec<_> = v.iter().map(|r| r.to_string()).collect();
+                v.sort();
+                v
+            };
+            if sorted(&native.references) != sorted(&references) {
+                diffs.push(format!(
+                    "references {:?} != {:?}",
+                    sorted(&native.references),
+                    sorted(&references)
+                ));
+            }
+            let selector_labels = |g: &StepGraph, sels: &[Selector]| {
+                let mut v: Vec<String> = sels
+                    .iter()
+                    .map(|s| match &g[s.id] {
+                        Step::Reference { refname } => refname.to_string(),
+                        other => format!("{other:?}"),
+                    })
+                    .collect();
+                v.sort();
+                v
+            };
+            let old_sel = selector_labels(&graph, &head_selectors);
+            let new_sel = selector_labels(&native.graph, &native.head_selectors);
+            if new_sel != old_sel {
+                diffs.push(format!("head_selectors {new_sel:?} != {old_sel:?}"));
+            }
+            let mut imm_old: Vec<_> = immutable_references.iter().map(|r| r.to_string()).collect();
+            let mut imm_new: Vec<_> = native
+                .immutable_references
+                .iter()
+                .map(|r| r.to_string())
+                .collect();
+            imm_old.sort();
+            imm_new.sort();
+            if imm_new != imm_old {
+                diffs.push(format!("immutable {imm_new:?} != {imm_old:?}"));
+            }
+            if !diffs.is_empty() {
+                panic!(
+                    "NATIVE_EDITOR_DIVERGENCE ({} lines):\n{}",
+                    diffs.len(),
+                    diffs.join("\n")
+                );
+            }
+        }
+        Ok(Self {
+            graph: native.graph,
+            initial_references: native.references,
+            // TODO(CTO): We need to eventually list all worktrees that we own
+            // here so we can `safe_checkout` them too.
+            checkouts: native
+                .head_selectors
+                .into_iter()
+                .map(|selector| Checkout::Head {
+                    selector,
+                    merge_base_override: None,
+                })
+                .collect(),
+            repo: repo.clone().with_object_memory(),
+            history: RevisionHistory::new(),
+            immutable_references: native.immutable_references,
+            workspace,
+            meta,
+        })
+    }
+}
 
-        // TODO(CTO): Look into traversing "in workspace" segments that are not
-        // reachable from the entrypoint TODO(CTO): Look into stopping at the
-        // common base
+/// The legacy editor-graph construction: runs of nodes per but-graph SEGMENT, connected via the
+/// segment edges, then a repair pass rewiring any pick whose graph-derived parents disagree with
+/// the commit's real parent array. Kept as the transitional oracle for `native_creation`.
+#[expect(clippy::type_complexity)]
+fn segment_walk_parts(
+    workspace: &but_graph::Workspace,
+    repo: &gix::Repository,
+    options: &GraphEditorOptions,
+) -> Result<(
+    StepGraph,
+    Vec<gix::refs::FullName>,
+    Vec<Selector>,
+    HashSet<gix::refs::FullName>,
+)> {
+    {
         let entrypoint = workspace.graph.entrypoint()?;
 
         let mut mutable_entrypoints = vec![entrypoint.segment.id];
@@ -376,23 +459,7 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
             }
         }
 
-        Ok(Self {
-            graph,
-            initial_references: references,
-            // TODO(CTO): We need to eventually list all worktrees that we own
-            // here so we can `safe_checkout` them too.
-            checkouts: head_selectors
-                .into_iter()
-                .map(|selector| Checkout::Head {
-                    selector,
-                    merge_base_override: None,
-                })
-                .collect(),
-            repo: repo.clone().with_object_memory(),
-            history: RevisionHistory::new(),
-            workspace,
-            meta,
-        })
+        Ok((graph, references, head_selectors, immutable_references))
     }
 }
 

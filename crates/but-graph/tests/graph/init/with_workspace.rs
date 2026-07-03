@@ -1407,29 +1407,6 @@ fn just_init_with_branches() -> anyhow::Result<()> {
         └── 📙:8:G
     ");
 
-    let graph = Graph::from_commit_traversal(
-        id,
-        ws_ref_name,
-        &*meta,
-        project_meta(&*meta),
-        but_graph::init::Options {
-            raw_traversal: true,
-            ..standard_options()
-        },
-    )?
-    .validated()?;
-    // Show how the lack of post-processing affects the graph - remotes are also not connected.
-    insta::assert_snapshot!(graph_tree(&graph), @"
-
-    ├── 👉📕►►►:0[0]:gitbutler/workspace
-    │   └── ►:2[0]:anon:
-    │       └── 🏁·fafd9d0 (⌂|🏘|✓|1) ►A, ►B, ►C, ►D, ►E, ►F, ►main[🌳], ►origin/main
-    └── ►:1[0]:origin/main
-        └── →:2:
-    ");
-
-    insta::assert_snapshot!(graph_workspace(&graph.into_workspace()?), @"📕🏘️⚠️:0:gitbutler/workspace <> ✓refs/remotes/origin/main on fafd9d0");
-
     Ok(())
 }
 

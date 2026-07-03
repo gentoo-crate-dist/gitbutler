@@ -45,6 +45,18 @@ use crate::{Commit, CommitFlags};
 /// An index into a [`CommitGraph`]'s node arena.
 pub type CommitIdx = usize;
 
+/// A run of empty named segments resting above `below` (see
+/// [`CommitGraph::resting_chains`]).
+#[derive(Debug, Clone)]
+pub struct RestingChain {
+    /// The first commit below the run, if any.
+    pub below: Option<gix::ObjectId>,
+    /// The run's ref names, topmost first.
+    pub refs: Vec<gix::refs::FullName>,
+    /// Whether anything feeds the run's head (an incoming connection exists).
+    pub fed: bool,
+}
+
 /// A node in the commit graph: a commit, plus where it sits topologically.
 #[derive(Debug, Clone)]
 pub struct CommitNode {
@@ -74,6 +86,15 @@ pub struct CommitGraph {
     /// [`CommitFlags`](crate::CommitFlags) so it neither perturbs the walk's goal bits nor the
     /// segment fingerprint; used to tell a real managed merge from a ws ref advanced past it.
     managed_ws_commits: HashSet<gix::ObjectId>,
+    /// Chains of refs that REST above a commit through empty spliced segments (an empty branch
+    /// run in a lane, a spine-spliced remote) rather than pointing at it directly — set by
+    /// [`Self::from_segment_graph`]. One entry per maximal empty run.
+    resting_chains: Vec<RestingChain>,
+    /// Commits some empty NAMED segment points at (fed or dangling) — set by
+    /// [`Self::from_segment_graph`]. A merge edge into such a commit must land on its PICK, not
+    /// its ref chain: those refs must stay unreachable from the merge, or upstream-integration
+    /// reachability would classify them as integrated history.
+    merge_bypass_commits: HashSet<gix::ObjectId>,
     /// `(child, parent)` pairs the traversal actually CONNECTED, when built
     /// [from the walk](Self::from_walk). A commit's raw `parent_ids` can point past a traversal
     /// cut (limit, integrated stop-early); connectivity accessors must not rejoin what the walk
@@ -130,6 +151,8 @@ impl CommitGraph {
             entrypoint,
             entrypoint_ref: None,
             managed_ws_commits: HashSet::new(),
+            resting_chains: Vec::new(),
+            merge_bypass_commits: HashSet::new(),
             connected: None,
             hard_limit_hit: false,
             traversal_tips: Vec::new(),
@@ -154,7 +177,8 @@ impl CommitGraph {
             .as_ref()
             .and_then(|ep| ep.commit_and_owner)
             .and_then(|(_, owner)| owner.ref_info.as_ref().map(|ri| ri.ref_name.clone()));
-        let mut commits = Vec::new();
+        let mut commits: Vec<crate::Commit> = Vec::new();
+        let mut commit_pos: HashMap<gix::ObjectId, usize> = HashMap::new();
         for s in graph.node_weights() {
             for (i, c) in s.commits.iter().enumerate() {
                 let mut c = c.clone();
@@ -166,7 +190,32 @@ impl CommitGraph {
                 {
                     c.refs.insert(0, ri.clone());
                 }
-                commits.push(c);
+                // Remote segments show COPIES of shared commits, sometimes with truncated
+                // parents. One node per id: merge refs, prefer the local (NotInRemote) copy's
+                // data, and never trade parents away for a truncated copy.
+                match commit_pos.entry(c.id) {
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(commits.len());
+                        commits.push(c);
+                    }
+                    std::collections::hash_map::Entry::Occupied(e) => {
+                        let existing = &mut commits[*e.get()];
+
+                        for ri in c.refs {
+                            if !existing.refs.iter().any(|r| r.ref_name == ri.ref_name) {
+                                existing.refs.push(ri);
+                            }
+                        }
+                        let take_this = (c.flags.contains(crate::CommitFlags::NotInRemote)
+                            && !existing.flags.contains(crate::CommitFlags::NotInRemote)
+                            && (!c.parent_ids.is_empty() || existing.parent_ids.is_empty()))
+                            || (existing.parent_ids.is_empty() && !c.parent_ids.is_empty());
+                        if take_this {
+                            existing.parent_ids = c.parent_ids;
+                            existing.flags = c.flags;
+                        }
+                    }
+                }
             }
         }
         // The traversal's ACTUAL connectivity: consecutive commits within a segment, plus each
@@ -207,7 +256,56 @@ impl CommitGraph {
                 }
             }
         }
+        // An EMPTY named segment's ref would be lost — record it as a RESTING CHAIN above the
+        // first commit reachable below it, one chain per maximal run of empty segments. A run's
+        // head is an empty named segment not fed by another empty named segment.
+        let is_empty_named = |sidx: crate::SegmentIndex| {
+            let s = &graph[sidx];
+            s.commits.is_empty() && s.ref_info.is_some()
+        };
+        let mut resting_chains: Vec<RestingChain> = Vec::new();
+        let mut merge_bypass_commits: HashSet<gix::ObjectId> = HashSet::new();
+        for s in graph.node_weights() {
+            if !is_empty_named(s.id)
+                || graph
+                    .neighbors_directed(s.id, crate::Direction::Incoming)
+                    .any(is_empty_named)
+            {
+                continue;
+            }
+            let fed = graph
+                .neighbors_directed(s.id, crate::Direction::Incoming)
+                .next()
+                .is_some();
+            let mut refs = Vec::new();
+            let mut below = None;
+            let mut sidx = s.id;
+            for _ in 0..graph.num_segments() {
+                let t = &graph[sidx];
+                if let Some(c) = t.commits.first() {
+                    below = Some(c.id);
+                    break;
+                }
+                if let Some(ri) = &t.ref_info {
+                    refs.push(ri.ref_name.clone());
+                }
+                let Some(next) = t.connections.first() else {
+                    break;
+                };
+                if let Some(dst) = next.dst_id {
+                    below = Some(dst);
+                    break;
+                }
+                sidx = next.target;
+            }
+            if let Some(below) = below {
+                merge_bypass_commits.insert(below);
+            }
+            resting_chains.push(RestingChain { below, refs, fed });
+        }
         let mut cg = CommitGraph::from_commits(commits, entrypoint);
+        cg.resting_chains = resting_chains;
+        cg.merge_bypass_commits = merge_bypass_commits;
         cg.entrypoint_ref = entrypoint_ref;
         cg.set_connected(connected);
         cg.hard_limit_hit = graph.hard_limit_hit();
@@ -243,103 +341,6 @@ impl CommitGraph {
             .is_none_or(|c| c.contains(&(child, parent)))
     }
 
-    /// Compare against `other` field-by-field, returning one human-readable line per
-    /// difference. The S1 native-walker oracle: the traversal's direct accumulation must equal
-    /// the segment-graph flattening exactly, including per-commit ref ORDER (it surfaces in
-    /// snapshots) and flags (goal bits included).
-    pub fn diff_against(&self, other: &CommitGraph) -> Vec<String> {
-        let mut out = Vec::new();
-        let ids: std::collections::BTreeSet<_> = self
-            .nodes
-            .iter()
-            .map(|n| n.commit.id)
-            .chain(other.nodes.iter().map(|n| n.commit.id))
-            .collect();
-        for id in ids {
-            match (self.node(id), other.node(id)) {
-                (Some(_), None) => out.push(format!("{id}: only in SELF")),
-                (None, Some(_)) => out.push(format!("{id}: only in OTHER")),
-                (Some(a), Some(b)) => {
-                    let (a, b) = (&a.commit, &b.commit);
-                    if a.parent_ids != b.parent_ids {
-                        out.push(format!(
-                            "{id}: parents {:?} != {:?}",
-                            a.parent_ids, b.parent_ids
-                        ));
-                    }
-                    if a.flags != b.flags {
-                        out.push(format!(
-                            "{id}: flags {} != {}",
-                            a.flags.debug_string(None),
-                            b.flags.debug_string(None)
-                        ));
-                    }
-                    let (mut ra, mut rb): (Vec<_>, Vec<_>) = (
-                        a.refs.iter().map(|r| r.ref_name.to_string()).collect(),
-                        b.refs.iter().map(|r| r.ref_name.to_string()).collect(),
-                    );
-                    // Ref ORDER is canonicalized by the native walker; compare as sets.
-                    ra.sort();
-                    rb.sort();
-                    if ra != rb {
-                        out.push(format!("{id}: refs {ra:?} != {rb:?}"));
-                    }
-                }
-                (None, None) => unreachable!(),
-            }
-        }
-        if self.entrypoint != other.entrypoint {
-            out.push(format!(
-                "entrypoint {:?} != {:?}",
-                self.entrypoint, other.entrypoint
-            ));
-        }
-        if self.entrypoint_ref != other.entrypoint_ref {
-            out.push(format!(
-                "entrypoint_ref {:?} != {:?}",
-                self.entrypoint_ref.as_ref().map(|r| r.as_bstr()),
-                other.entrypoint_ref.as_ref().map(|r| r.as_bstr())
-            ));
-        }
-        if self.connected != other.connected {
-            let (a, b) = (
-                self.connected.clone().unwrap_or_default(),
-                other.connected.clone().unwrap_or_default(),
-            );
-            for pair in a.difference(&b) {
-                out.push(format!("connected only in SELF: {pair:?}"));
-            }
-            for pair in b.difference(&a) {
-                out.push(format!("connected only in OTHER: {pair:?}"));
-            }
-        }
-        if self.hard_limit_hit != other.hard_limit_hit {
-            out.push(format!(
-                "hard_limit_hit {} != {}",
-                self.hard_limit_hit, other.hard_limit_hit
-            ));
-        }
-        if format!("{:?}", self.traversal_tips) != format!("{:?}", other.traversal_tips) {
-            out.push(format!(
-                "traversal_tips {:?} != {:?}",
-                self.traversal_tips, other.traversal_tips
-            ));
-        }
-        if self.explicit_tips != other.explicit_tips {
-            out.push(format!(
-                "explicit_tips {} != {}",
-                self.explicit_tips, other.explicit_tips
-            ));
-        }
-        if self.managed_ws_commits != other.managed_ws_commits {
-            out.push(format!(
-                "managed_ws_commits {:?} != {:?}",
-                self.managed_ws_commits, other.managed_ws_commits
-            ));
-        }
-        out
-    }
-
     /// Assemble from the NATIVE traversal outcome (see `init::native_walk`).
     pub(crate) fn from_native_outcome(o: crate::init::native_walk::NativeOutcome) -> Self {
         let mut cg = CommitGraph::from_commits(o.commits, o.entrypoint);
@@ -370,42 +371,13 @@ impl CommitGraph {
                 ref_name.clone(),
                 meta,
                 project_meta.clone(),
-                crate::init::Options {
-                    raw_traversal: true,
-                    ..options.clone()
-                },
-                overlay.clone(),
-            )?);
-        // Transitional oracle: BUT_GRAPH_NATIVE=assert also runs the legacy raw walk and panics
-        // with precise diffs if its flattening disagrees with the native walker.
-        if std::env::var("BUT_GRAPH_NATIVE").ok().as_deref() == Some("assert") {
-            let raw = crate::Graph::from_commit_traversal_with_overlay(
-                repo,
-                tip,
-                ref_name,
-                meta,
-                project_meta,
-                crate::init::Options {
-                    raw_traversal: true,
-                    ..options
-                },
+                options,
                 overlay,
-            )?;
-            let diffs = native.diff_against(&Self::from_segment_graph(&raw));
-            if !diffs.is_empty() {
-                panic!(
-                    "NATIVE_WALK_DIVERGENCE ({} lines):\n{}",
-                    diffs.len(),
-                    diffs.join("\n")
-                );
-            }
-        }
+            )?);
         Ok(native)
     }
 
-    /// Like [`Self::from_walk`], but seeded from explicit `tips` — the REAL
-    /// [`Graph::from_commit_traversal_tips`](crate::Graph::from_commit_traversal_tips) traversal
-    /// with `raw_traversal`, flattened.
+    /// Like [`Self::from_walk`], but seeded from explicit `tips`.
     pub fn from_walk_tips<T: but_core::RefMetadata>(
         repo: &gix::Repository,
         meta: &T,
@@ -420,38 +392,11 @@ impl CommitGraph {
                 tips.clone(),
                 meta,
                 project_meta.clone(),
-                crate::init::Options {
-                    raw_traversal: true,
-                    ..options.clone()
-                },
-                overlay.clone(),
+                options,
+                overlay,
             )?,
         );
         native.explicit_tips = true;
-        // Transitional oracle, like `from_walk`.
-        if std::env::var("BUT_GRAPH_NATIVE").ok().as_deref() == Some("assert") {
-            let raw = crate::Graph::from_commit_traversal_tips_with_overlay(
-                repo,
-                tips,
-                meta,
-                project_meta,
-                crate::init::Options {
-                    raw_traversal: true,
-                    ..options
-                },
-                overlay,
-            )?;
-            let mut cg = Self::from_segment_graph(&raw);
-            cg.explicit_tips = true;
-            let diffs = native.diff_against(&cg);
-            if !diffs.is_empty() {
-                panic!(
-                    "NATIVE_WALK_DIVERGENCE tips ({} lines):\n{}",
-                    diffs.len(),
-                    diffs.join("\n")
-                );
-            }
-        }
         Ok(native)
     }
 
@@ -491,8 +436,20 @@ impl CommitGraph {
         self.nodes.iter().map(|n| n.commit.id)
     }
 
-    /// The commit's full parent list, first-parent first, INCLUDING parents not present in this
-    /// graph (a partial traversal) — callers preserve those rather than re-pointing them.
+    /// Whether the traversal connected `child -> parent` (present and not severed).
+    pub fn is_connected_pair(&self, child: gix::ObjectId, parent: gix::ObjectId) -> bool {
+        self.by_id.contains_key(&parent) && self.is_connected(child, parent)
+    }
+
+    /// Every parent id the COMMIT asserts, verbatim — present or not, connected or not.
+    pub fn raw_parent_ids(&self, id: gix::ObjectId) -> Vec<gix::ObjectId> {
+        self.node(id)
+            .map(|n| n.commit.parent_ids.to_vec())
+            .unwrap_or_default()
+    }
+
+    /// The commit's CONNECTED parent list, first-parent first — parents the traversal severed
+    /// (limits, integrated stop-early, display cuts) are omitted.
     pub fn all_parent_ids(&self, id: gix::ObjectId) -> Vec<gix::ObjectId> {
         self.node(id)
             .map(|n| {
@@ -532,6 +489,28 @@ impl CommitGraph {
             .into_iter()
             .flat_map(|n| n.commit.parent_ids.iter().copied())
             .filter(|p| self.by_id.contains_key(p))
+    }
+
+    /// The chains of refs resting above commits through empty spliced segments (see
+    /// `resting_chains`).
+    pub fn resting_chains(&self) -> &[RestingChain] {
+        &self.resting_chains
+    }
+
+    /// Whether a merge edge into `id` must land on its pick rather than its ref chain (see
+    /// `merge_bypass_commits`).
+    pub fn is_merge_bypass_commit(&self, id: gix::ObjectId) -> bool {
+        self.merge_bypass_commits.contains(&id)
+    }
+
+    /// The parents of `id` the traversal actually CONNECTED - present in the graph and not
+    /// severed by a traversal cut (limits, integrated stop-early). The parent-walking sibling
+    /// of [`Self::children`].
+    pub fn connected_parents(
+        &self,
+        id: gix::ObjectId,
+    ) -> impl Iterator<Item = gix::ObjectId> + use<'_> {
+        self.parents(id).filter(move |p| self.is_connected(id, *p))
     }
 
     /// The first parent of `id` (the next commit walking down first-parent), if present.
