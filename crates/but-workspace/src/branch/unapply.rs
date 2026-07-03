@@ -715,30 +715,35 @@ pub(crate) mod function {
         if let Some(target) = local_tracking_branch_of_target(ws)? {
             return Ok(target);
         }
-        named_stack_with_lowest_generation(ws)?.with_context(
+        most_recent_named_stack(ws)?.with_context(
             || "Cannot unapply workspace reference because no target or named stack could be found",
         )
     }
 
-    /// The idea here is to put the user at the topologically most recent stack.
-    /// This is also arbitrary, but *feels* like what one would want.
-    fn named_stack_with_lowest_generation(
-        ws: &but_graph::Workspace,
-    ) -> anyhow::Result<Option<RefToCheckout>> {
+    /// The idea here is to put the user at the topologically most recent stack — the one whose
+    /// first segment's anchor commit (its tip, or the pointed-at commit for an empty splice)
+    /// sits deepest in the carried commit graph; stack order breaks ties. This is also
+    /// arbitrary, but *feels* like what one would want.
+    fn most_recent_named_stack(ws: &but_graph::Workspace) -> anyhow::Result<Option<RefToCheckout>> {
+        let cg = ws.graph.commit_graph();
         let mut selected = None;
         for stack in &ws.stacks {
-            let Some((sidx, ref_info)) = stack
-                .segments
-                .first()
-                .and_then(|s| s.ref_info.as_ref().map(|ri| (s.id, ri)))
-            else {
+            let Some((sidx, ref_info, anchor)) = stack.segments.first().and_then(|s| {
+                s.ref_info
+                    .as_ref()
+                    .map(|ri| (s.id, ri, s.commits.first().map(|c| c.id).or(ri.commit_id)))
+            }) else {
                 continue;
             };
-            let generation = ws.graph[sidx].generation;
+            let generation = cg
+                .zip(anchor)
+                .and_then(|(cg, anchor)| cg.node(anchor))
+                .map(|n| n.generation)
+                .unwrap_or(0);
             let ref_to_checkout = RefToCheckout::from_segment_ref_info(ws, sidx, ref_info)?;
             if selected
                 .as_ref()
-                .is_none_or(|(best_generation, _)| generation < *best_generation)
+                .is_none_or(|(best_generation, _)| generation > *best_generation)
             {
                 selected = Some((generation, ref_to_checkout));
             }
