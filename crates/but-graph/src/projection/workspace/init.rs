@@ -1225,11 +1225,32 @@ impl WorkspaceState {
         };
         let keep_if_fully_integrated =
             upstream_advanced_past_target && !matches!(self.kind, WorkspaceKind::AdHoc);
+        // The target's LOCAL tracking branch is exempt from integrated pruning when METADATA
+        // applies it as a lane in a MANAGED workspace: caught up with the target, ALL its
+        // commits are integrated by definition, so pruning would empty the lane by construction
+        // and slide its base to the workspace lower bound (`ref_target=M2, base=M1` — an
+        // incoherent segment). An applied main keeps its commits: its lane IS the base
+        // indicator. The single-branch view of a checked-out main keeps pruning its integrated
+        // base as before — membership, and thus the exemption, is metadata-explicit.
+        let target_local = self
+            .kind
+            .has_managed_ref()
+            .then(|| {
+                self.target_ref
+                    .as_ref()
+                    .and_then(|tr| graph.local_tracking_branch(tr.ref_name.as_ref()))
+                    .map(|local| local.as_ref())
+            })
+            .flatten();
         for stack in &mut self.stacks {
+            let is_target_local_lane =
+                stack.id.is_some() && stack.ref_name().is_some_and(|rn| Some(rn) == target_local);
             // Upstream advanced: floor the stack at its fork point but keep a fully-integrated
             // tip in managed workspaces so it survives for `integrate_upstream`. Single-branch
             // mode keeps the branch shell, but prunes integrated target/base commits from it.
-            prune_integrated_stack_segments(stack, &prune_segments, keep_if_fully_integrated);
+            if !is_target_local_lane {
+                prune_integrated_stack_segments(stack, &prune_segments, keep_if_fully_integrated);
+            }
             remove_empty_branches(stack, metadata, &keep_empty_segment_ids);
             // Pruning moved the stack's bottom; refresh its base to its own fork point with the
             // target rather than leaving the pre-prune global merge base. Every branch has its

@@ -8307,6 +8307,12 @@ mod applied_main {
     }
 
     /// (d) main (and its remote) advanced above A's fork point: the stale-fork corner.
+    ///
+    /// RULING (Mattias, 2026-07-04): the target's local is exempt from integrated pruning when
+    /// metadata applies it as a lane — caught up with the target, ALL its commits are
+    /// integrated by definition, so pruning would empty the lane and slide its base to the
+    /// workspace lower bound. The applied lane keeps its commits: it IS the base indicator,
+    /// and its base stays correct by construction.
     #[test]
     fn above_stack_fork_point() -> anyhow::Result<()> {
         let (repo, mut meta) = read_only_in_memory_scenario("ws/applied-main-above-fork")?;
@@ -8329,6 +8335,7 @@ mod applied_main {
         📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
         ├── ≡📙:2:main <> origin/main →:4: on 3183e43 {0}
         │   └── 📙:2:main <> origin/main →:4:
+        │       └── ❄️bce0c5e (🏘️|✓)
         └── ≡📙:1:A on 3183e43 {1}
             └── 📙:1:A
                 └── ·49d4b34 (🏘️)
