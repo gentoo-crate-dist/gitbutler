@@ -408,6 +408,10 @@ struct Facts {
     pinned_commits: HashSet<gix::ObjectId>,
     /// Commits that START a segment.
     boundaries: HashSet<gix::ObjectId>,
+    /// The in-set entrypoint was NOT a boundary on its own and is forced to start a segment
+    /// (a checkout inside a stack). Its tip keeps the split's naming precedence: the checked-out
+    /// ref first, then plain disambiguation.
+    entrypoint_forced_boundary: bool,
     /// Which boundary's first-parent run each in-set commit belongs to.
     owner_of: HashMap<gix::ObjectId, gix::ObjectId>,
     /// The boundaries in materialization order: workspace first, then descending generation, id.
@@ -589,8 +593,11 @@ fn facts<T: but_core::RefMetadata>(
                         .any(|&k| cg.first_parent(k) != Some(c) && in_set.contains(&k))
             }
     };
-    let boundaries: HashSet<gix::ObjectId> =
+    let mut boundaries: HashSet<gix::ObjectId> =
         in_set.iter().copied().filter(|&c| is_boundary(c)).collect();
+    // A checkout inside a stack (from_commit_traversal): the entrypoint always starts its own
+    // segment — planned here instead of splitting the enclosing segment after the build.
+    let entrypoint_forced_boundary = in_set.contains(&entrypoint) && boundaries.insert(entrypoint);
 
     // Every boundary in the set starts a segment; each segment's commit run is the boundary plus its
     // first-parent tail up to (excluding) the next boundary. These runs partition the set, so assigning
@@ -620,6 +627,7 @@ fn facts<T: but_core::RefMetadata>(
         empty_ws_case,
         pinned_commits,
         boundaries,
+        entrypoint_forced_boundary,
         owner_of,
         tips,
     }
@@ -670,6 +678,7 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
         empty_ws_case,
         pinned_commits,
         boundaries,
+        entrypoint_forced_boundary,
         owner_of,
         tips,
     } = f;
@@ -711,6 +720,17 @@ pub fn graph_from_commit_graph<T: but_core::RefMetadata>(
                     project_meta.target_ref.as_ref(),
                 )
             }
+        } else if entrypoint_forced_boundary && tip == entrypoint {
+            entrypoint_ref.clone().or_else(|| {
+                disambiguated_ref(
+                    cg,
+                    tip,
+                    remote_tracking,
+                    meta,
+                    None,
+                    project_meta.target_ref.as_ref(),
+                )
+            })
         } else {
             disambiguated_ref(
                 cg,

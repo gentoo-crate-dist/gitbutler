@@ -323,26 +323,26 @@ fn single_stack_ambiguous() -> anyhow::Result<()> {
 
     ├── 📕►►►:0[0]:gitbutler/workspace[🌳]
     │   └── ·20de6ee (⌂|🏘)
-    │       └── ►:1[1]:B <> origin/B →:2:
+    │       └── ►:1[1]:B <> origin/B →:3:
     │           └── ·70e9a36 (⌂|🏘|0100)
-    │               └── 👉►:5[2]:tags/without-ref
+    │               └── 👉►:2[2]:tags/without-ref
     │                   ├── ·320e105 (⌂|🏘|0101)
     │                   └── ·2a31450 (⌂|🏘|0101) ►B-empty, ►ambiguous-01
-    │                       └── ►:2[3]:origin/B →:1:
+    │                       └── ►:3[3]:origin/B →:1:
     │                           └── ·70bde6b (⌂|🏘|1101) ►A, ►A-empty-01, ►A-empty-02, ►A-empty-03
-    │                               └── ►:3[4]:main <> origin/main →:4:
+    │                               └── ►:4[4]:main <> origin/main →:5:
     │                                   └── 🏁·fafd9d0 (⌂|🏘|✓|1111) ►new-A, ►new-B
-    └── ►:4[0]:origin/main →:3:
-        └── →:3: (main →:4:)
+    └── ►:5[0]:origin/main →:4:
+        └── →:4: (main →:5:)
     ");
     // Now `HEAD` is outside a workspace, which goes to single-branch mode. But it knows it's in a workspace
     // and shows the surrounding parts, while marking the segment as entrypoint.
     insta::assert_snapshot!(graph_workspace(&graph.into_workspace()?), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on fafd9d0
-    └── ≡:1:B <> origin/B →:2:⇡1 on fafd9d0
-        ├── :1:B <> origin/B →:2:⇡1
+    └── ≡:1:B <> origin/B →:3:⇡1 on fafd9d0
+        ├── :1:B <> origin/B →:3:⇡1
         │   └── ·70e9a36 (🏘️)
-        └── 👉:5:tags/without-ref
+        └── 👉:2:tags/without-ref
             ├── ·320e105 (🏘️)
             ├── ·2a31450 (🏘️) ►B-empty, ►ambiguous-01
             └── ❄70bde6b (🏘️) ►A, ►A-empty-01, ►A-empty-02, ►A-empty-03
@@ -361,26 +361,26 @@ fn single_stack_ambiguous() -> anyhow::Result<()> {
 
     ├── 📕►►►:0[0]:gitbutler/workspace[🌳]
     │   └── ·20de6ee (⌂|🏘)
-    │       └── ►:1[1]:B <> origin/B →:2:
+    │       └── ►:1[1]:B <> origin/B →:3:
     │           └── ·70e9a36 (⌂|🏘|0100)
-    │               └── ►:5[2]:anon:
+    │               └── ►:2[2]:anon:
     │                   ├── 👉·320e105 (⌂|🏘|0101) ►tags/without-ref
     │                   └── ·2a31450 (⌂|🏘|0101) ►B-empty, ►ambiguous-01
-    │                       └── ►:2[3]:origin/B →:1:
+    │                       └── ►:3[3]:origin/B →:1:
     │                           └── ·70bde6b (⌂|🏘|1101) ►A, ►A-empty-01, ►A-empty-02, ►A-empty-03
-    │                               └── ►:3[4]:main <> origin/main →:4:
+    │                               └── ►:4[4]:main <> origin/main →:5:
     │                                   └── 🏁·fafd9d0 (⌂|🏘|✓|1111) ►new-A, ►new-B
-    └── ►:4[0]:origin/main →:3:
-        └── →:3: (main →:4:)
+    └── ►:5[0]:origin/main →:4:
+        └── →:4: (main →:5:)
     ");
 
     // Entrypoint is now unnamed (as no ref-name was provided for traversal)
     insta::assert_snapshot!(graph_workspace(&graph.into_workspace()?), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on fafd9d0
-    └── ≡:1:B <> origin/B →:2:⇡1 on fafd9d0
-        ├── :1:B <> origin/B →:2:⇡1
+    └── ≡:1:B <> origin/B →:3:⇡1 on fafd9d0
+        ├── :1:B <> origin/B →:3:⇡1
         │   └── ·70e9a36 (🏘️)
-        └── 👉:5:anon:
+        └── 👉:2:anon:
             ├── ·320e105 (🏘️) ►tags/without-ref
             ├── ·2a31450 (🏘️) ►B-empty, ►ambiguous-01
             └── ❄70bde6b (🏘️) ►A, ►A-empty-01, ►A-empty-02, ►A-empty-03
@@ -400,27 +400,27 @@ fn single_stack_ambiguous() -> anyhow::Result<()> {
 
     ├── 📕►►►:0[0]:gitbutler/workspace[🌳]
     │   └── ·20de6ee (⌂|🏘)
-    │       └── ►:1[1]:B <> origin/B →:2:
+    │       └── ►:1[1]:B <> origin/B →:3:
     │           ├── ·70e9a36 (⌂|🏘|0100)
     │           └── ·320e105 (⌂|🏘|0100) ►tags/without-ref
-    │               └── ►:5[2]:anon:
+    │               └── ►:2[2]:anon:
     │                   └── 👉·2a31450 (⌂|🏘|0101) ►B-empty, ►ambiguous-01
-    │                       └── ►:2[3]:origin/B →:1:
+    │                       └── ►:3[3]:origin/B →:1:
     │                           └── ·70bde6b (⌂|🏘|1101) ►A, ►A-empty-01, ►A-empty-02, ►A-empty-03
-    │                               └── ►:3[4]:main <> origin/main →:4:
+    │                               └── ►:4[4]:main <> origin/main →:5:
     │                                   └── 🏁·fafd9d0 (⌂|🏘|✓|1111) ►new-A, ►new-B
-    └── ►:4[0]:origin/main →:3:
-        └── →:3: (main →:4:)
+    └── ►:5[0]:origin/main →:4:
+        └── →:4: (main →:5:)
     ");
 
     // Doing this is very much like edit mode, and there is always a segment starting at the entrypoint.
     insta::assert_snapshot!(graph_workspace(&graph.into_workspace()?), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on fafd9d0
-    └── ≡:1:B <> origin/B →:2:⇡2 on fafd9d0
-        ├── :1:B <> origin/B →:2:⇡2
+    └── ≡:1:B <> origin/B →:3:⇡2 on fafd9d0
+        ├── :1:B <> origin/B →:3:⇡2
         │   ├── ·70e9a36 (🏘️)
         │   └── ·320e105 (🏘️) ►tags/without-ref
-        └── 👉:5:anon:
+        └── 👉:2:anon:
             ├── ·2a31450 (🏘️) ►B-empty, ►ambiguous-01
             └── ❄70bde6b (🏘️) ►A, ►A-empty-01, ►A-empty-02, ►A-empty-03
     ");
@@ -438,26 +438,26 @@ fn single_stack_ambiguous() -> anyhow::Result<()> {
 
     ├── 📕►►►:0[0]:gitbutler/workspace[🌳]
     │   └── ·20de6ee (⌂|🏘)
-    │       └── ►:1[1]:B <> origin/B →:2:
+    │       └── ►:1[1]:B <> origin/B →:3:
     │           ├── ·70e9a36 (⌂|🏘|0100)
     │           └── ·320e105 (⌂|🏘|0100) ►tags/without-ref
-    │               └── 👉►:5[2]:B-empty
+    │               └── 👉►:2[2]:B-empty
     │                   └── ·2a31450 (⌂|🏘|0101) ►ambiguous-01
-    │                       └── ►:2[3]:origin/B →:1:
+    │                       └── ►:3[3]:origin/B →:1:
     │                           └── ·70bde6b (⌂|🏘|1101) ►A, ►A-empty-01, ►A-empty-02, ►A-empty-03
-    │                               └── ►:3[4]:main <> origin/main →:4:
+    │                               └── ►:4[4]:main <> origin/main →:5:
     │                                   └── 🏁·fafd9d0 (⌂|🏘|✓|1111) ►new-A, ►new-B
-    └── ►:4[0]:origin/main →:3:
-        └── →:3: (main →:4:)
+    └── ►:5[0]:origin/main →:4:
+        └── →:4: (main →:5:)
     ");
 
     insta::assert_snapshot!(graph_workspace(&graph.into_workspace()?), @"
     📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on fafd9d0
-    └── ≡:1:B <> origin/B →:2:⇡2 on fafd9d0
-        ├── :1:B <> origin/B →:2:⇡2
+    └── ≡:1:B <> origin/B →:3:⇡2 on fafd9d0
+        ├── :1:B <> origin/B →:3:⇡2
         │   ├── ·70e9a36 (🏘️)
         │   └── ·320e105 (🏘️) ►tags/without-ref
-        └── 👉:5:B-empty
+        └── 👉:2:B-empty
             ├── ·2a31450 (🏘️) ►ambiguous-01
             └── ❄70bde6b (🏘️) ►A, ►A-empty-01, ►A-empty-02, ►A-empty-03
     ");
@@ -3084,9 +3084,9 @@ fn integrated_tips_do_not_stop_early() -> anyhow::Result<()> {
     // Detached states are also possible. They keep the anonymous container while
     // preserving target context and pruning integrated commits.
     insta::assert_snapshot!(graph_workspace(&graph.into_workspace()?), @"
-    ⌂:9:DETACHED <> ✓refs/remotes/origin/main⇣3
-    └── ≡:9:anon: {1}
-        └── :9:anon:
+    ⌂:7:DETACHED <> ✓refs/remotes/origin/main⇣3
+    └── ≡:7:anon: {1}
+        └── :7:anon:
     ");
     Ok(())
 }
