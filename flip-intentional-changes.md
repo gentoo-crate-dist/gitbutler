@@ -91,10 +91,14 @@ to add, not remove.
 - **#7 shared remote-ahead ownership** — when one commit carries two remote refs,
   how they stack. Deferred.
 
-# Execution readiness (deleting the SegmentGraph walk) — DO NOT EXECUTE YET
+# Execution readiness (deleting the SegmentGraph walk) — EXECUTED 2026-07-02
 
-Everything below is staged; per Mattias, the old code is NOT deleted until he
-says so.
+Mattias gave the go on 2026-07-02; everything below was executed the same day
+(commits af6b633 routing, 14d13e2 tips, db70b4d gates, 68f3794 deletion on
+commit-graph-experiment). post.rs is ~70 lines (raw-graph finishing only);
+the traversal is kept; BUT_GRAPH_NO_FLIP and the sweep are gone. The
+non-managed and explicit-tips paths are served by the builders
+(graph_from_repository_unmanaged / graph_from_repository_tips).
 
 ## Architecture as it stands
 - `graph_from_repository` (managed) runs `CommitGraph::from_walk` — the REAL
