@@ -2,9 +2,7 @@
 
 use std::collections::HashSet;
 
-use petgraph::visit::EdgeRef as _;
-
-use crate::graph_rebase::{Pick, Step, StepGraph, StepGraphIndex};
+use crate::graph_rebase::{Direction, Pick, Step, StepGraph, StepGraphIndex};
 
 /// Find the parents of a given node that are commit - in correct parent
 /// ordering.
@@ -38,7 +36,7 @@ fn ordered_commit_parents(
     first_only: bool,
 ) -> Vec<StepGraphIndex> {
     let mut potential_parent_edges = graph
-        .edges_directed(target, petgraph::Direction::Outgoing)
+        .edges_directed(target, Direction::Outgoing)
         .collect::<Vec<_>>();
     potential_parent_edges.sort_by_key(|e| e.weight().order);
     potential_parent_edges.reverse();
@@ -61,7 +59,7 @@ fn ordered_commit_parents(
         };
 
         let mut outgoings = graph
-            .edges_directed(candidate.target(), petgraph::Direction::Outgoing)
+            .edges_directed(candidate.target(), Direction::Outgoing)
             .collect::<Vec<_>>();
         outgoings.sort_by_key(|e| e.weight().order);
         outgoings.reverse();

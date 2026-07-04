@@ -5,13 +5,13 @@ use std::{
     fmt::Write as _,
 };
 
+use crate::graph_rebase::Direction;
 use anyhow::{Context, Result, bail};
 use but_core::RefMetadata;
 use gix::refs::{
     Target,
     transaction::{Change, LogChange, PreviousValue, RefEdit},
 };
-use petgraph::{Direction, visit::EdgeRef};
 
 use crate::graph_rebase::{
     Editor, Pick, Step, StepGraph, StepGraphIndex, SuccessfulRebase,
@@ -188,7 +188,7 @@ impl<'ws, 'graph, M: RefMetadata> Editor<'ws, 'graph, M> {
 
             let mut edges = self
                 .graph
-                .edges_directed(step_idx, petgraph::Direction::Outgoing)
+                .edges_directed(step_idx, Direction::Outgoing)
                 .collect::<Vec<_>>();
             edges.sort_by_key(|e| e.weight().order);
             edges.reverse();
@@ -256,7 +256,7 @@ fn order_steps_picking(graph: &StepGraph, heads: &[StepGraphIndex]) -> VecDeque<
     let mut bases = VecDeque::new();
 
     while let Some(head) = heads.pop() {
-        let edges = graph.edges_directed(head, petgraph::Direction::Outgoing);
+        let edges = graph.edges_directed(head, Direction::Outgoing);
 
         if edges.clone().count() == 0 {
             bases.push_back(head);
@@ -277,10 +277,10 @@ fn order_steps_picking(graph: &StepGraph, heads: &[StepGraphIndex]) -> VecDeque<
     let mut retraversed = bases.iter().cloned().collect::<HashSet<_>>();
 
     while let Some(base) = bases.pop_front() {
-        for edge in graph.edges_directed(base, petgraph::Direction::Incoming) {
+        for edge in graph.edges_directed(base, Direction::Incoming) {
             // We only want to queue nodes for traversing that have had all of their parents traversed.
             let s = edge.source();
-            let mut outgoing_edges = graph.edges_directed(s, petgraph::Direction::Outgoing);
+            let mut outgoing_edges = graph.edges_directed(s, Direction::Outgoing);
             let all_parents_seen = outgoing_edges.clone().count() == 0
                 || outgoing_edges.all(|e| retraversed.contains(&e.target()));
             if all_parents_seen && seen.contains(&s) && retraversed.insert(s) {

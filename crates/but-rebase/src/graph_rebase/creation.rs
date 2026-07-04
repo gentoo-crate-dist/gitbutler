@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::graph_rebase::Direction;
 use anyhow::{Result, bail};
 use but_core::{RefMetadata, commit::SignCommit};
 use but_graph::{Commit, SegmentIndex};
-use petgraph::{Direction, visit::EdgeRef as _};
 
 use crate::graph_rebase::{
     Checkout, Edge, Editor, Pick, RevisionHistory, Selector, Step, StepGraph, StepGraphIndex,

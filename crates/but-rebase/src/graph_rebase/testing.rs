@@ -8,10 +8,6 @@ use std::{
 
 use anyhow::Result;
 use but_core::RefMetadata;
-use petgraph::{
-    dot::{Config, Dot},
-    visit::{EdgeRef, IntoEdgeReferences},
-};
 use renderdag::{Ancestor, GraphRowRenderer, Renderer as _};
 
 #[cfg(test)]
@@ -57,23 +53,27 @@ impl<M: RefMetadata> TestingDot for SuccessfulRebase<'_, '_, M> {
 
 impl TestingDot for StepGraph {
     fn steps_dot(&self) -> String {
-        format!(
-            "{:?}",
-            Dot::with_attr_getters(
-                &self,
-                &[Config::EdgeNoLabel, Config::NodeNoLabel],
-                &|_, v| format!("label=\"order: {}\"", v.weight().order),
-                &|_, (_, step)| {
-                    match step {
-                        Step::Pick(Pick { id, .. }) => format!("label=\"pick: {id}\""),
-                        Step::Reference { refname, .. } => {
-                            format!("label=\"reference: {}\"", refname.as_bstr())
-                        }
-                        Step::None => "label=\"none\"".into(),
-                    }
-                },
-            )
-        )
+        let mut out = String::from("digraph {\n");
+        for idx in self.node_indices() {
+            let label = match &self[idx] {
+                Step::Pick(Pick { id, .. }) => format!("pick: {id}"),
+                Step::Reference { refname, .. } => {
+                    format!("reference: {}", refname.as_bstr())
+                }
+                Step::None => "none".into(),
+            };
+            out.push_str(&format!("    {idx} [ label=\"{label}\"]\n"));
+        }
+        for edge in self.edge_references() {
+            out.push_str(&format!(
+                "    {} -> {} [ label=\"order: {}\"]\n",
+                edge.source(),
+                edge.target(),
+                edge.weight().order
+            ));
+        }
+        out.push_str("}\n");
+        out
     }
 }
 
