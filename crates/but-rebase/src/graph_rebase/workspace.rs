@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::graph_rebase::Direction;
+use crate::graph_rebase::positions;
 use anyhow::Result;
 use but_core::{
     RefMetadata, WORKSPACE_REF_NAME,
@@ -66,29 +67,19 @@ pub struct GraphWorkspace {
     /// exclusive sub-graphs of commits that don't have any incoming or outgoing
     /// edges to other commits in other stacks.
     ///
+    /// Membership is computed over COMMITS: references are positions, not topology, so a
+    /// shared ref node (typically the target's, sitting above an excluded target commit)
+    /// cannot glue two distinct stacks together. Each reference joins the stack its position
+    /// belongs to — its approaching child's, else its anchor commit's — and a chain hanging
+    /// straight off the workspace commit keeps its own lane even without commits (an empty
+    /// branch). A reference whose position lies outside every stack (e.g. the target's own
+    /// ref) is in none of them.
+    ///
     /// As a natural extension, if we failed to find the workspace commit, this
     /// list will be empty since all the commits will deemed "above_workspace".
     ///
     /// If we're outside of the workspace branch, there will be one stack that
     /// contains all commits in the rev-set `HEAD ^target_sha`.
-    ///
-    /// # Known limitation: stacks sharing a target segment collapse into one
-    ///
-    /// Today, stacks that converge on a shared segment - most importantly the
-    /// target (`origin/main`) segment every real workspace stack sits on - get
-    /// merged into a single stack instead of staying separate. This is a
-    /// consequence of how the editor's step graph is built, *not* of the rebase
-    /// topology, so a fixture can look like N obviously-distinct stacks and
-    /// still come back as one.
-    ///
-    /// The segment's head reference becomes its first node (see `Editor::create`
-    /// in `creation.rs`), and each child stack attaches to that node. So when
-    /// two stacks share the target segment, they both point at its ref node and
-    /// the split treats them as one. A target doesn't help: it excludes the
-    /// target *commit*, but the ref node sits above that commit and survives.
-    ///
-    /// In this scenario, the but graph really ought to be providing a graph
-    /// that doesn't let us put the node there.
     pub stacks: Vec<Subgraph>,
 
     /// Per-reference push and integration status for every local-branch
@@ -653,41 +644,52 @@ fn all_until_optional_limit(
 
 /// Split the region beneath the workspace commit into mutually-exclusive stacks,
 /// returning `(above_workspace, stacks)`.
+///
+/// Membership is computed over PICKS: references are transparent for connectivity (they are
+/// positions, not topology), so a shared ref node can no longer glue two distinct stacks
+/// together — the limitation formerly documented on [`GraphWorkspace::stacks`]. After the
+/// pick-flood, each reference joins the stack its position belongs to: the stack of its
+/// approaching child (`via`), else the stack of its anchor pick, and a chain hanging directly
+/// off the workspace commit keeps its own (possibly pick-less) lane — the empty-branch case.
 fn divide_workspace_into_stacks(
     graph: &StepGraph,
     head_not_target: NodeSet,
     workspace_commit_ix: StepGraphIndex,
 ) -> (NodeSet, Vec<NodeSet>) {
-    // Each parent of the workspace commit seeds a stack.
+    // Each parent of the workspace commit seeds a stack, flooded pick-to-pick: every outgoing
+    // edge resolves through reference/tombstone steps to the pick beneath.
     let mut initial_stacks = graph
         .edges_directed(workspace_commit_ix, Direction::Outgoing)
-        .map(|edge| NodeSet {
-            heads: vec![edge.target()],
-            nodes: [edge.target()].into(),
+        .map(|edge| {
+            let mut nodes = std::collections::HashSet::new();
+            let mut tips = Vec::new();
+            if let Some(pick) = positions::resolve_to_pick(graph, edge.target())
+                && head_not_target.nodes.contains(&pick)
+            {
+                nodes.insert(pick);
+                tips.push(pick);
+            }
+            while let Some(tip) = tips.pop() {
+                for edge in graph.edges_directed(tip, Direction::Outgoing) {
+                    let Some(pick) = positions::resolve_to_pick(graph, edge.target()) else {
+                        continue;
+                    };
+                    if !head_not_target.nodes.contains(&pick) {
+                        continue;
+                    }
+                    if nodes.insert(pick) {
+                        tips.push(pick);
+                    }
+                }
+            }
+            NodeSet {
+                heads: vec![edge.target()],
+                nodes,
+            }
         })
         .collect::<Vec<_>>();
 
-    for stack in &mut initial_stacks {
-        let mut tips = stack.heads.clone();
-        while let Some(tip) = tips.pop() {
-            for edge in graph.edges_directed(tip, Direction::Outgoing) {
-                if !head_not_target.nodes.contains(&edge.target()) {
-                    continue;
-                }
-                if stack.nodes.insert(edge.target()) {
-                    tips.push(edge.target());
-                }
-            }
-        }
-    }
-
-    // Merge stacks that share any node (they aren't actually distinct).
-    //
-    // NOTE: a shared node here includes *reference* nodes, not just commits.
-    // A segment's head ref is its first node (see `creation.rs`), so stacks that
-    // converge on a shared segment - typically the target's - both point at its
-    // ref node and collapse into one, even when a target excludes the segment's
-    // commit. This is the known limitation documented on `GraphWorkspace::stacks`.
+    // Merge stacks that share any pick (they aren't actually distinct).
     let mut deduplicated = vec![];
     while let Some(mut out) = initial_stacks.pop() {
         for bix in (0..initial_stacks.len()).rev() {
@@ -703,6 +705,35 @@ fn divide_workspace_into_stacks(
             }
         }
         deduplicated.push(out);
+    }
+
+    // Each reference in the region joins the stack its POSITION belongs to: the via child's
+    // stack, else the anchor pick's stack, else — for a chain hanging straight off the
+    // workspace commit — the stack seeded by that edge (its head), which may hold no picks at
+    // all (an empty lane). References belonging to neither (e.g. the target's own ref above
+    // the excluded target commit) stay outside every stack.
+    for node in &head_not_target.nodes {
+        if !matches!(graph[*node], Step::Reference { .. }) {
+            continue;
+        }
+        let Some(pos) = positions::ref_position(graph, *node) else {
+            continue;
+        };
+        let home = match pos.via {
+            // A chain hanging straight off the workspace commit belongs to the lane seeded by
+            // that edge — found via the seed head sitting in the same chain.
+            Some((child, _)) if child == workspace_commit_ix => deduplicated
+                .iter()
+                .position(|s| s.heads.iter().any(|&h| chain_contains(graph, h, *node))),
+            Some((child, _)) => deduplicated.iter().position(|s| s.nodes.contains(&child)),
+            None => pos
+                .anchor
+                .and_then(|a| deduplicated.iter().position(|s| s.nodes.contains(&a))),
+        };
+        if let Some(ix) = home {
+            #[expect(clippy::indexing_slicing)]
+            deduplicated[ix].nodes.insert(*node);
+        }
     }
 
     let mut outside = head_not_target.nodes.clone();
@@ -723,6 +754,31 @@ fn divide_workspace_into_stacks(
     };
 
     (above_workspace, deduplicated)
+}
+
+/// Whether the reference/tombstone chain starting at `head` contains `node` before reaching a
+/// pick.
+fn chain_contains(graph: &StepGraph, head: StepGraphIndex, node: StepGraphIndex) -> bool {
+    let mut cursor = head;
+    for _ in 0..10_000 {
+        if cursor == node {
+            return true;
+        }
+        match &graph[cursor] {
+            Step::Pick(_) => return false,
+            Step::Reference { .. } | Step::None => {
+                let Some(next) = graph
+                    .edges_directed(cursor, Direction::Outgoing)
+                    .next()
+                    .map(|e| e.target())
+                else {
+                    return false;
+                };
+                cursor = next;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]

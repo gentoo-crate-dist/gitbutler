@@ -167,12 +167,12 @@ fn three_stacks_same_base_collapse() -> Result<()> {
 
 /// Two divergent branches sharing `base`, bounded by a target at `base`.
 ///
-/// They still merge into a single stack: the target excludes the base *commit*,
-/// but the `main`/`origin/main` *ref node* sitting just above it survives and is
-/// reachable from both branches, so they share a node and collapse. A target
-/// alone does not separate stacks that branch off a common ref.
+/// They stay SEPARATE: stack membership is computed over picks (references are positions, not
+/// topology), so the `main` ref sitting above the excluded base commit cannot glue the two
+/// branches together — and being anchored on the excluded commit, it belongs to neither lane.
+/// This used to be the known limitation documented on `GraphWorkspace::stacks`.
 #[test]
-fn divergent_stacks_sharing_base_merge_with_target() -> Result<()> {
+fn divergent_stacks_sharing_excluded_base_stay_separate_with_target() -> Result<()> {
     let (repo, _tmp, _meta) = fixture_writable("workspace-two-stacks")?;
     insta::assert_snapshot!(visualize_commit_graph_all(&repo)?, @r"
     *   1162583 (HEAD -> gitbutler/workspace) GitButler Workspace Commit
@@ -196,11 +196,11 @@ fn divergent_stacks_sharing_base_merge_with_target() -> Result<()> {
     ◎  refs/heads/stack-a
     ●  49c06ff A2
     ●  ff76d2f A1
-    │ ◎  refs/heads/stack-b
-    │ ●  afc3f8f B2
-    │ ●  b3ee99c B1
-    ├─╯
-    ◎  refs/heads/main
+
+    # Stack 1
+    ◎  refs/heads/stack-b
+    ●  afc3f8f B2
+    ●  b3ee99c B1
     ");
     Ok(())
 }
@@ -317,7 +317,7 @@ fn disjoint_stacks_stay_separate() -> Result<()> {
     Ok(())
 }
 
-/// The direct contrast to `divergent_stacks_sharing_base_merge_with_target`:
+/// The direct contrast to `divergent_stacks_sharing_excluded_base_stay_separate_with_target`:
 /// the *same* target (`main`), but the two stacks share no node, so they stay
 /// separate. This is the shape that sidesteps the known limitation documented on
 /// `GraphWorkspace::stacks` - the target trims `base` off `stack-a` without the
@@ -335,7 +335,6 @@ fn disjoint_stacks_stay_separate_with_target() -> Result<()> {
     ◎  refs/heads/stack-a
     ●  49c06ff A2
     ●  ff76d2f A1
-    ◎  refs/heads/main
 
     # Stack 1
     ◎  refs/heads/stack-b

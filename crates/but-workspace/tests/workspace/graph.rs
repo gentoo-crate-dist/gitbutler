@@ -518,24 +518,22 @@ fn divergent_stacks_sharing_base_merge() -> Result<()> {
 /// The same divergent fixture bounded by a target at `main` (which sits at
 /// `base`).
 #[test]
-fn divergent_stacks_sharing_base_merge_with_target() -> Result<()> {
+fn divergent_stacks_sharing_excluded_base_stay_separate_with_target() -> Result<()> {
     let (_repo, detailed) = detailed("workspace-two-stacks", Some("refs/heads/main"))?;
     insta::assert_snapshot!(render(&detailed), @"
     # Stack 0
     ◎  0 refs/heads/stack-a
     ●  1 49c06ff A2
     ●  2 ff76d2f A1
-    │ ◎  3 refs/heads/stack-b
-    │ ●  4 afc3f8f B2
-    │ ●  5 b3ee99c B1
-    ├─╯
-    ◎  6 refs/heads/main
       linear    ref=0  rows=[0, 1, 2]
-      linear    ref=3  rows=[3, 4, 5]
-      linear    ref=6  rows=[6]
       reference ref=0  rows=[0, 1, 2]
-      reference ref=3  rows=[3, 4, 5]
-      reference ref=6  rows=[6]
+
+    # Stack 1
+    ◎  0 refs/heads/stack-b
+    ●  1 afc3f8f B2
+    ●  2 b3ee99c B1
+      linear    ref=0  rows=[0, 1, 2]
+      reference ref=0  rows=[0, 1, 2]
     ");
     Ok(())
 }
@@ -608,11 +606,8 @@ fn disjoint_stacks_stay_separate_with_target() -> Result<()> {
     ◎  0 refs/heads/stack-a
     ●  1 49c06ff A2
     ●  2 ff76d2f A1
-    ◎  3 refs/heads/main
       linear    ref=0  rows=[0, 1, 2]
-      linear    ref=3  rows=[3]
       reference ref=0  rows=[0, 1, 2]
-      reference ref=3  rows=[3]
 
     # Stack 1
     ◎  0 refs/heads/stack-b
@@ -672,13 +667,10 @@ fn stacked_dependent_branches_with_target() -> Result<()> {
     ◎  3 refs/heads/branch-bottom
     ●  4 d27b21f bottom 2
     ●  5 a3a5a44 bottom 1
-    ◎  6 refs/heads/main
       linear    ref=0  rows=[0, 1, 2]
       linear    ref=3  rows=[3, 4, 5]
-      linear    ref=6  rows=[6]
       reference ref=0  rows=[0, 1, 2]
       reference ref=3  rows=[3, 4, 5]
-      reference ref=6  rows=[6]
     ");
     Ok(())
 }
@@ -770,8 +762,8 @@ fn push_status_nothing_to_push_and_unpushed() -> Result<()> {
     insta::assert_snapshot!(render_push_status(&detailed), @"
     # Stack 0
     refs/heads/stack-a push=CompletelyUnpushed             combined=CompletelyUnpushed             remote=-
+    # Stack 1
     refs/heads/stack-b push=CompletelyUnpushed             combined=CompletelyUnpushed             remote=-
-    refs/heads/main push=NothingToPush                  combined=NothingToPush                  remote=refs/remotes/origin/main
     ");
     Ok(())
 }
@@ -803,13 +795,14 @@ fn integration_status_marks_fully_integrated_branch() -> Result<()> {
     insta::assert_snapshot!(render_push_status(&detailed), @"
     # Stack 0
     refs/heads/A   push=Integrated                     combined=Integrated                     remote=-
+    # Stack 1
     refs/heads/B   push=CompletelyUnpushed             combined=UnpushedCommitsRequiringForce  remote=-
-    refs/heads/main push=UnpushedCommitsRequiringForce  combined=UnpushedCommitsRequiringForce  remote=refs/remotes/origin/main
     ");
     // `add A1` (== origin/main) is integrated; `add B1` is local-only.
     insta::assert_snapshot!(render_commit_state(&detailed), @"
     # Stack 0
     905d6e5 add A1   state=integrated
+    # Stack 1
     b38b04b add B1   state=local
     ");
     Ok(())
@@ -886,12 +879,13 @@ fn integration_status_marks_partially_integrated_multi_branch_stack() -> Result<
     # Stack 0
     refs/heads/A   push=CompletelyUnpushed             combined=UnpushedCommitsRequiringForce  remote=-
     refs/heads/C   push=Integrated                     combined=Integrated                     remote=-
+    # Stack 1
     refs/heads/B   push=CompletelyUnpushed             combined=UnpushedCommitsRequiringForce  remote=-
-    refs/heads/main push=UnpushedCommitsRequiringForce  combined=UnpushedCommitsRequiringForce  remote=refs/remotes/origin/main
 
     # Stack 0
     44c9428 add A1   state=local
     f1e7451 add C1   state=integrated
+    # Stack 1
     b38b04b add B1   state=local
     ");
     Ok(())
@@ -915,12 +909,13 @@ fn integration_status_marks_fully_integrated_multi_branch_stack() -> Result<()> 
     # Stack 0
     refs/heads/A   push=Integrated                     combined=Integrated                     remote=-
     refs/heads/C   push=Integrated                     combined=Integrated                     remote=-
+    # Stack 1
     refs/heads/B   push=CompletelyUnpushed             combined=UnpushedCommitsRequiringForce  remote=-
-    refs/heads/main push=UnpushedCommitsRequiringForce  combined=UnpushedCommitsRequiringForce  remote=refs/remotes/origin/main
 
     # Stack 0
     44c9428 add A1   state=integrated
     f1e7451 add C1   state=integrated
+    # Stack 1
     b38b04b add B1   state=local
     ");
     Ok(())

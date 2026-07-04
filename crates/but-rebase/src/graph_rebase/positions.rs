@@ -144,3 +144,21 @@ pub(crate) fn debug_assert_positions_total(graph: &StepGraph) {
         }
     }
 }
+
+/// Resolve `node` downward through reference and tombstone steps to the first pick, or `None`
+/// if the chain has no pick below. A pick resolves to itself.
+pub(crate) fn resolve_to_pick(graph: &StepGraph, node: StepGraphIndex) -> Option<StepGraphIndex> {
+    let mut cursor = node;
+    for _ in 0..10_000 {
+        match &graph[cursor] {
+            Step::Pick(_) => return Some(cursor),
+            Step::Reference { .. } | Step::None => {
+                cursor = graph
+                    .edges_directed(cursor, Direction::Outgoing)
+                    .next()
+                    .map(|e| e.target())?;
+            }
+        }
+    }
+    None
+}
