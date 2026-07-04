@@ -2,9 +2,9 @@
 
 use std::collections::HashSet;
 
+use crate::graph_rebase::{Direction, StepGraphIndex};
 use anyhow::{Context as _, Result, anyhow, bail};
 use but_core::RefMetadata;
-use petgraph::{Direction, visit::EdgeRef};
 use serde::{Deserialize, Serialize};
 
 use crate::graph_rebase::{
@@ -496,7 +496,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     }
 
     /// The order to give a new outgoing edge from `node` so it sorts after all existing ones.
-    fn next_outgoing_order(&self, node: petgraph::prelude::NodeIndex) -> usize {
+    fn next_outgoing_order(&self, node: StepGraphIndex) -> usize {
         self.graph
             .edges_directed(node, Direction::Outgoing)
             .map(|e| e.weight().order)
@@ -507,8 +507,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     /// Remove the child edge, and reconnect to the right parents.
     fn reconnect_edges_to_parents(
         &mut self,
-        disconnected_parent_edges: &[(Edge, petgraph::prelude::NodeIndex)],
-        child_node: petgraph::prelude::NodeIndex,
+        disconnected_parent_edges: &[(Edge, StepGraphIndex)],
+        child_node: StepGraphIndex,
     ) {
         // Reconnect the child node to all the disconnected parents. Their orders came from a
         // different parent context and can collide with `child_node`'s existing parents, so
@@ -529,8 +529,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
 
     fn add_edges_to_parents(
         &mut self,
-        child_node: petgraph::prelude::NodeIndex,
-        new_parent_nodes: impl IntoIterator<Item = petgraph::prelude::NodeIndex>,
+        child_node: StepGraphIndex,
+        new_parent_nodes: impl IntoIterator<Item = StepGraphIndex>,
         parent_reparenting_order: ParentReparentingOrder,
     ) {
         let mut existing_parent_edges = self

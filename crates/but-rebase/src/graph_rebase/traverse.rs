@@ -2,9 +2,9 @@
 
 use std::collections::HashSet;
 
+use crate::graph_rebase::Direction;
 use anyhow::Result;
 use but_core::RefMetadata;
-use petgraph::{Direction, visit::EdgeRef as _};
 
 use crate::graph_rebase::{Editor, Selector, Step, StepGraph, StepGraphIndex, ToSelector};
 

@@ -6,6 +6,7 @@
 
 mod creation;
 pub mod rebase;
+mod step_graph;
 pub mod traverse;
 use std::collections::{BTreeMap, HashMap};
 
@@ -169,8 +170,7 @@ pub(crate) struct Edge {
     order: usize,
 }
 
-type StepGraphIndex = petgraph::stable_graph::NodeIndex;
-type StepGraph = petgraph::stable_graph::StableDiGraph<Step, Edge>;
+pub(crate) use step_graph::{Direction, StepGraph, StepGraphIndex};
 
 /// Convert a structure to a selector for a particular editor.
 ///

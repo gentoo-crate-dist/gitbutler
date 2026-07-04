@@ -1,0 +1,200 @@
+//! An owned arena graph for rebase steps, replacing petgraph: nodes are never removed (a
+//! removed step becomes [`Step::None`]), so node ids are stable by construction; edges live in
+//! a slot arena so edge ids stay stable across removals. Iteration matches the semantics the
+//! call sites were written against: `edges_directed` yields newest-first, `node_indices` and
+//! `edge_references` ascend.
+
+use crate::graph_rebase::{Edge, Step};
+
+/// The stable identifier of a step node. Only ever grows; tombstoning is done at the
+/// [`Step`] level, never by removal.
+pub(crate) type StepGraphIndex = usize;
+
+/// The stable identifier of an edge slot.
+pub(crate) type StepEdgeIndex = usize;
+
+/// The direction of edges to look at from a node's perspective.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Direction {
+    /// Edges from this node towards its parents.
+    Outgoing,
+    /// Edges from children towards this node.
+    Incoming,
+}
+
+#[derive(Debug, Clone)]
+struct EdgeRecord {
+    source: StepGraphIndex,
+    target: StepGraphIndex,
+    weight: Edge,
+}
+
+/// A borrowed view of one edge, mirroring the accessors call sites used on petgraph's edge
+/// references.
+#[derive(Clone, Copy)]
+pub(crate) struct StepEdgeRef<'graph> {
+    id: StepEdgeIndex,
+    source: StepGraphIndex,
+    target: StepGraphIndex,
+    weight: &'graph Edge,
+}
+
+impl<'graph> StepEdgeRef<'graph> {
+    /// The edge's stable id, usable with [`StepGraph::remove_edge()`].
+    pub(crate) fn id(&self) -> StepEdgeIndex {
+        self.id
+    }
+
+    /// The node this edge points away from (the child side).
+    pub(crate) fn source(&self) -> StepGraphIndex {
+        self.source
+    }
+
+    /// The node this edge points at (the parent side).
+    pub(crate) fn target(&self) -> StepGraphIndex {
+        self.target
+    }
+
+    /// The edge payload.
+    pub(crate) fn weight(&self) -> &'graph Edge {
+        self.weight
+    }
+}
+
+/// The rebase step graph: an arena of [`Step`]s with ordered parent edges.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StepGraph {
+    nodes: Vec<Step>,
+    edges: Vec<Option<EdgeRecord>>,
+    outgoing: Vec<Vec<StepEdgeIndex>>,
+    incoming: Vec<Vec<StepEdgeIndex>>,
+}
+
+impl StepGraph {
+    /// An empty graph.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add `step` and return its stable id.
+    pub(crate) fn add_node(&mut self, step: Step) -> StepGraphIndex {
+        self.nodes.push(step);
+        self.outgoing.push(Vec::new());
+        self.incoming.push(Vec::new());
+        self.nodes.len() - 1
+    }
+
+    /// Add an edge from `source` to `target` and return its stable id.
+    pub(crate) fn add_edge(
+        &mut self,
+        source: StepGraphIndex,
+        target: StepGraphIndex,
+        weight: Edge,
+    ) -> StepEdgeIndex {
+        let id = self.edges.len();
+        self.edges.push(Some(EdgeRecord {
+            source,
+            target,
+            weight,
+        }));
+        self.outgoing[source].push(id);
+        self.incoming[target].push(id);
+        id
+    }
+
+    /// Remove the edge with `id`, returning its payload if it was still present.
+    pub(crate) fn remove_edge(&mut self, id: StepEdgeIndex) -> Option<Edge> {
+        let record = self.edges.get_mut(id)?.take()?;
+        self.outgoing[record.source].retain(|&e| e != id);
+        self.incoming[record.target].retain(|&e| e != id);
+        Some(record.weight)
+    }
+
+    /// All node ids, ascending.
+    pub(crate) fn node_indices(&self) -> impl Iterator<Item = StepGraphIndex> + '_ {
+        0..self.nodes.len()
+    }
+
+    /// The edges touching `node` in `direction`, newest-first.
+    pub(crate) fn edges_directed(
+        &self,
+        node: StepGraphIndex,
+        direction: Direction,
+    ) -> EdgesDirected<'_> {
+        let list = match direction {
+            Direction::Outgoing => &self.outgoing[node],
+            Direction::Incoming => &self.incoming[node],
+        };
+        EdgesDirected {
+            graph: self,
+            ids: list.iter().rev(),
+        }
+    }
+
+    /// The outgoing (parent-wards) edges of `node`, newest-first.
+    pub(crate) fn edges(&self, node: StepGraphIndex) -> EdgesDirected<'_> {
+        self.edges_directed(node, Direction::Outgoing)
+    }
+
+    /// All live edges, in edge-id order.
+    pub(crate) fn edge_references(&self) -> impl Iterator<Item = StepEdgeRef<'_>> + '_ {
+        self.edges
+            .iter()
+            .enumerate()
+            .filter_map(|(id, slot)| slot.as_ref().map(|_| self.edge_ref(id)))
+    }
+
+    /// The nodes with no edges in `direction`, ascending.
+    pub(crate) fn externals(
+        &self,
+        direction: Direction,
+    ) -> impl Iterator<Item = StepGraphIndex> + '_ {
+        let lists = match direction {
+            Direction::Outgoing => &self.outgoing,
+            Direction::Incoming => &self.incoming,
+        };
+        lists
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, edges)| edges.is_empty().then_some(idx))
+    }
+
+    fn edge_ref(&self, id: StepEdgeIndex) -> StepEdgeRef<'_> {
+        let record = self.edges[id]
+            .as_ref()
+            .expect("BUG: adjacency lists only hold live edge ids");
+        StepEdgeRef {
+            id,
+            source: record.source,
+            target: record.target,
+            weight: &record.weight,
+        }
+    }
+}
+
+impl std::ops::Index<StepGraphIndex> for StepGraph {
+    type Output = Step;
+    fn index(&self, index: StepGraphIndex) -> &Self::Output {
+        &self.nodes[index]
+    }
+}
+
+impl std::ops::IndexMut<StepGraphIndex> for StepGraph {
+    fn index_mut(&mut self, index: StepGraphIndex) -> &mut Self::Output {
+        &mut self.nodes[index]
+    }
+}
+
+/// A cloneable iterator over the edges touching one node, newest-first.
+#[derive(Clone)]
+pub(crate) struct EdgesDirected<'graph> {
+    graph: &'graph StepGraph,
+    ids: std::iter::Rev<std::slice::Iter<'graph, StepEdgeIndex>>,
+}
+
+impl<'graph> Iterator for EdgesDirected<'graph> {
+    type Item = StepEdgeRef<'graph>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.ids.next().map(|&id| self.graph.edge_ref(id))
+    }
+}
