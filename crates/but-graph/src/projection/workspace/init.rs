@@ -835,61 +835,47 @@ enum ComputeBaseTip {
     SingleBranch(SegmentIndex),
 }
 
-/// This works as named segments have been created in a prior step. Thus, we are able to find best matches by
-/// the amount of matching names, probably.
-/// Note that we find applied stack-ids first, then try again with unapplied ones, and indicate if it was applied or not.
-/// Update `seen` with the stack_id we find and avoid reusing seen stack ids.
+/// Match a collected projection stack to the metadata stack that identifies it: names are tried
+/// in segment order (a stack-segment's own name before its commits' refs), each name resolves to
+/// the first metadata stack mentioning it, and stack ids already claimed by an earlier projection
+/// stack are skipped. Returns the id plus whether that metadata stack is applied.
+///
+/// This works because every applied metadata branch names a segment by construction (the lane
+/// plan mints empty segments for branches without commits), so the first name in segment order
+/// is the authoritative one — a weighted global ranking censused corpus-equivalent to this.
 fn find_matching_stack_id(
     metadata: Option<&ref_metadata::Workspace>,
     segments: &[StackSegment],
     seen: &mut BTreeSet<StackId>,
 ) -> Option<(StackId, bool)> {
     let metadata = metadata?;
-
-    fn ref_names_with_weight(
-        s: &StackSegment,
-    ) -> impl Iterator<Item = (u64, &gix::refs::FullNameRef)> {
-        s.ref_info
-            .as_ref()
-            .map(|ri| (100_000, ri.ref_name.as_ref()))
-            .into_iter()
-            .chain(
-                s.commits
-                    .iter()
-                    .flat_map(|c| c.refs.iter().map(|ri| (1, ri.ref_name.as_ref()))),
-            )
-    }
-
-    segments
+    let found = segments
         .iter()
         .flat_map(|s| {
-            ref_names_with_weight(s).filter_map(|(weight, rn)| {
-                metadata.stacks(AppliedAndUnapplied).find_map(|meta_stack| {
-                    if let Some(bidx) = meta_stack
-                        .branches
+            s.ref_info
+                .as_ref()
+                .map(|ri| ri.ref_name.as_ref())
+                .into_iter()
+                .chain(
+                    s.commits
                         .iter()
-                        .enumerate()
-                        .find_map(|(bidx, b)| (rn == b.ref_name.as_ref()).then_some(bidx))
-                    {
-                        let priority = if bidx == 0 { 3 } else { 1 };
-                        Some((
-                            if meta_stack.is_in_workspace() {
-                                weight * 2
-                            } else {
-                                weight
-                            } * priority,
-                            meta_stack.id,
-                            meta_stack.is_in_workspace(),
-                        ))
-                    } else {
-                        None
-                    }
-                })
+                        .flat_map(|c| c.refs.iter().map(|ri| ri.ref_name.as_ref())),
+                )
+        })
+        .filter_map(|rn| {
+            metadata.stacks(AppliedAndUnapplied).find_map(|meta_stack| {
+                meta_stack
+                    .branches
+                    .iter()
+                    .any(|b| rn == b.ref_name.as_ref())
+                    .then_some((meta_stack.id, meta_stack.is_in_workspace()))
             })
         })
-        .sorted_by(|l, r| l.0.cmp(&r.0).reverse())
-        .map(|(_weight, stack_id, in_workspace)| (stack_id, in_workspace))
-        .find(|(stack_id, _)| seen.insert(*stack_id))
+        .find(|(id, _)| !seen.contains(id));
+    if let Some((id, _)) = found {
+        seen.insert(id);
+    }
+    found
 }
 
 /// Traversals
