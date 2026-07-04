@@ -141,10 +141,9 @@ fn adding_a_valid_edge_is_successful() -> Result<()> {
     ●    2fc288c Merge branch 'B' into with-inner-merge
     ├─╮
     ◎ │  refs/heads/A
-    ● │    add59d2 A: 10 lines on top
-    ├───╮
-    │ ◎ │  refs/heads/B
-    │ ├─╯
+    ● │  add59d2 A: 10 lines on top
+    ├─╮
+    │ ◎  refs/heads/B
     │ ●  984fd1c C: new file with 10 lines
     ├─╯
     ◎  refs/heads/main

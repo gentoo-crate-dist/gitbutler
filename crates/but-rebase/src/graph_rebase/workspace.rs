@@ -818,14 +818,16 @@ fn attach_flooded_refs(
 ) {
     let mut additions: Vec<StepGraphIndex> = graph
         .anchored_refs()
-        .filter_map(|(node, stored)| {
+        .filter_map(|(node, _stored)| {
             // A chain any in-region leg approaches was flooded through before the walk
             // stopped at a boundary — membership is broader than lane assignment, which
             // stays arity- and ambiguity-aware in `divide_workspace_into_stacks`. Co-located
             // chain members all share the same via (`legs_into_pick`), so a lower member is
             // attached with the whole chain, while a root ref stacked above (its own via
             // empty, e.g. a remote ref over the tip) stays out.
-            let followed = stored.via.iter().any(|(child, _)| nodes.contains(child));
+            let followed = positions::ref_via(graph, node)
+                .iter()
+                .any(|(child, _)| nodes.contains(child));
             followed.then_some(node)
         })
         .collect();
@@ -833,9 +835,10 @@ fn attach_flooded_refs(
         && let Some(entry_stored) = graph.anchor_of(entry)
     {
         additions.push(entry);
+        let entry_via = positions::ref_via(graph, entry);
         additions.extend(graph.anchored_refs().filter_map(|(node, stored)| {
             (stored.anchor == entry_stored.anchor
-                && stored.via == entry_stored.via
+                && positions::ref_via(graph, node) == entry_via
                 && stored.rank < entry_stored.rank)
                 .then_some(node)
         }));

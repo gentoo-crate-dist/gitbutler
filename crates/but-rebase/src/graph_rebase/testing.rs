@@ -13,7 +13,8 @@ use renderdag::{Ancestor, GraphRowRenderer, Renderer as _};
 #[cfg(test)]
 use crate::graph_rebase::Edge;
 use crate::graph_rebase::{
-    Editor, Pick, Selector, Step, StepGraph, StepGraphIndex, SuccessfulRebase, workspace::Subgraph,
+    Editor, Pick, Selector, Step, StepGraph, StepGraphIndex, SuccessfulRebase, positions,
+    workspace::Subgraph,
 };
 
 /// An extension trait that adds debugging output for graphs
@@ -129,7 +130,7 @@ type ChainKey = (StepGraphIndex, Vec<(StepGraphIndex, usize)>);
 fn chains(graph: &StepGraph) -> HashMap<ChainKey, Vec<StepGraphIndex>> {
     let mut out: HashMap<_, Vec<(usize, StepGraphIndex)>> = HashMap::new();
     for (node, stored) in graph.anchored_refs() {
-        out.entry((stored.anchor, stored.via.clone()))
+        out.entry((stored.anchor, positions::ref_via(graph, node)))
             .or_default()
             .push((stored.rank, node));
     }
@@ -156,9 +157,10 @@ fn find_heads(graph: &StepGraph) -> Vec<StepGraphIndex> {
         .node_indices()
         .filter(|idx| match graph.anchor_of(*idx) {
             Some(stored) => {
-                stored.via.is_empty()
+                let via = positions::ref_via(graph, *idx);
+                via.is_empty()
                     && chains
-                        .get(&(stored.anchor, stored.via.clone()))
+                        .get(&(stored.anchor, via))
                         .and_then(|members| members.last())
                         == Some(idx)
             }
@@ -177,7 +179,7 @@ fn get_sorted_parents(graph: &StepGraph, node: StepGraphIndex) -> Vec<StepGraphI
     let chains = chains(graph);
     if let Some(stored) = graph.anchor_of(node) {
         let chain = chains
-            .get(&(stored.anchor, stored.via.clone()))
+            .get(&(stored.anchor, positions::ref_via(graph, node)))
             .map(Vec::as_slice)
             .unwrap_or_default();
         let below = chain

@@ -11,6 +11,7 @@
 //! a chain's approaching child is unique whenever it exists, and every chain resolves downward
 //! to a pick unless the graph has none below (unborn).
 
+use crate::graph_rebase::step_graph::ViaKind;
 use crate::graph_rebase::{Direction, Step, StepGraph, StepGraphIndex};
 
 /// Where one ref sits, expressed over commits instead of node topology.
@@ -37,9 +38,62 @@ pub(crate) fn ref_position(graph: &StepGraph, ref_node: StepGraphIndex) -> Optio
     Some(RefPosition {
         anchor: resolve_to_pick(graph, stored.anchor),
         rank: stored.rank,
-        via: stored.via.clone(),
+        via: ref_via(graph, ref_node),
         ambiguous: stored.ambiguous,
     })
+}
+
+/// Classify a fresh `via` against the picks currently feeding its anchor into a stored
+/// [`ViaKind`]: empty is a chain root, the whole leg set is [`ViaKind::AllLegs`], and any proper
+/// subset is a merge lane keyed by its parent-slots. Called at write time (in `set_anchor`),
+/// while the `via` still matches the live edges.
+pub(crate) fn classify_via(
+    via: &[(StepGraphIndex, usize)],
+    legs: &[(StepGraphIndex, usize)],
+) -> ViaKind {
+    if via.is_empty() {
+        return ViaKind::Root;
+    }
+    let via_set: std::collections::HashSet<_> = via.iter().copied().collect();
+    let legs_set: std::collections::HashSet<_> = legs.iter().copied().collect();
+    if via_set == legs_set {
+        return ViaKind::AllLegs;
+    }
+    let mut slots: Vec<usize> = via.iter().map(|(_, slot)| *slot).collect();
+    slots.sort_unstable();
+    slots.dedup();
+    ViaKind::Lane(slots)
+}
+
+/// Reconstruct the current `via` — the `(source-pick, slot)` legs feeding a position — from its
+/// [`ViaKind`] against `anchor_pick`'s live edges. The source-pick node id is read fresh here, so
+/// a leg that was tombstoned or re-slotted after the kind was authored never leaks out stale.
+pub(crate) fn derive_via(
+    graph: &StepGraph,
+    anchor_pick: StepGraphIndex,
+    kind: &ViaKind,
+) -> Vec<(StepGraphIndex, usize)> {
+    match kind {
+        ViaKind::Root => Vec::new(),
+        ViaKind::AllLegs => legs_into_pick(graph, anchor_pick),
+        ViaKind::Lane(slots) => legs_into_pick(graph, anchor_pick)
+            .into_iter()
+            .filter(|(_, slot)| slots.contains(slot))
+            .collect(),
+    }
+}
+
+/// The current `via` of the reference at `node`, derived from its authored [`ViaKind`] against
+/// the live pick edges — the read path that replaces reading `StoredAnchor::via` directly, so a
+/// stale stored leg list never reaches a consumer.
+pub(crate) fn ref_via(graph: &StepGraph, node: StepGraphIndex) -> Vec<(StepGraphIndex, usize)> {
+    let (Some(stored), Some(kind)) = (graph.anchor_of(node), graph.ref_kind(node)) else {
+        return Vec::new();
+    };
+    match resolve_to_pick(graph, stored.anchor) {
+        Some(pick) => derive_via(graph, pick, &kind),
+        None => Vec::new(),
+    }
 }
 
 /// Derive the position of the reference at `ref_node` from CHAIN TOPOLOGY — only meaningful
@@ -388,4 +442,8 @@ pub(crate) fn initialize_anchors_and_strip_ref_edges(graph: &mut StepGraph) {
     for (source, target, weight) in to_add {
         graph.add_edge(source, target, weight);
     }
+    // Anchors were set above against the pre-strip topology (chain legs still targeted the ref
+    // nodes); now that edges point straight at the picks, re-author every kind against the final
+    // legs so `AllLegs`/`Lane` reflect the stripped graph.
+    graph.reauthor_ref_kinds();
 }

@@ -61,6 +61,25 @@ impl<'graph> StepEdgeRef<'graph> {
     }
 }
 
+/// How a reference's approaching legs (its `via`) relate to the picks that currently feed its
+/// anchor — the part of a position that plain edge topology can't recover once reference edges
+/// are stripped. Derived from the fresh `via` at write time and re-resolved against the CURRENT
+/// pick edges at read time, so it survives edge churn that leaves a stored `(source-pick, slot)`
+/// list stale.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) enum ViaKind {
+    /// Nothing descends into this position — a chain root (`via = []`): a remote ref stacked
+    /// above a tip, an empty single-branch top.
+    #[default]
+    Root,
+    /// Every leg into the anchor feeds this position — a plain chain, or a merge chain both
+    /// lanes converge on (`via = legs_into_pick(anchor)`).
+    AllLegs,
+    /// Only the legs entering at these parent-slots feed this position — one lane of a
+    /// dup-parent merge (`via = legs_into_pick(anchor)` filtered to these slots).
+    Lane(Vec<usize>),
+}
+
 /// Where a reference sits, stored explicitly: references are POSITIONS, not topology.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredAnchor {
@@ -91,6 +110,10 @@ pub(crate) struct StepGraph {
     incoming: Vec<Vec<StepEdgeIndex>>,
     /// `Some` exactly for reference nodes.
     anchors: Vec<Option<StoredAnchor>>,
+    /// The derived-at-write [`ViaKind`] for each reference, parallel to `anchors` and authored
+    /// by [`StepGraph::set_anchor`]. Consumers read `via` through it (see `positions::ref_via`);
+    /// the stored `StoredAnchor::via` is only the write-time input it is classified from.
+    ref_kinds: Vec<Option<ViaKind>>,
 }
 
 impl StepGraph {
@@ -105,6 +128,7 @@ impl StepGraph {
         self.outgoing.push(Vec::new());
         self.incoming.push(Vec::new());
         self.anchors.push(None);
+        self.ref_kinds.push(None);
         self.nodes.len() - 1
     }
 
@@ -113,9 +137,35 @@ impl StepGraph {
         self.anchors.get(node).cloned().flatten()
     }
 
-    /// Set (or clear) the stored position of the reference at `node`.
+    /// Set (or clear) the stored position of the reference at `node`, authoring its [`ViaKind`]
+    /// from the fresh `via` against the CURRENT pick edges. Callers keep supplying `via` as they
+    /// always did; the kind is what consumers read, so authoring here (right after the op's edge
+    /// changes) captures each lane while the legs are still current.
     pub(crate) fn set_anchor(&mut self, node: StepGraphIndex, anchor: Option<StoredAnchor>) {
+        let kind = anchor.as_ref().map(|a| {
+            let legs = match crate::graph_rebase::positions::resolve_to_pick(self, a.anchor) {
+                Some(pick) => crate::graph_rebase::positions::legs_into_pick(self, pick),
+                None => Vec::new(),
+            };
+            crate::graph_rebase::positions::classify_via(&a.via, &legs)
+        });
+        self.ref_kinds[node] = kind;
         self.anchors[node] = anchor;
+    }
+
+    /// The [`ViaKind`] authored for the reference at `node`, if it is a positioned reference.
+    pub(crate) fn ref_kind(&self, node: StepGraphIndex) -> Option<ViaKind> {
+        self.ref_kinds.get(node).cloned().flatten()
+    }
+
+    /// Re-author every reference's [`ViaKind`] against the current pick edges — used after a
+    /// construction pass that changes edges AFTER anchors were set (the creation strip), so the
+    /// kinds reflect the final leg topology rather than the intermediate one.
+    pub(crate) fn reauthor_ref_kinds(&mut self) {
+        let refs: Vec<_> = self.anchored_refs().collect();
+        for (node, stored) in refs {
+            self.set_anchor(node, Some(stored));
+        }
     }
 
     /// All positioned references, ascending by node id.

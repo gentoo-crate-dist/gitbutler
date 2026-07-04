@@ -1839,14 +1839,13 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             return Ok(());
         }
         // An edge into a reference enters its chain: the pick edge goes to the anchor and the
-        // reference (with members below it) gains the new leg.
-        let parent_pick = match self.graph.anchor_of(parent.id) {
-            Some(stored) => {
-                let anchor_pick = positions::resolve_to_pick(&self.graph, stored.anchor)
-                    .context("Reference target should resolve to a commit")?;
-                positions::join_chain_at(&mut self.graph, parent.id, (child.id, desired_order));
-                anchor_pick
-            }
+        // reference (with members below it) gains the new leg. Add the pick edge FIRST so that
+        // `join_chain_at`'s `set_anchor` authors the chain's `ViaKind` against the final legs
+        // (the new leg included), not the pre-edge topology.
+        let parent_ref = self.graph.anchor_of(parent.id);
+        let parent_pick = match &parent_ref {
+            Some(stored) => positions::resolve_to_pick(&self.graph, stored.anchor)
+                .context("Reference target should resolve to a commit")?,
             None => parent.id,
         };
         self.graph.add_edge(
@@ -1856,6 +1855,9 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 order: desired_order,
             },
         );
+        if parent_ref.is_some() {
+            positions::join_chain_at(&mut self.graph, parent.id, (child.id, desired_order));
+        }
 
         Ok(())
     }
