@@ -699,8 +699,8 @@ impl Graph {
     /// bound computation. Workspace metadata still wins for configured
     /// `target_ref` and stored `target_commit_id`; these tips are fallback
     /// target context derived from traversal.
-    // TDOO: `traversal_tips` include the tips discovered in workspace metadata already, so the project code
-    //       doesn't have to access them specifically.
+    // TODO: `traversal_tips` include the tips discovered in workspace metadata already, so the projection
+    //       wouldn't have to access metadata tips specifically.
     fn workspace_projection_target_remote_tips(&self) -> impl Iterator<Item = &crate::init::Tip> {
         self.traversal_tips
             .iter()
