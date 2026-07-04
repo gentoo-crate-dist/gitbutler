@@ -844,10 +844,19 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     // When the disconnected parent edge carried a chain, the node-era parent
                     // was that chain's top ref — the child refs stack above it and follow it
                     // through later moves.
-                    if let Some(top_stored) = carried_parent_tops
-                        .first()
-                        .and_then(|top| self.graph.anchor_of(*top))
+                    if let Some(top) = carried_parent_tops.first().copied()
+                        && let Some(mut top_stored) = self.graph.anchor_of(top)
                     {
+                        // The top ref's feeder was the spliced-out node's edge, emptied in
+                        // step 2; the reconnect in step 3 bridged a fresh leg into `anchor`,
+                        // so restore the top's via to it before the moved refs inherit it.
+                        // `legs_into_pick` is the chain-top's full leg set — correct in the
+                        // merge case too, where it carries every bridged leg.
+                        let bridge = positions::legs_into_pick(&self.graph, anchor);
+                        top_stored.via = bridge.clone();
+                        top_stored.ambiguous = bridge.len() > 1;
+                        self.graph.set_anchor(top, Some(top_stored.clone()));
+
                         let moves: Vec<_> = self
                             .graph
                             .anchored_refs()

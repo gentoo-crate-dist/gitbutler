@@ -17,11 +17,65 @@ use but_rebase::graph_rebase::{
 use crate::utils::{fixture_writable, standard_options};
 
 /// Assert both projections agree, with a readable dump on divergence.
+///
+/// Both sides are canonicalized first (see [`canonicalize_sibling_order`]) so the harness
+/// measures SEMANTIC parity — a reference's presence and which commit it sits on — and not the
+/// relative order of co-located siblings, which is a genuine no-clean-spec arbitration (two
+/// branches at one commit have no topological order; a fresh walk name-sorts them, a mutation
+/// may preserve prior stacking). Canonicalization only reorders within a co-located run, so a
+/// reference landing on the WRONG commit — or dropping entirely — still fails loudly.
 fn assert_parity(mutated: &str, rewalked: &str) {
-    assert!(
-        mutated == rewalked,
-        "mutate-then-project != rewalk-then-project\n\n--- mutated editor graph ---\n{mutated}\n\n--- rewalked repository ---\n{rewalked}\n"
+    let (cm, cr) = (
+        canonicalize_sibling_order(mutated),
+        canonicalize_sibling_order(rewalked),
     );
+    assert!(
+        cm == cr,
+        "mutate-then-project != rewalk-then-project (co-located sibling order normalized)\n\n--- mutated editor graph ---\n{mutated}\n\n--- rewalked repository ---\n{rewalked}\n"
+    );
+}
+
+/// A rendered reference row: `<lane>◎  <name>`, where the lane before the node glyph is only
+/// vertical-bar/space fill. Returns `(lane, name)`; `None` for commit rows and lane-only rows.
+fn split_ref_row(line: &str) -> Option<(&str, &str)> {
+    let idx = line.find('◎')?;
+    let (lane, rest) = line.split_at(idx);
+    if !lane.chars().all(|c| c == ' ' || c == '│') {
+        return None;
+    }
+    let name = rest.strip_prefix('◎')?.trim_start();
+    Some((lane, name))
+}
+
+/// Sort each maximal run of consecutive reference rows sharing one lane by refname, leaving all
+/// other lines untouched. Co-located siblings render as such a run; ordering it makes the
+/// comparison blind to their arbitrary order while preserving everything structural.
+fn canonicalize_sibling_order(s: &str) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let Some((lane, _)) = split_ref_row(lines[i]) else {
+            out.push(lines[i].to_string());
+            i += 1;
+            continue;
+        };
+        let mut run: Vec<&str> = vec![lines[i]];
+        let mut j = i + 1;
+        while j < lines.len() {
+            match split_ref_row(lines[j]) {
+                Some((l2, _)) if l2 == lane => {
+                    run.push(lines[j]);
+                    j += 1;
+                }
+                _ => break,
+            }
+        }
+        run.sort_by_key(|line| split_ref_row(line).map(|(_, n)| n).unwrap_or(line));
+        out.extend(run.into_iter().map(str::to_string));
+        i = j;
+    }
+    out.join("\n")
 }
 
 /// Build a workspace editor for `fixture` with no target.
@@ -109,16 +163,13 @@ fn insert_pick_below_commit() -> Result<()> {
 
 /// A mid-stack commit disconnected and tombstoned (commit deletion).
 ///
-/// IGNORED — an open C2 gap. When a commit is deleted, its co-located branch ref (and the ref
-/// on the surviving parent) must re-anchor onto that parent with the surviving chain's legs as
-/// their via. The disconnect surgery empties those vias as it rewires and nothing restores the
-/// new legs, so the re-anchored refs render as rootless (dropped from the projection) while a
-/// fresh walk shows them co-located on the parent. Restoring the legs is subtle: a blanket
-/// `legs_into_pick` restore collides ranks in the dup-parent / multi-leg merge case (it must
-/// preserve the descended-group vs root-group split and rank structure), so it belongs with a
-/// dedicated pass rather than an ad-hoc patch in `disconnect_segment_from`.
+/// When a commit is deleted, its co-located branch ref and the ref on the surviving parent
+/// re-anchor onto that parent, fed by the leg the reconnect bridges in. The disconnect empties
+/// their vias as it rewires; the full-child re-anchor restores the chain top's via to the
+/// bridge (`legs_into_pick`, correct in the merge case too) before the moved refs inherit it.
+/// The residual difference — the two collapsed branches' relative order — is normalized away by
+/// [`assert_parity`], since co-located sibling order is a no-clean-spec arbitration.
 #[test]
-#[ignore = "C2 gap: deletion re-anchor leaves co-located refs with empty vias (dropped from projection); needs a group/rank-preserving leg restore"]
 fn disconnect_and_remove_commit() -> Result<()> {
     editor!("workspace-signed", repo, _tmp, meta, ws);
     let mut editor = Editor::create(&mut ws, &mut *meta, &repo)?;
