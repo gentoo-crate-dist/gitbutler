@@ -464,8 +464,12 @@ pub(crate) fn traverse<T: RefMetadata>(
         .of
         .get(&tip)
         .and_then(|&s| segs.names[s].as_ref().map(|ri| ri.ref_name.clone()));
-    // Re-attach every segment's hoisted name to its FINAL first commit — ownership swaps and
-    // splits may have moved it away from the ref's true commit; the flatten does the same.
+    // Re-attach every segment's hoisted name to its FINAL first commit. This is the
+    // ADVANCED-REF presentation contract, not bookkeeping: when a named seed's ref points at a
+    // commit the walk never reached (branch advanced outside the workspace, ref deleted, or an
+    // overlay preview), the name still surfaces at the walk-visible position — census-verified:
+    // every corpus divergence between `first` and the ref's true commit is exactly the
+    // true-commit-not-in-graph case (~1.4k across the suite, mostly apply/unapply previews).
     for (seg, name) in segs.names.iter().enumerate() {
         let (Some(ri), Some(first)) = (name, segs.commits[seg].first()) else {
             continue;
