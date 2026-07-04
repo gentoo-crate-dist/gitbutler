@@ -115,17 +115,6 @@ impl Graph {
         }
     }
 
-    /// Like [`Self::relation_between()`], but takes object ids of commits.
-    pub fn relation_between_by_commit_id(
-        &self,
-        commit_a: gix::ObjectId,
-        commit_b: gix::ObjectId,
-    ) -> anyhow::Result<SegmentRelation> {
-        let a = self.segment_id_by_commit_id(commit_a)?;
-        let b = self.segment_id_by_commit_id(commit_b)?;
-        Ok(self.relation_between(a, b))
-    }
-
     /// Compute the merge-base just like Git would between segments `a` and `b`, but finding all possible merge-bases of a walk,
     /// which are then truncated to the highest merge-base that includes all the other merge-bases.
     ///
@@ -148,20 +137,6 @@ impl Graph {
 
         let result = self.remove_redundant(&bases, &mut flags, &generations);
         result.first().copied()
-    }
-
-    /// Like [`Self::find_merge_base()`], but takes object ids of commits,
-    /// returning the id of the commit that is the merge-base.
-    pub fn find_merge_base_by_commit_id(
-        &self,
-        commit_a: gix::ObjectId,
-        commit_b: gix::ObjectId,
-    ) -> anyhow::Result<Option<gix::ObjectId>> {
-        let a = self.segment_id_by_commit_id(commit_a)?;
-        let b = self.segment_id_by_commit_id(commit_b)?;
-        self.find_merge_base(a, b)
-            .map(|base| self.commit_id_by_segment(base))
-            .transpose()
     }
 
     /// Return all commits reachable from `included`, but not reachable from `excluded`.
@@ -418,21 +393,6 @@ impl Graph {
         segments.try_fold(first, |base, segment| self.find_merge_base(base, segment))
     }
 
-    /// Like [`Self::find_merge_base_octopus()`], but works with object ids of `commits`,
-    /// returning the id of the commit that is the merge-base.
-    pub fn find_merge_base_octopus_by_commit_id(
-        &self,
-        commits: impl IntoIterator<Item = gix::ObjectId>,
-    ) -> anyhow::Result<Option<gix::ObjectId>> {
-        let mut segments = Vec::new();
-        for commit_id in commits {
-            segments.push(self.segment_id_by_commit_id(commit_id)?);
-        }
-        self.find_merge_base_octopus(segments)
-            .map(|base| self.commit_id_by_segment(base))
-            .transpose()
-    }
-
     /// Return `(commit, owner_sidx_of_commit)` for `start` as long as it can unambiguously be attributed
     /// to belong to the segment at `start` even if it doesn't own it.
     ///
@@ -482,14 +442,6 @@ impl Graph {
             "Could not resolve empty segment as traversal ended, there were only empty segments or none at all"
         );
         None
-    }
-
-    fn commit_id_by_segment(&self, segment: SegmentIndex) -> anyhow::Result<gix::ObjectId> {
-        self.tip_skip_empty(segment)
-            .map(|commit| commit.id)
-            .with_context(|| {
-                format!("BUG: Segment {segment:?} does not contain a reachable tip commit")
-            })
     }
 
     /// Return the id of the segment that owns `commit_id`, or error if it wasn't found.
