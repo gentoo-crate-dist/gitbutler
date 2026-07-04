@@ -334,11 +334,6 @@ fn merge_base_apis_can_resolve_segments_by_first_commit_id() -> anyhow::Result<(
     let c = segment_id_by_ref_name(&graph, "refs/heads/C")?;
     let main = segment_id_by_ref_name(&graph, "refs/heads/main")?;
 
-    let merged_id = graph[merged].tip().expect("commit");
-    let a_id = graph[a].tip().expect("commit");
-    let c_id = graph[c].tip().expect("commit");
-    let main_id = graph[main].tip().expect("commit");
-
     assert_eq!(graph.relation_between(a, merged), SegmentRelation::Ancestor);
     assert_eq!(graph.find_merge_base(merged, a), Some(a));
     assert_eq!(graph.find_merge_base_octopus([a, c, merged]), Some(main));

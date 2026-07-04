@@ -35,9 +35,7 @@ pub(crate) enum Downgrade {
 /// `WorkspaceFrame` identifies the workspace tip, entrypoint relationship,
 /// target-side traversal context, and lower bound. Final projection turns it
 /// into [`WorkspaceState`] by collecting stacks and then applying display-only
-/// pruning/enrichment. Reconciliation turns it into
-/// [`WorkspaceReconciliationInput`] by collecting the same raw stack paths but
-/// keeping only the fields needed to reshape graph segments before projection.
+/// pruning/enrichment.
 struct WorkspaceFrame {
     /// Workspace classifier derived from the entrypoint or containing workspace segment.
     kind: WorkspaceKind,
