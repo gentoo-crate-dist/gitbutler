@@ -2848,8 +2848,6 @@ fn segment_by_commit(sg: &SegmentGraph, commit: gix::ObjectId) -> Option<Segment
     })
 }
 
-/// All ancestors of `tip` (inclusive), over all parents.
-
 /// The workspace's LOWER BOUND: the nearest commit common to the target and EVERY workspace lane
 /// (the walk's `compute_lowest_base` — the base all stacks and the target converge on). BFS from the
 /// workspace over all parents, so the nearest such commit wins.

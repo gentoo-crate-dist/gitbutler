@@ -194,7 +194,7 @@ fn recurse_segment(
                     maybe_sibling = segment
                         .remote_tracking_branch_segment_id
                         .or(segment.sibling_segment_id)
-                        .map_or_else(String::new, |sid| format!(" →:{}:", sid))
+                        .map_or_else(String::new, |sid| format!(" →:{sid}:"))
                 ))
                 .unwrap_or_default()
         )
