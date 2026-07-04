@@ -891,10 +891,6 @@ impl Graph {
     /// reaches the entrypoint. Without a hint for the current source commit, the preferred path
     /// falls back to the first-parent edge.
     ///
-    /// The `stop` signal is ignored for unnamed segments (no `ref_info`) whose `sibling_segment_id`
-    /// points to a segment already collected in the output. This prevents the traversal from stopping
-    /// at an ancestor-link segment that merely reconnects to a workspace branch we are already traversing.
-    ///
     /// Note that the traversal assumes as well-segmented graph without cycles.
     fn collect_first_parent_segments_until<'a>(
         &'a self,
@@ -908,12 +904,7 @@ impl Graph {
             start.id,
             preferred_next_segment_by_commit,
             |next| {
-                if stop(next)
-                    && !(next.ref_info.is_none()
-                        && next
-                            .sibling_segment_id
-                            .is_some_and(|sid| out.contains(&sid)))
-                {
+                if stop(next) {
                     stopped_at = Some(next.id);
                     return true;
                 }
@@ -1269,22 +1260,14 @@ impl WorkspaceState {
             })
             .collect();
         for (remote_tracking_ref_name, remote_sidx) in remote_refs {
-            let mut may_take_commits_from_first_remote = graph[remote_sidx].commits.is_empty();
             graph.visit_all_segments_including_start_until(remote_sidx, Direction::Outgoing, |s| {
+                // Stop at non-remote commits, and never 'steal' commits from other known remote
+                // segments: remote segments are minted from the plan's claimed set, so a commit
+                // reachable from two remotes has exactly one deliberate owner.
                 let prune = !s.commits.iter().all(|c| c.flags.is_remote())
-                    // Do not 'steal' commits from other known remote segments while they are officially connected,
-                    // unless we started out empty. That means ambiguous ownership, as multiple remotes point
-                    // to the same commit.
-                    || {
-                    let mut prune = s.id != remote_sidx
+                    || (s.id != remote_sidx
                         && s.ref_name()
-                        .is_some_and(|orn| orn.category() == Some(Category::RemoteBranch));
-                    if prune && may_take_commits_from_first_remote {
-                        prune = false;
-                        may_take_commits_from_first_remote = false;
-                    }
-                    prune
-                };
+                            .is_some_and(|orn| orn.category() == Some(Category::RemoteBranch)));
                 if prune {
                     // See if this segment links to a commit we know as local, and mark it accordingly,
                     // along with all segments in that stack.
@@ -1344,16 +1327,9 @@ impl WorkspaceState {
                     continue;
                 };
 
-                // All-parents walk: collect commits from *fully*-remote segments.
-                // Stop at segments that contain non-remote commits or that belong
-                // to another remote-branch, unless this segment is empty and
-                // the first reachable remote commits can't be uniquely attributed.
-                // This happens if multiple remote tracking branches point to the same commit,
-                // which is when ours might be a virtual segment because it was traversed after
-                // the segment that was prioritized to own the commit.
-                // So `may_take_from_first_remote` allows us to pretend that these commits
-                // belong to our remote (which they do as well from a pure graph perspective).
-                let mut may_take_from_first_remote = graph[rsidx].commits.is_empty();
+                // All-parents walk: collect commits from *fully*-remote segments, stopping
+                // at segments with non-remote commits or ones owned by another remote branch
+                // (ownership is unambiguous — remote segments are minted from the claimed set).
                 let mut remote_commits = Vec::new();
                 graph.visit_all_segments_including_start_until(
                     rsidx,
@@ -1367,11 +1343,7 @@ impl WorkspaceState {
                                 .ref_name()
                                 .is_some_and(|rn| rn.category() == Some(Category::RemoteBranch))
                         {
-                            if may_take_from_first_remote {
-                                may_take_from_first_remote = false;
-                            } else {
-                                return true;
-                            }
+                            return true;
                         }
                         for commit in &segment.commits {
                             remote_commits.push(StackCommit::from_graph_commit(commit));
