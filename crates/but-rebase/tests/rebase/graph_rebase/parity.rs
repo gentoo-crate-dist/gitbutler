@@ -203,3 +203,166 @@ fn noop_rebase_with_empty_stack() -> Result<()> {
     assert_parity(&mutated, &rewalked);
     Ok(())
 }
+
+/// A dup-parent workspace commit (two divergent stacks merged) round-trips unchanged.
+///
+/// This is the per-ref-`via` shape: the two co-located `stack-a` / `stack-b` refs map to
+/// DISTINCT legs of the merge, so a uniform "restore every ref to `legs_into_pick`" would be
+/// wrong. A noop must still project identically after materialize + rewalk.
+#[test]
+fn noop_rebase_two_stacks() -> Result<()> {
+    editor!("workspace-two-stacks", repo, _tmp, meta, ws);
+    let editor = Editor::create(&mut ws, &mut *meta, &repo)?;
+    let rebase = editor.rebase()?;
+    let (mutated, rewalked) = rewalk_parity_report(rebase, &repo)?;
+    assert_parity(&mutated, &rewalked);
+    Ok(())
+}
+
+/// A new commit inserted above one lane's tip in the dup-parent merge fixture — the insert
+/// must maintain the merge leg's `via` without disturbing the other lane.
+#[test]
+fn insert_pick_into_merge_lane() -> Result<()> {
+    editor!("workspace-two-stacks", repo, _tmp, meta, ws);
+    let mut editor = Editor::create(&mut ws, &mut *meta, &repo)?;
+
+    let a2 = repo.rev_parse_single("stack-a")?.detach();
+    let mut new_commit = but_core::Commit::from_id(repo.rev_parse_single("stack-a")?)?;
+    new_commit.message = "inserted above A2".into();
+    new_commit.parents = vec![].into();
+    let new_id = repo.write_object(new_commit.inner)?.detach();
+
+    let selector = editor.select_commit(a2)?;
+    editor.insert(selector, Step::new_pick(new_id), InsertSide::Above)?;
+
+    let rebase = editor.rebase()?;
+    let (mutated, rewalked) = rewalk_parity_report(rebase, &repo)?;
+    assert_parity(&mutated, &rewalked);
+    Ok(())
+}
+
+/// A branch created mid-lane in the dup-parent merge fixture: the new ref must ADOPT the
+/// lane's leg (`legs_into_pick`), not `via=[]`, in the per-ref-`via` merge context.
+#[test]
+fn insert_reference_into_merge_lane() -> Result<()> {
+    editor!("workspace-two-stacks", repo, _tmp, meta, ws);
+    let mut editor = Editor::create(&mut ws, &mut *meta, &repo)?;
+
+    let a1 = repo.rev_parse_single("stack-a~1")?.detach();
+    let selector = editor.select_commit(a1)?;
+    editor.insert(
+        selector,
+        Step::new_reference("refs/heads/mid-stack-a".try_into()?),
+        InsertSide::Above,
+    )?;
+
+    let rebase = editor.rebase()?;
+    let (mutated, rewalked) = rewalk_parity_report(rebase, &repo)?;
+    assert_parity(&mutated, &rewalked);
+    Ok(())
+}
+
+/// Two branches created above the SAME commit — co-located siblings, exercising the rank /
+/// chain-member machinery. Their relative order is a no-clean-spec arbitration, normalized by
+/// `assert_parity`; what must hold is that BOTH land on the right commit.
+#[test]
+fn insert_colocated_sibling_references() -> Result<()> {
+    editor!("workspace-signed", repo, _tmp, meta, ws);
+    let mut editor = Editor::create(&mut ws, &mut *meta, &repo)?;
+
+    let b = repo.rev_parse_single("b")?.detach();
+    let first = editor.select_commit(b)?;
+    editor.insert(
+        first,
+        Step::new_reference("refs/heads/sibling-one".try_into()?),
+        InsertSide::Above,
+    )?;
+    let second = editor.select_commit(b)?;
+    editor.insert(
+        second,
+        Step::new_reference("refs/heads/sibling-two".try_into()?),
+        InsertSide::Above,
+    )?;
+
+    let rebase = editor.rebase()?;
+    let (mutated, rewalked) = rewalk_parity_report(rebase, &repo)?;
+    assert_parity(&mutated, &rewalked);
+    Ok(())
+}
+
+/// A whole lane of the dup-parent merge deleted down to empty (both A1 and A2 removed): the
+/// `stack-a` ref collapses onto the shared `base`, co-located with `main` — the "two empties on
+/// one base" corner, over the merge's per-ref legs.
+#[test]
+fn delete_whole_lane_in_merge() -> Result<()> {
+    editor!("workspace-two-stacks", repo, _tmp, meta, ws);
+    let mut editor = Editor::create(&mut ws, &mut *meta, &repo)?;
+
+    for rev in ["stack-a", "stack-a~1"] {
+        let commit = repo.rev_parse_single(rev)?.detach();
+        let selector = editor.select_commit(commit)?;
+        editor.disconnect_segment_from(
+            mutate::SegmentDelimiter {
+                child: selector,
+                parent: selector,
+            },
+            mutate::SelectorSet::All,
+            mutate::SelectorSet::All,
+            false,
+        )?;
+        editor.replace(selector, Step::None)?;
+    }
+
+    let rebase = editor.rebase()?;
+    let (mutated, rewalked) = rewalk_parity_report(rebase, &repo)?;
+    assert_parity(&mutated, &rewalked);
+    Ok(())
+}
+
+/// A lane-tip commit (carrying the co-located `stack-a` ref) deleted in the dup-parent merge
+/// fixture — the co-located ref re-anchors onto the lane's surviving parent, and the merge's
+/// per-ref legs must be preserved (a blanket `legs_into_pick` restore would collide here).
+#[test]
+fn delete_lane_tip_in_merge() -> Result<()> {
+    editor!("workspace-two-stacks", repo, _tmp, meta, ws);
+    let mut editor = Editor::create(&mut ws, &mut *meta, &repo)?;
+
+    let a2 = repo.rev_parse_single("stack-a")?.detach();
+    let selector = editor.select_commit(a2)?;
+    editor.disconnect_segment_from(
+        mutate::SegmentDelimiter {
+            child: selector,
+            parent: selector,
+        },
+        mutate::SelectorSet::All,
+        mutate::SelectorSet::All,
+        false,
+    )?;
+    editor.replace(selector, Step::None)?;
+
+    let rebase = editor.rebase()?;
+    let (mutated, rewalked) = rewalk_parity_report(rebase, &repo)?;
+    assert_parity(&mutated, &rewalked);
+    Ok(())
+}
+
+/// A new reference created BELOW a mid-stack commit — the uncovered arm of the
+/// insert(reference, side) matrix (branch creation anchored under the selected commit).
+#[test]
+fn insert_reference_below_commit() -> Result<()> {
+    editor!("workspace-signed", repo, _tmp, meta, ws);
+    let mut editor = Editor::create(&mut ws, &mut *meta, &repo)?;
+
+    let b = repo.rev_parse_single("b")?.detach();
+    let selector = editor.select_commit(b)?;
+    editor.insert(
+        selector,
+        Step::new_reference("refs/heads/created-below".try_into()?),
+        InsertSide::Below,
+    )?;
+
+    let rebase = editor.rebase()?;
+    let (mutated, rewalked) = rewalk_parity_report(rebase, &repo)?;
+    assert_parity(&mutated, &rewalked);
+    Ok(())
+}
