@@ -122,26 +122,87 @@ fn format_step(step: &Step, title: Option<String>) -> String {
     }
 }
 
-/// Find head nodes (no incoming edges)
+/// The reference chains, grouped by their (anchor, via) position and ordered by rank —
+/// the render's view of positioned refs as rows.
+type ChainKey = (StepGraphIndex, Vec<(StepGraphIndex, usize)>);
+
+fn chains(graph: &StepGraph) -> HashMap<ChainKey, Vec<StepGraphIndex>> {
+    let mut out: HashMap<_, Vec<(usize, StepGraphIndex)>> = HashMap::new();
+    for (node, stored) in graph.anchored_refs() {
+        out.entry((stored.anchor, stored.via.clone()))
+            .or_default()
+            .push((stored.rank, node));
+    }
+    out.into_iter()
+        .map(|(key, mut members)| {
+            members.sort_by_key(|(rank, _)| *rank);
+            (key, members.into_iter().map(|(_, node)| node).collect())
+        })
+        .collect()
+}
+
+/// Find head rows: picks (and tombstones) without incoming edges, plus the tops of root
+/// reference chains (positioned with nothing above them).
 fn find_heads(graph: &StepGraph) -> Vec<StepGraphIndex> {
     let mut has_incoming: HashSet<StepGraphIndex> = HashSet::new();
     for edge in graph.edge_references() {
         has_incoming.insert(edge.target());
     }
+    let chains = chains(graph);
+    // Heads in NODE order (creation order), like the edge-walking predecessor: a pick or
+    // tombstone with no incoming edges, or the top of a root reference chain — which occupies
+    // exactly the node position its edge-era chain top had.
     graph
         .node_indices()
-        .filter(|idx| !has_incoming.contains(idx))
+        .filter(|idx| match graph.anchor_of(*idx) {
+            Some(stored) => {
+                stored.via.is_empty()
+                    && chains
+                        .get(&(stored.anchor, stored.via.clone()))
+                        .and_then(|members| members.last())
+                        == Some(idx)
+            }
+            // Anchor-less nodes (picks, tombstones, and hand-built reference nodes that never
+            // went through creation's finalize pass) keep the edge-era rule.
+            None => !has_incoming.contains(idx),
+        })
         .collect()
 }
 
-/// Get parents sorted by edge order
+/// Rendered parents of `node`, in order: a reference row points at the next chain member
+/// below it (or its anchor); a pick's parent edges route through the chain positioned on
+/// that (parent, slot), when one exists — reproducing the interposed rows references had
+/// when they were nodes.
 fn get_sorted_parents(graph: &StepGraph, node: StepGraphIndex) -> Vec<StepGraphIndex> {
+    let chains = chains(graph);
+    if let Some(stored) = graph.anchor_of(node) {
+        let chain = chains
+            .get(&(stored.anchor, stored.via.clone()))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let below = chain
+            .iter()
+            .position(|&n| n == node)
+            .and_then(|ix| ix.checked_sub(1))
+            .map(|ix| chain[ix])
+            .unwrap_or(stored.anchor);
+        return vec![below];
+    }
     let mut parents: Vec<_> = graph
         .edges(node)
         .map(|e| (e.weight().order, e.target()))
         .collect();
     parents.sort_by_key(|(order, _)| *order);
-    parents.into_iter().map(|(_, p)| p).collect()
+    parents
+        .into_iter()
+        .map(|(order, target)| {
+            chains
+                .iter()
+                .find(|((anchor, via), _)| *anchor == target && via.contains(&(node, order)))
+                .and_then(|(_, chain)| chain.last().copied())
+                .unwrap_or(target)
+        })
+        .collect()
 }
 
 /// A deterministic ordering for the head nodes so snapshots are stable: picks
@@ -245,6 +306,32 @@ where
     F: FnMut(gix::ObjectId) -> Option<String>,
 {
     let mut heads = heads.to_vec();
+    // Row-view tops without a rendered child inside the subgraph — e.g. reference chains
+    // positioned above a stack's head pick, approached only from outside — are heads too.
+    let mut in_degree: HashMap<StepGraphIndex, usize> = nodes.iter().map(|&n| (n, 0)).collect();
+    for &n in nodes {
+        for parent in get_sorted_parents(graph, n) {
+            if let Some(deg) = in_degree.get_mut(&parent) {
+                *deg += 1;
+            }
+        }
+    }
+    let mut extra: Vec<StepGraphIndex> = nodes
+        .iter()
+        .copied()
+        .filter(|n| in_degree.get(n).is_none_or(|&d| d == 0) && !heads.contains(n))
+        // A positioned reference whose anchor lies outside the set is a boundary chain the
+        // edge-era walk never reached from this subgraph's heads — don't seed it.
+        .filter(|n| {
+            graph.anchor_of(*n).is_none_or(|stored| {
+                crate::graph_rebase::positions::resolve_to_pick(graph, stored.anchor)
+                    .is_some_and(|pick| nodes.contains(&pick))
+            })
+        })
+        .collect();
+    extra.sort_by(|a, b| compare_heads(graph, *a, *b));
+    heads.retain(|h| in_degree.get(h).is_none_or(|&d| d == 0));
+    heads.extend(extra);
     heads.sort_by(|a, b| compare_heads(graph, *a, *b));
 
     let mut renderer = GraphRowRenderer::<StepGraphIndex>::new()

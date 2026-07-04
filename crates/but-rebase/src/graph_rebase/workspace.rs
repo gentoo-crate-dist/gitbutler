@@ -195,9 +195,18 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         let target_ix = self.target_selector().map(|s| s.id);
         let revision = self.history.current_revision();
 
+        // The entrypoint is a reference: the region floods from the pick it resolves to
+        // (references carry no edges).
+        let entrypoint_pick = positions::resolve_to_pick(&self.graph, entrypoint_ix);
         if on_workspace {
-            let head_not_target_commit =
-                all_until_optional_limit(&self.graph, entrypoint_ix, target_ix);
+            let mut head_not_target_commit = match entrypoint_pick {
+                Some(pick) => all_until_optional_limit(&self.graph, pick, target_ix),
+                None => NodeSet {
+                    heads: vec![],
+                    nodes: HashSet::new(),
+                },
+            };
+            head_not_target_commit.heads = vec![entrypoint_ix];
 
             // The workspace commit, if present, lives somewhere in `HEAD ^target`.
             let workspace_commit = head_not_target_commit.nodes.iter().copied().find_map(|ix| {
@@ -226,6 +235,11 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     commit_state: HashMap::new(),
                 })
             } else {
+                attach_flooded_refs(
+                    &self.graph,
+                    &mut head_not_target_commit.nodes,
+                    Some(entrypoint_ix),
+                );
                 Ok(GraphWorkspace {
                     above_workspace: head_not_target_commit.into_subgraph(revision),
                     workspace_commit: None,
@@ -236,7 +250,15 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             }
         } else {
             // We're pegging.
-            let stack = all_until_optional_limit(&self.graph, entrypoint_ix, target_ix);
+            let mut stack = match entrypoint_pick {
+                Some(pick) => all_until_optional_limit(&self.graph, pick, target_ix),
+                None => NodeSet {
+                    heads: vec![],
+                    nodes: HashSet::new(),
+                },
+            };
+            stack.heads = vec![entrypoint_ix];
+            attach_flooded_refs(&self.graph, &mut stack.nodes, Some(entrypoint_ix));
 
             Ok(GraphWorkspace {
                 above_workspace: Subgraph::empty(),
@@ -303,9 +325,9 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         let mut parents_by_node: HashMap<Selector, Vec<Selector>> = HashMap::new();
         for node in nodes {
             let parents = self
-                .direct_parents(*node)?
+                .position_parents(*node)?
                 .into_iter()
-                .filter_map(|(parent, _)| nodes.contains(&parent).then_some(parent))
+                .filter(|parent| nodes.contains(parent))
                 .collect();
             parents_by_node.insert(*node, parents);
         }
@@ -707,36 +729,64 @@ fn divide_workspace_into_stacks(
         deduplicated.push(out);
     }
 
-    // Each reference in the region joins the stack its POSITION belongs to: the via child's
-    // stack, else the anchor pick's stack, else — for a chain hanging straight off the
-    // workspace commit — the stack seeded by that edge (its head), which may hold no picks at
-    // all (an empty lane). References belonging to neither (e.g. the target's own ref above
-    // the excluded target commit) stay outside every stack.
-    for node in &head_not_target.nodes {
-        if !matches!(graph[*node], Step::Reference { .. }) {
-            continue;
-        }
-        let Some(pos) = positions::ref_position(graph, *node) else {
+    // Each positioned reference joins the stack its position belongs to: the via child's
+    // stack (with a chain hanging straight off the workspace commit falling back to its
+    // anchor's stack — the workspace commit itself is in none), else the anchor pick's stack.
+    // References belonging to neither (e.g. the target's own ref above the excluded target
+    // commit) stay outside every stack.
+    for (node, _) in graph.anchored_refs() {
+        let Some(pos) = positions::ref_position(graph, node) else {
             continue;
         };
-        let home = match pos.via {
-            // A chain hanging straight off the workspace commit belongs to the lane seeded by
-            // that edge — found via the seed head sitting in the same chain.
-            Some((child, _)) if child == workspace_commit_ix => deduplicated
+        let by_anchor = |a: Option<StepGraphIndex>| {
+            a.and_then(|a| deduplicated.iter().position(|s| s.nodes.contains(&a)))
+        };
+        // Every approaching leg must agree on the lane; a chain entered from several lanes
+        // (or from the workspace commit itself) falls back to its anchor's lane. A root chain
+        // (no approach) has no lane — no flood ever descended into it.
+        let anchor_in_region = pos
+            .anchor
+            .is_some_and(|a| head_not_target.nodes.contains(&a));
+        let home = match pos.via.as_slice() {
+            // A root chain: no flood ever descended into it — no lane.
+            [] => None,
+            // A single approach follows its leg's lane, even onto an excluded anchor (a lane
+            // bottom resting on the target); a chain hanging straight off the workspace
+            // commit falls back to its anchor's lane.
+            [(child, _)] if *child != workspace_commit_ix && !pos.ambiguous => deduplicated
                 .iter()
-                .position(|s| s.heads.iter().any(|&h| chain_contains(graph, h, *node))),
-            Some((child, _)) => deduplicated.iter().position(|s| s.nodes.contains(&child)),
-            None => pos
-                .anchor
-                .and_then(|a| deduplicated.iter().position(|s| s.nodes.contains(&a))),
+                .position(|s| s.nodes.contains(child))
+                .or_else(|| anchor_in_region.then(|| by_anchor(pos.anchor)).flatten()),
+            [_] => anchor_in_region.then(|| by_anchor(pos.anchor)).flatten(),
+            // A shared chain: every leg must agree on the lane; otherwise it belongs to its
+            // anchor's lane when that is in region, or nowhere.
+            many => {
+                let homes: Vec<Option<usize>> = many
+                    .iter()
+                    .map(|(child, _)| {
+                        if *child == workspace_commit_ix {
+                            None
+                        } else {
+                            deduplicated.iter().position(|s| s.nodes.contains(child))
+                        }
+                    })
+                    .collect();
+                match homes.as_slice() {
+                    [Some(first), rest @ ..] if rest.iter().all(|h| *h == Some(*first)) => {
+                        Some(*first)
+                    }
+                    _ => anchor_in_region.then(|| by_anchor(pos.anchor)).flatten(),
+                }
+            }
         };
         if let Some(ix) = home {
             #[expect(clippy::indexing_slicing)]
-            deduplicated[ix].nodes.insert(*node);
+            deduplicated[ix].nodes.insert(node);
         }
     }
 
     let mut outside = head_not_target.nodes.clone();
+    attach_flooded_refs(graph, &mut outside, None);
     for stack in &deduplicated {
         outside = outside.difference(&stack.nodes).copied().collect();
     }
@@ -756,29 +806,38 @@ fn divide_workspace_into_stacks(
     (above_workspace, deduplicated)
 }
 
-/// Whether the reference/tombstone chain starting at `head` contains `node` before reaching a
-/// pick.
-fn chain_contains(graph: &StepGraph, head: StepGraphIndex, node: StepGraphIndex) -> bool {
-    let mut cursor = head;
-    for _ in 0..10_000 {
-        if cursor == node {
-            return true;
-        }
-        match &graph[cursor] {
-            Step::Pick(_) => return false,
-            Step::Reference { .. } | Step::None => {
-                let Some(next) = graph
-                    .edges_directed(cursor, Direction::Outgoing)
-                    .next()
-                    .map(|e| e.target())
-                else {
-                    return false;
-                };
-                cursor = next;
-            }
-        }
+/// Insert the positioned references a downward flood over `nodes` would have passed through
+/// when references were edges: chains approached by an in-region child, plus — when `entry`
+/// is the reference the flood started at — the entry itself and its chain below it. Root
+/// chains nothing descends into (e.g. a remote ref stacked above a local one) stay out,
+/// exactly like the edge-era floods never reached them.
+fn attach_flooded_refs(
+    graph: &StepGraph,
+    nodes: &mut HashSet<StepGraphIndex>,
+    entry: Option<StepGraphIndex>,
+) {
+    let mut additions: Vec<StepGraphIndex> = graph
+        .anchored_refs()
+        .filter_map(|(node, stored)| {
+            // A chain any in-region leg approaches was flooded through before the walk
+            // stopped at a boundary — membership is broader than lane assignment, which
+            // stays arity- and ambiguity-aware in `divide_workspace_into_stacks`.
+            let followed = stored.via.iter().any(|(child, _)| nodes.contains(child));
+            followed.then_some(node)
+        })
+        .collect();
+    if let Some(entry) = entry
+        && let Some(entry_stored) = graph.anchor_of(entry)
+    {
+        additions.push(entry);
+        additions.extend(graph.anchored_refs().filter_map(|(node, stored)| {
+            (stored.anchor == entry_stored.anchor
+                && stored.via == entry_stored.via
+                && stored.rank < entry_stored.rank)
+                .then_some(node)
+        }));
     }
-    false
+    nodes.extend(additions);
 }
 
 #[cfg(test)]

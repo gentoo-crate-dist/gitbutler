@@ -319,6 +319,7 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
             }
         }
 
+        crate::graph_rebase::positions::initialize_anchors_and_strip_ref_edges(&mut graph);
         crate::graph_rebase::positions::debug_assert_positions_total(&graph);
         Ok(Self {
             graph,

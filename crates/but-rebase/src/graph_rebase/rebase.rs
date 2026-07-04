@@ -16,7 +16,7 @@ use gix::refs::{
 use crate::graph_rebase::{
     Editor, Pick, Step, StepGraph, StepGraphIndex, SuccessfulRebase,
     cherry_pick::{CherryPickOutcome, cherry_pick},
-    util::{collect_ordered_parents, first_ordered_parent},
+    util::collect_ordered_parents,
 };
 
 impl<'ws, 'graph, M: RefMetadata> Editor<'ws, 'graph, M> {
@@ -130,8 +130,9 @@ impl<'ws, 'graph, M: RefMetadata> Editor<'ws, 'graph, M> {
                     // Immutable references are kept in the graph for traversal
                     // but never moved, created, or deleted.
                     if mutable {
-                        let first_parent_idx = first_ordered_parent(&self.graph, step_idx)
-                            .context("References should have at least one parent")?;
+                        let first_parent_idx =
+                            crate::graph_rebase::positions::resolve_to_pick(&self.graph, step_idx)
+                                .context("References should resolve to a commit")?;
                         let Some(new_idx) = graph_mapping.get(&first_parent_idx) else {
                             bail!("A matching parent can't be found in the output graph");
                         };
@@ -203,6 +204,30 @@ impl<'ws, 'graph, M: RefMetadata> Editor<'ws, 'graph, M> {
             }
         }
 
+        // Carry every reference's stored position into the output graph, mapped through the
+        // rebuild — positions are the truth for references, edges never encode them.
+        for (node, stored) in self.graph.anchored_refs() {
+            let (Some(new_node), Some(new_anchor)) =
+                (graph_mapping.get(&node), graph_mapping.get(&stored.anchor))
+            else {
+                continue;
+            };
+            let via = stored
+                .via
+                .iter()
+                .filter_map(|(child, slot)| graph_mapping.get(child).map(|c| (*c, *slot)))
+                .collect();
+            output_graph.set_anchor(
+                *new_node,
+                Some(crate::graph_rebase::step_graph::StoredAnchor {
+                    anchor: *new_anchor,
+                    via,
+                    rank: stored.rank,
+                    ambiguous: stored.ambiguous,
+                }),
+            );
+        }
+
         // Find deleted references. `initial_references` only contains mutable
         // references, so immutable references are never considered for deletion.
         for reference in self.initial_references.iter() {
@@ -251,7 +276,15 @@ impl<'ws, 'graph, M: RefMetadata> Editor<'ws, 'graph, M> {
 /// This second traversal ensures that all the parents of any given node have
 /// been seen, before traversing it.
 fn order_steps_picking(graph: &StepGraph, heads: &[StepGraphIndex]) -> VecDeque<StepGraphIndex> {
-    let mut heads = heads.to_vec();
+    // Positioned references take no part in the dependency order: they have no edges, and
+    // their only dependency — the anchor's mapping — is satisfied once every pick is
+    // processed. They run at the very end, in stable node order.
+    let anchored_refs: Vec<StepGraphIndex> = graph.anchored_refs().map(|(node, _)| node).collect();
+    let mut heads: Vec<StepGraphIndex> = heads
+        .iter()
+        .copied()
+        .filter(|h| graph.anchor_of(*h).is_none())
+        .collect();
     let mut seen = heads.iter().cloned().collect::<HashSet<StepGraphIndex>>();
     // Reachable nodes with no outgoing nodes.
     let mut bases = VecDeque::new();
@@ -291,6 +324,7 @@ fn order_steps_picking(graph: &StepGraph, heads: &[StepGraphIndex]) -> VecDeque<
         }
     }
 
+    ordered.extend(anchored_refs);
     ordered
 }
 
