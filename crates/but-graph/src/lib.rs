@@ -393,20 +393,5 @@ impl<'graph> EntryPoint<'graph> {
     }
 }
 
-/// Relationship of one segment to another in terms of graph ancestry.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum SegmentRelation {
-    /// Both segment indices point to the same segment.
-    Identity,
-    /// The first segment is an ancestor of the second segment.
-    Ancestor,
-    /// The first segment is a descendant of the second segment.
-    Descendant,
-    /// Segments share history, but neither is ancestor of the other.
-    Diverged,
-    /// Segments do not share any history.
-    Disjoint,
-}
-
 /// An index into the [`Graph`].
 pub type SegmentIndex = usize;

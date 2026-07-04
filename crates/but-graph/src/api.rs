@@ -9,7 +9,7 @@ use anyhow::{Context as _, bail, ensure};
 
 use crate::{
     Commit, CommitFlags, CommitIndex, EntryPoint, EntryPointCommit, Graph, Segment, SegmentFlags,
-    SegmentIndex, SegmentRelation, StopCondition,
+    SegmentIndex, StopCondition,
     init::PetGraph,
     utils::{SegmentTable, SegmentVisitScratch},
     workspace::commit::is_managed_workspace_by_message,
@@ -97,24 +97,6 @@ impl Graph {
 
 /// Merge-base computation
 impl Graph {
-    /// Determine the ancestry relationship of `a` relative to `b`.
-    ///
-    /// `Ancestor` means `a` is reachable from `b` when walking towards history,
-    /// `Descendant` means the inverse, and `Diverged` means they share history
-    /// but neither is ancestor of the other.
-    pub fn relation_between(&self, a: SegmentIndex, b: SegmentIndex) -> SegmentRelation {
-        if a == b {
-            return SegmentRelation::Identity;
-        }
-
-        match self.find_merge_base(a, b) {
-            Some(base) if base == a => SegmentRelation::Ancestor,
-            Some(base) if base == b => SegmentRelation::Descendant,
-            Some(_) => SegmentRelation::Diverged,
-            None => SegmentRelation::Disjoint,
-        }
-    }
-
     /// Compute the merge-base just like Git would between segments `a` and `b`, but finding all possible merge-bases of a walk,
     /// which are then truncated to the highest merge-base that includes all the other merge-bases.
     ///

@@ -6,7 +6,6 @@ use crate::{Graph, SegmentIndex};
 
 pub(super) mod api;
 mod init;
-pub(crate) use init::Downgrade;
 
 /// A workspace reference is a list of [Stacks](Stack), with a reference to the underlying [`Graph`].
 #[derive(Clone)]

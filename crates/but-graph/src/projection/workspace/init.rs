@@ -23,13 +23,6 @@ use crate::{
     },
 };
 
-pub(crate) enum Downgrade {
-    /// Allows to turn a workspace above a selection to be downgraded back to the selection if it turns
-    /// out to be outside the workspace.
-    /// This is typically what you want when producing a workspace for display, as the workspace then isn't relevant.
-    Allow,
-}
-
 /// Shared graph-level workspace analysis before projection-only cleanup.
 ///
 /// `WorkspaceFrame` identifies the workspace tip, entrypoint relationship,
@@ -84,15 +77,12 @@ impl Graph {
         err(Debug)
     )]
     pub fn into_workspace(self) -> anyhow::Result<Workspace> {
-        let state = self.to_workspace_state(Downgrade::Allow)?;
+        let state = self.to_workspace_state()?;
         Ok(Workspace::from_state(self, state))
     }
 
-    pub(crate) fn to_workspace_state(
-        &self,
-        downgrade: Downgrade,
-    ) -> anyhow::Result<WorkspaceState> {
-        let frame = self.workspace_frame(downgrade)?;
+    pub(crate) fn to_workspace_state(&self) -> anyhow::Result<WorkspaceState> {
+        let frame = self.workspace_frame()?;
         let stacks = self.workspace_stacks(&frame)?;
         let mut target_ref = frame.target_ref;
 
@@ -190,7 +180,7 @@ impl Graph {
     #[cfg(not(debug_assertions))]
     fn debug_assert_applied_stacks_have_lanes(&self, _ws: &WorkspaceState) {}
 
-    fn workspace_frame(&self, downgrade: Downgrade) -> anyhow::Result<WorkspaceFrame> {
+    fn workspace_frame(&self) -> anyhow::Result<WorkspaceFrame> {
         let (
             mut kind,
             mut metadata,
@@ -323,13 +313,11 @@ impl Graph {
             .map(|(a, b)| (Some(a), Some(b)))
             .unwrap_or_default();
 
-        // The entrypoint is integrated and has a workspace above it.
-        // Right now we would be using it, but will discard it if the entrypoint is *at* or *below* the merge-base.
+        // The entrypoint is integrated and has a workspace above it: it gets downgraded back to
+        // an entrypoint-only (ad-hoc) view if it turns out to be *at* or *below* the merge-base,
+        // i.e. outside the workspace above.
         if let Some(((_lowest_base, lowest_base_sidx), ep_sidx)) = ws_lower_bound
-            .filter(|_| {
-                matches!(downgrade, Downgrade::Allow)
-                    && entrypoint_first_commit_flags.contains(CommitFlags::Integrated)
-            })
+            .filter(|_| entrypoint_first_commit_flags.contains(CommitFlags::Integrated))
             .zip(entrypoint_sidx)
             && (ep_sidx == lowest_base_sidx
                 || self
