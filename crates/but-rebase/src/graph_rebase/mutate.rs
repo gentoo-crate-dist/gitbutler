@@ -308,29 +308,12 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     pub fn step_references(&self, target: impl ToSelector) -> Result<Vec<Selector>> {
         let target = self.history.normalize_selector(target.to_selector(self)?)?;
 
-        let mut references = vec![];
-        let mut seen = HashSet::new();
-        let mut tips = vec![target.id];
-
-        while let Some(tip) = tips.pop() {
-            for edge in self.graph.edges_directed(tip, Direction::Incoming) {
-                let child = edge.source();
-                if !seen.insert(child) {
-                    continue;
-                }
-
-                match &self.graph[child] {
-                    Step::None => tips.push(child),
-                    Step::Reference { .. } => {
-                        references.push(self.new_selector(child));
-                        tips.push(child);
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        Ok(references)
+        Ok(
+            crate::graph_rebase::positions::refs_anchored_at(&self.graph, target.id)
+                .into_iter()
+                .map(|node| self.new_selector(node))
+                .collect(),
+        )
     }
 
     /// Replaces the node that the function was pointing to.

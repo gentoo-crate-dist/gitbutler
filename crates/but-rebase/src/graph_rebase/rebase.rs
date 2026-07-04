@@ -22,6 +22,7 @@ use crate::graph_rebase::{
 impl<'ws, 'graph, M: RefMetadata> Editor<'ws, 'graph, M> {
     /// Perform the rebase
     pub fn rebase(self) -> Result<SuccessfulRebase<'ws, 'graph, M>> {
+        crate::graph_rebase::positions::debug_assert_positions_total(&self.graph);
         // First we want to get a list of nodes that can be reached by
         // traversing downwards from the heads that we care about.
         // Usually there would be just one "head" which is an index to access

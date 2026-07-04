@@ -369,6 +369,7 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
             }
         }
 
+        crate::graph_rebase::positions::debug_assert_positions_total(&graph);
         Ok(Self {
             graph,
             initial_references: references,

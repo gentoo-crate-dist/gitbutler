@@ -5,6 +5,7 @@
 //! and in the darknes bind them.
 
 mod creation;
+mod positions;
 pub mod rebase;
 mod step_graph;
 pub mod traverse;
