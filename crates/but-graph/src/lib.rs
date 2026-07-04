@@ -87,7 +87,7 @@
 //!
 //! For convenience, various boolean parameters have been aggregated into [bitflags](Commit::flags). Thanks to the way *The Graph*
 //! is traversed, we know that the first commit of any [graph segment](Segment) will always bear the flags that are also used by every other commit
-//! contained within it. Thus, [segment flags](Segment::non_empty_flags_of_first_commit()) are equivalent to the flags of
+//! contained within it. Thus, a segment's flags (`Segment::non_empty_flags_of_first_commit()`) are equivalent to the flags of
 //! their first commit.
 //!
 //! The same is *not* true for [stack segments](workspace::StackSegment), i.e. segments within a [workspace projection](Workspace).

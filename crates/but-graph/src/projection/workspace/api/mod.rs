@@ -113,7 +113,8 @@ impl Workspace {
     }
 
     /// Return the `(merge-base, target-commit-id)` of the merge-base between the `commit_to_merge`
-    /// and the effective target side, see [Self::effective_target_segment_index()].
+    /// and the effective target side (target ref, then stored target commit, then the first
+    /// integrated traversal tip).
     /// Return `None` when none of these is set, or if there was no merge-base.
     ///
     /// Use this to get the merge-base for test-merges between `commit_to_merge` and the target,

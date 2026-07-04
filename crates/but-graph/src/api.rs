@@ -339,8 +339,8 @@ impl Graph {
 
     /// Return all commit ids reachable from `included`, but not reachable from `excluded`.
     ///
-    /// This is a convenience wrapper around
-    /// [`Self::find_segments_reachable_from_a_not_b()`], taking object ids of commits.
+    /// This is a convenience wrapper around the segment-level reachable-difference
+    /// walk, taking object ids of commits.
     /// If `first_parent` is [`FirstParent::Yes`], both traversals follow only first-parent edges.
     pub fn find_commit_ids_reachable_from_a_not_b(
         &self,

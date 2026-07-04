@@ -32,14 +32,14 @@ pub(crate) type Entrypoint = Option<(gix::ObjectId, Option<gix::refs::FullName>)
 /// ## Traversal invariants
 ///
 /// The traversal will build a segment graph, where Segments follow specific rules.
-/// We differentiate between [tip segments](Segment), segments created from [Tip]s, (*TS*) and
+/// We differentiate between [tip segments](crate::Segment), segments created from [Tip]s, (*TS*) and
 /// ancestor segments (*AS*), which are ancestors of *TS* and connected to them by outgoing
 /// connections.
 ///
 /// - Virtual segments (*VS*) are minted by lane materialization to represent refs
-///   which are described in [but_core::ref_metadata::Workspace]. They are [named](Segment::ref_name())
+///   which are described in [but_core::ref_metadata::Workspace]. They are [named](crate::Segment::ref_name())
 ///   and always empty graph nodes, and ordinary virtual segments have *exactly one*
-///   outgoing connection that lets [Graph::resolve_to_unambiguously_pointed_to_commit()]
+///   outgoing connection that lets `Graph::resolve_to_unambiguously_pointed_to_commit()`
 ///   find the commit named by the ref. The commit is owned by another segment, sometimes
 ///   because another segment was prioritized when multiple refs point to the same commit.
 /// - The virtual workspace tip segment is a special kind of *VS*, which may have one or more
@@ -58,7 +58,7 @@ pub(crate) type Entrypoint = Option<(gix::ObjectId, Option<gix::refs::FullName>)
 ///   but that its relationship to other segments is not represented by the Git
 ///   commit-graph or by Git refs: to Git, these are refs pointing to the same commit,
 ///   while GitButler sees one or more stacks of branches with specific ordering.
-/// - *TS* with [Self::ref_name] set will return that as [Segment::ref_name()].
+/// - *TS* with [Self::ref_name] set will return that as [crate::Segment::ref_name()].
 /// - *TS* that contain [Self::id] contain it as first commit
 /// - *TS* that don't contain [Self::id] are empty and can find their commit by following
 ///   their only outgoing connection until a non-empty commit is found which contains
@@ -617,7 +617,7 @@ impl Graph {
     /// * Multiple tips with different [roles](TipRole) may point to the same commit id,
     ///   as multiple refs can name the same commit.
     /// * A detached tip must be the entrypoint and cannot carry a ref name.
-    /// * The entrypoint always causes the start of a [`Segment`].
+    /// * The entrypoint always causes the start of a [`crate::Segment`].
     /// * Tips discovered from workspace metadata preserve their queue order.
     ///   Explicit tips without a custom queue position are normalized into
     ///   deterministic traversal order: integrated and target tips first,
