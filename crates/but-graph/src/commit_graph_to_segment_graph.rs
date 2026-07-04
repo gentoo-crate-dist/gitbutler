@@ -696,7 +696,7 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
     );
     let Facts {
         in_set,
-        ws_is_managed_merge,
+        ws_is_managed_merge: _,
         empty_ws_case,
         pinned_commits,
         boundaries,
@@ -835,18 +835,7 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
             &pinned_commits,
         );
         let ws_sidx = ws_empty_sidx.or_else(|| seg_of_tip.get(&workspace_commit).copied());
-        insert_empty_branches(
-            &mut sg,
-            cg,
-            ws_sidx,
-            stack_branches,
-            ws_lower_bound,
-            &in_set,
-            workspace_commit,
-            ws_is_managed_merge,
-            &plan,
-            remote_tracking,
-        );
+        insert_empty_branches(&mut sg, ws_sidx, &plan, remote_tracking);
     }
     // Segments the lane pass creates: the coverage gates below (extra target, outside
     // entrypoint, explicit tips) historically evaluated BEFORE any lane existed — they must not
@@ -2722,48 +2711,22 @@ fn add_advanced_outside_branches<T: but_core::RefMetadata>(
     }
 }
 
-/// Splice each stack's empty metadata branches (no commits of their own) into the segment chain at
-/// their metadata position. Each branch points at a commit (`cg.commit_by_ref`); consecutive branches
-/// on the same commit form a group whose segment (the anchor) already exists — the metadata-pointed
-/// commit was made a boundary. Any branch in a group that does not NAME the anchor is an empty segment
-/// stacked above it, in list order. Groups are threaded top→bottom so the chain interleaves
+/// Materialize the plan's [RefOrder](LanePlan::ref_order): per metadata stack list, thread the
+/// same-commit groups top→bottom — the plan-decided namer takes the anchor, the plan-decided
+/// empties splice above it in metadata order — producing
 /// `ws → [empties] → seg(c1) → [empties] → seg(c2) → … → [empties] → base`.
-#[expect(clippy::too_many_arguments)]
+/// Which refs become empties and how a group lands (dependent splice, own lane, passive) is
+/// plan DATA; this pass only looks up anchors and splices.
 fn insert_empty_branches(
     sg: &mut SegmentGraph,
-    cg: &CommitGraph,
     ws_sidx: Option<SegmentIndex>,
-    stack_branches: Option<&[Vec<gix::refs::FullName>]>,
-    ws_lower_bound: Option<gix::ObjectId>,
-    in_set: &HashSet<gix::ObjectId>,
-    workspace_commit: gix::ObjectId,
-    ws_is_managed_merge: bool,
     plan: &LanePlan,
     remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
 ) {
-    let Some(lists) = stack_branches else {
-        return;
-    };
-    // Commits pointed at by branches from MORE THAN ONE stack are the shared base/convergence; they
-    // keep their anonymity (each stack's empty branch floats above), whereas a commit owned by a single
-    // stack is named by that stack's bottom-most branch.
-    let mut lists_per_commit: HashMap<gix::ObjectId, usize> = HashMap::new();
-    for list in lists {
-        let mut seen = HashSet::new();
-        for b in list {
-            if let Some(c) = cg.commit_by_ref(b.as_ref())
-                && seen.insert(c)
-            {
-                *lists_per_commit.entry(c).or_default() += 1;
-            }
-        }
-    }
     // DEMOTIONS, decided by `lane_plan`: a shared base at/below the bound stays anonymous while
     // every stack's branches float above as their own lane; the lower-bound anchor of an
     // otherwise-unrepresented stack floats likewise. Remote links of a demoted name are
     // established on the floated segment by the remote creators.
-    let at_or_below_bound: Option<HashSet<gix::ObjectId>> =
-        ws_lower_bound.map(|lb| cg.ancestor_set(lb));
     for &tip in &plan.demoted {
         let Some(anchor) = segment_by_commit(sg, tip) else {
             continue;
@@ -2777,59 +2740,27 @@ fn insert_empty_branches(
             s.remote_tracking_branch_segment_id = None;
         }
     }
-    for (li, list) in lists.iter().enumerate() {
-        // Branches whose ref does not resolve contribute nothing — and must not SPLIT a same-commit
-        // group (e.g. a nonexistent branch listed between two branches on the same commit would
-        // otherwise break the group in two, mis-naming the anchor and losing the empties).
-        let list: Vec<gix::refs::FullName> = list
-            .iter()
-            .filter(|b| cg.commit_by_ref(b.as_ref()).is_some())
-            .cloned()
-            .collect();
+    for (li, lane) in plan.ref_order.iter().enumerate() {
         // `from_sidx` feeds the top of the stack: the workspace segment for the first group, then each
         // group's anchor for the next (so its empties splice into the edge coming from above).
         let mut from_sidx = ws_sidx;
-        let mut group_ordinal = 0usize;
-        let mut i = 0;
-        while i < list.len() {
-            let commit = cg.commit_by_ref(list[i].as_ref());
-            let start = i;
-            while i < list.len() && cg.commit_by_ref(list[i].as_ref()) == commit {
-                i += 1;
+        for group in lane {
+            // Outside the workspace or co-located with a managed merge commit: nothing to place.
+            if group.placement == GroupPlacement::Skipped {
+                continue;
             }
-            let group = &list[start..i];
-            let (Some(commit), Some(anchor)) =
-                (commit, commit.and_then(|c| segment_by_commit(sg, c)))
-            else {
+            let Some(anchor) = segment_by_commit(sg, group.commit) else {
                 continue;
             };
-            // A branch resting OUTSIDE the workspace (e.g. above the workspace position in an
-            // apply preview) is not part of any lane — the walk leaves it a passive commit ref.
-            // Same for one resting ON a real managed MERGE commit (e.g. a stack tip co-located
-            // with it mid edit-mode): it cannot be a lane above the workspace, and splicing it
-            // there would cycle the workspace segment into its own child. A CO-LOCATED workspace
-            // position (no managed commit) is different: that is exactly where empty stacks live.
-            if !in_set.contains(&commit) || (commit == workspace_commit && ws_is_managed_merge) {
-                debug_assert_ref_order_group(
-                    plan,
-                    li,
-                    group_ordinal,
-                    commit,
-                    &[],
-                    Some(GroupPlacement::Skipped),
-                );
-                group_ordinal += 1;
-                continue;
-            }
             // GROUP NAMING, decided by `lane_plan`: the bottom-most branch names an anonymous
             // anchor; metadata order overrides a build-time name that belongs to the group (its
             // remote links are cleared, the remote creators link its floated empty instead).
-            if let Some((namer, clear_remote)) = plan.group_names.get(&(li, commit))
+            if let Some((namer, clear_remote)) = plan.group_names.get(&(li, group.commit))
                 && let Some(s) = sg.node_mut(anchor)
             {
                 s.ref_info = Some(RefInfo {
                     ref_name: namer.clone(),
-                    commit_id: Some(commit),
+                    commit_id: Some(group.commit),
                     worktree: None,
                 });
                 s.remote_tracking_ref_name = remote_tracking.get(namer).cloned();
@@ -2837,84 +2768,33 @@ fn insert_empty_branches(
                     s.remote_tracking_branch_segment_id = None;
                 }
             }
-            // Only branches without any segment yet become empties — one that already names a segment
-            // (its own materialised segment, the anchor just named above, or a placeholder floated by
-            // `anonymize_shared_stack_tips`) is already placed.
-            let empties: Vec<gix::refs::FullName> = group
-                .iter()
-                .filter(|b| segment_by_ref(sg, b).is_none() && !plan.remote_used.contains(*b))
-                .cloned()
-                .collect();
             if std::env::var_os("BUT_GRAPH_FLIP_DEBUG").is_some() {
-                eprintln!("EMPTIES li={li} commit={commit} group={group:?} empties={empties:?}");
+                eprintln!(
+                    "EMPTIES li={li} commit={} empties={:?}",
+                    group.commit, group.empties
+                );
             }
-            if !empties.is_empty() {
-                // Dependent-branch splice vs own lane: a commit at/below the base (Integrated) or
-                // shared by several metadata stacks gets its own lane from the workspace; a commit
-                // strictly inside another stack's lane means these branches are DEPENDENT and must
-                // splice into that chain instead of minting a duplicate lane.
-                let anchor_not_integrated = sg.node(anchor).is_some_and(|s| {
-                    s.commits
-                        .first()
-                        .is_some_and(|c| !c.flags.contains(crate::CommitFlags::Integrated))
-                });
-                let shared_base = lists_per_commit.get(&commit).copied().unwrap_or(0) > 1
-                    && at_or_below_bound
-                        .as_ref()
-                        .is_none_or(|below| below.contains(&commit));
-                // ANOTHER stack owns the commit (its branch named the anchor) and it is not
-                // integrated: these branches stay PASSIVE refs — consumers (apply) discover them
-                // on the commit and record them as dependent branches in THIS stack's metadata,
-                // after which the same-list path splices them.
-                let cross_stack_owned = lists_per_commit.get(&commit).copied().unwrap_or(0) > 1
-                    && sg
-                        .node(anchor)
-                        .and_then(|s| s.ref_info.as_ref())
-                        .is_some_and(|ri| {
-                            !list.contains(&ri.ref_name)
-                                && lists.iter().any(|l| l.contains(&ri.ref_name))
-                        });
-                if cross_stack_owned && anchor_not_integrated {
-                    debug_assert_ref_order_group(
-                        plan,
-                        li,
-                        group_ordinal,
-                        commit,
-                        &empties,
-                        Some(GroupPlacement::Passive),
-                    );
-                    group_ordinal += 1;
+            if !group.empties.is_empty() {
+                // ANOTHER stack owns the (non-integrated) commit: these branches stay PASSIVE
+                // refs — consumers (apply) discover them on the commit and record them as
+                // dependent branches in THIS stack's metadata, after which the same-list path
+                // splices them.
+                if group.placement == GroupPlacement::Passive {
                     from_sidx = Some(anchor);
                     continue;
                 }
-                let dependent = !shared_base && anchor_not_integrated;
-                debug_assert_ref_order_group(
-                    plan,
-                    li,
-                    group_ordinal,
-                    commit,
-                    &empties,
-                    Some(if dependent {
-                        GroupPlacement::Dependent
-                    } else {
-                        GroupPlacement::OwnLane
-                    }),
-                );
+                let dependent = group.placement == GroupPlacement::Dependent;
                 insert_empty_chain_above(
                     sg,
                     from_sidx,
                     anchor,
-                    &empties,
+                    &group.empties,
                     remote_tracking,
-                    commit,
+                    group.commit,
                     dependent,
                     dependent,
                 );
-            } else {
-                // No empties: no placement decision is taken — compare members only.
-                debug_assert_ref_order_group(plan, li, group_ordinal, commit, &empties, None);
             }
-            group_ordinal += 1;
             from_sidx = Some(anchor);
         }
     }
@@ -3337,29 +3217,4 @@ pub(crate) fn remote_tracking_from_repository(
             .is_none_or(|config_local| config_local == local)
     });
     Ok((map, remotes))
-}
-
-/// Tripwire until materialization CONSUMES [`LanePlan::ref_order`]: the plan's RefOrder must
-/// agree with what `insert_empty_branches` actually derives from the graph — censused to zero
-/// corpus-wide before this became an assertion. `placement` is `None` when the group creates
-/// no empties (no placement decision is taken).
-fn debug_assert_ref_order_group(
-    plan: &LanePlan,
-    li: usize,
-    ordinal: usize,
-    commit: gix::ObjectId,
-    empties: &[gix::refs::FullName],
-    placement: Option<GroupPlacement>,
-) {
-    if !cfg!(debug_assertions) {
-        return;
-    }
-    let expected = plan.ref_order.get(li).and_then(|l| l.get(ordinal));
-    debug_assert!(
-        expected.is_some_and(|e| e.commit == commit
-            && e.empties == empties
-            && placement.is_none_or(|actual| e.placement == actual)),
-        "RefOrder diverges from materialization at li={li} ordinal={ordinal} commit={commit}: \
-         plan={expected:?} actual=({empties:?}, {placement:?})",
-    );
 }
