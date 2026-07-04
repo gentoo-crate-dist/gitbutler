@@ -49,7 +49,7 @@ pub(super) mod function {
         stack_id_override: Option<StackId>,
     ) -> anyhow::Result<Outcome<'ws, 'meta, M>> {
         let successful_rebase = editor.rebase()?;
-        let workspace = successful_rebase.overlayed_graph()?.into_workspace()?;
+        let workspace = successful_rebase.overlayed_workspace()?;
         let mut editor = successful_rebase.into_editor();
         let Some(source) = workspace.find_segment_and_stack_by_refname(subject_branch_name) else {
             bail!(
@@ -165,7 +165,7 @@ pub(super) mod function {
         }
 
         let successful_rebase = editor.rebase()?;
-        let workspace = successful_rebase.overlayed_graph()?.into_workspace()?;
+        let workspace = successful_rebase.overlayed_workspace()?;
 
         let (source, destination) =
             retrieve_branches_and_containers(&workspace, subject_branch_name, target_branch_name)?;

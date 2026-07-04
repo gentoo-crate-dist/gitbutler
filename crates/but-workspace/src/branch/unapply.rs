@@ -275,10 +275,7 @@ pub(crate) mod function {
             // TODO: this will actually be observable even if it doens't work, unless it's run in a transaction, which right now it's not!
             //       Should be able to redo the traversal with an overlay that hides branch metadata, but I'd say it's not important enough.
             meta.remove(branch)?;
-            let graph = ws
-                .graph
-                .redo_traversal_with_overlay(repo, meta, Overlay::default())?;
-            let workspace = graph.into_workspace()?;
+            let workspace = ws.redo_with_overlay(repo, meta, Overlay::default())?;
             if workspace.refname_is_segment(branch) {
                 bail!(
                     "Cannot unapply branch '{branch}' from an ad-hoc workspace because non-tip branches can only disappear if their now removed metadata disambiguated them",
@@ -291,19 +288,16 @@ pub(crate) mod function {
         // Everything past this point is stricly in non-dry-run mode and we may totally end up in intermediate states
         // if something fails.
         // Redo the traversal with the changed workspace metadata so code below can rely on the reconciled version.
-        let ws = ws
-            .graph
-            .redo_traversal_with_overlay(
-                repo,
-                meta,
-                Overlay::default()
-                    .with_dropped_references([branch.to_owned()])
-                    .with_workspace_metadata_override(Some((
-                        workspace_ref_name.to_owned(),
-                        ws_md.clone(),
-                    ))),
-            )?
-            .into_workspace()?;
+        let ws = ws.redo_with_overlay(
+            repo,
+            meta,
+            Overlay::default()
+                .with_dropped_references([branch.to_owned()])
+                .with_workspace_metadata_override(Some((
+                    workspace_ref_name.to_owned(),
+                    ws_md.clone(),
+                ))),
+        )?;
         // Normal unapply first:
         // - re-merge or collapse the workspace commit
         // - point workspace to it
@@ -324,10 +318,7 @@ pub(crate) mod function {
         let overlay = Overlay::default()
             .with_dropped_references([branch.to_owned()])
             .with_workspace_metadata_override(Some((workspace_ref_name.to_owned(), ws_md.clone())));
-        let mut ws = ws
-            .graph
-            .redo_traversal_with_overlay(repo, meta, overlay)?
-            .into_workspace()?;
+        let mut ws = ws.redo_with_overlay(repo, meta, overlay)?;
         let checked_out = if !workspace_tip_was_entrypoint
             && (ws.is_entrypoint() || branch_stack_was_entrypoint)
         {
@@ -338,10 +329,7 @@ pub(crate) mod function {
             let overlay = Overlay::default()
                 .with_dropped_references([branch.to_owned()])
                 .with_entrypoint(entrypoint_id, Some(workspace_ref_name.to_owned()));
-            ws = ws
-                .graph
-                .redo_traversal_with_overlay(repo, meta, overlay)?
-                .into_workspace()?;
+            ws = ws.redo_with_overlay(repo, meta, overlay)?;
             Some(workspace_ref_name.to_owned())
         } else {
             None
@@ -388,10 +376,7 @@ pub(crate) mod function {
                         Some(ref_to_switch_to.ref_name.clone()),
                     )
                     .with_dropped_references([branch.to_owned()]);
-                let ws = ws
-                    .graph
-                    .redo_traversal_with_overlay(repo, meta, overlay)?
-                    .into_workspace()?;
+                let ws = ws.redo_with_overlay(repo, meta, overlay)?;
 
                 Ok(Outcome {
                     workspace: Cow::Owned(ws),
@@ -611,10 +596,7 @@ pub(crate) mod function {
             ref_to_checkout.commit_id,
             Some(ref_to_checkout.ref_name.clone()),
         );
-        let ws = ws
-            .graph
-            .redo_traversal_with_overlay(repo, meta, overlay)?
-            .into_workspace()?;
+        let ws = ws.redo_with_overlay(repo, meta, overlay)?;
         Ok(Outcome {
             workspace: Cow::Owned(ws),
             checked_out: Some(ref_to_checkout.ref_name),

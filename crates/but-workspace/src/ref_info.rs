@@ -447,13 +447,12 @@ pub fn head_info_and_workspace(
     meta: &impl but_core::RefMetadata,
     opts: Options<'_>,
 ) -> anyhow::Result<(RefInfo, but_graph::Workspace)> {
-    let graph = Graph::from_head(
+    let ws = but_graph::Workspace::from_head(
         repo,
         meta,
         opts.project_meta.clone(),
         opts.traversal.clone(),
     )?;
-    let ws = graph.into_workspace()?;
     Ok((graph_to_ref_info(&ws, repo, opts)?, ws))
 }
 
@@ -473,14 +472,14 @@ pub fn ref_info(
 ) -> anyhow::Result<RefInfo> {
     let id = existing_ref.peel_to_id()?;
     let repo = id.repo;
-    let graph = Graph::from_commit_traversal(
+    let ws = but_graph::Workspace::from_commit_traversal(
         id,
         existing_ref.inner.name,
         meta,
         opts.project_meta.clone(),
         opts.traversal.clone(),
     )?;
-    graph_to_ref_info(&graph.into_workspace()?, repo, opts)
+    graph_to_ref_info(&ws, repo, opts)
 }
 
 pub(crate) fn find_ancestor_workspace_commit(
