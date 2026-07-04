@@ -121,10 +121,9 @@ pub(crate) fn debug_assert_positions_total(graph: &StepGraph) {
     if !cfg!(debug_assertions) {
         return;
     }
-    let mut seen: std::collections::HashMap<
-        (Option<StepGraphIndex>, (StepGraphIndex, usize), usize),
-        StepGraphIndex,
-    > = Default::default();
+    type OrderedPositionKey = (Option<StepGraphIndex>, (StepGraphIndex, usize), usize);
+    let mut seen: std::collections::HashMap<OrderedPositionKey, StepGraphIndex> =
+        Default::default();
     for node in graph.node_indices() {
         if !matches!(graph[node], Step::Reference { .. }) {
             continue;

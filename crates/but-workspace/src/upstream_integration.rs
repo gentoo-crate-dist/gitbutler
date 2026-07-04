@@ -554,6 +554,9 @@ fn collect_stacks<'ws, 'meta, M: RefMetadata>(
         }
 
         for (node, attrs) in nodes.iter_mut() {
+            // Reachability also marks REFERENCES: a ref chain reachable from the target lies
+            // on integrated history (its anchor commit is integrated), so this is anchor-based
+            // integration expressed through the graph walk.
             if from_target_ref.contains(node) {
                 attrs.historically_integrated = true;
             }
@@ -630,7 +633,6 @@ fn collect_stacks<'ws, 'meta, M: RefMetadata>(
                 *r_sel,
                 r_name.as_ref(),
                 &reference_nodes,
-                &from_target_ref,
                 target_sha,
                 target_ref_name,
                 target_ref_commit,
@@ -666,7 +668,6 @@ fn empty_local_reference_remote_tip_integrated<'ws, 'meta, M: RefMetadata>(
     selector: Selector,
     ref_name: &gix::refs::FullNameRef,
     reference_nodes: &HashMap<Selector, gix::refs::FullName>,
-    from_target_ref: &HashSet<Selector>,
     target_sha: gix::ObjectId,
     target_ref_name: &gix::refs::FullNameRef,
     target_ref_commit: gix::ObjectId,
@@ -674,10 +675,14 @@ fn empty_local_reference_remote_tip_integrated<'ws, 'meta, M: RefMetadata>(
     if ref_name.category() != Some(gix::refs::Category::LocalBranch) {
         return Ok(false);
     }
+    // An empty branch sitting on another local branch is that stack's forward-going tip and
+    // survives the cleanup — unless the parent branch literally rests at the target position.
+    // (An earlier `!from_target_ref.contains(parent)` conjunct here was constant-true under the
+    // merge-bypass rule — workspace-lane ref nodes were never target-reachable — so the live
+    // semantics were always just the points-to-target check.)
     if editor.direct_parents(selector)?.iter().any(|(parent, _)| {
         reference_nodes.get(parent).is_some_and(|parent_ref| {
             parent_ref.category() == Some(gix::refs::Category::LocalBranch)
-                && !from_target_ref.contains(parent)
                 && !reference_points_to_target(
                     editor.repo(),
                     parent_ref.as_ref(),
