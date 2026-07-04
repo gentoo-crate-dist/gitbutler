@@ -970,8 +970,8 @@ impl Graph {
         });
         out
     }
-    /// Return `OK(None)` if the post-process discarded this segment after collecting it in full as it was not
-    /// local a local branch.
+    /// Return `Ok(None)` if the whole stack was discarded after collection, e.g. because its
+    /// first segment isn't a local branch.
     ///
     /// `entrypoint_sidx` is passed to set the collected segment as entrypoint automatically.
     ///

@@ -361,8 +361,7 @@ fn assemble_managed<T: but_core::RefMetadata>(
 }
 
 /// Assemble the NON-managed graph from `cg`: no stack or workspace-ref passes, plus the
-/// persisted single-branch ordering — like the walk's post-processing, which also recomputes
-/// generations after the rebuilt chain.
+/// persisted single-branch ordering.
 #[allow(clippy::too_many_arguments)]
 fn assemble_unmanaged<T: but_core::RefMetadata>(
     cg: CommitGraph,
@@ -476,7 +475,7 @@ fn facts<T: but_core::RefMetadata>(
 
     // EXPLICIT tips (from_commit_traversal_tips) can point anywhere, and validation requires a tip
     // id to be its segment's first commit — so each one is a boundary. Workspace-discovered builds
-    // must not carve these: the walk merges tip-seeded segments back in post-processing.
+    // must not carve these: there they are ordinary interior commits.
     let tip_ids: HashSet<gix::ObjectId> = if cg.explicit_tips {
         cg.traversal_tips.iter().map(|t| t.id).collect()
     } else {

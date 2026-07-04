@@ -1066,8 +1066,8 @@ impl Graph {
     /// The entrypoint is the user-facing traversal anchor.
     ///
     /// It must always point at an existing segment in completed graphs. If a
-    /// ref name was remembered for it, post-processing must have moved the
-    /// entrypoint to the segment with that name.
+    /// ref name was remembered for it, the graph build must have placed the
+    /// entrypoint on the segment with that name.
     ///
     /// If the entrypoint remembers a commit id, that id must either be the first
     /// commit of its segment or be owned elsewhere as the first commit of another segment.

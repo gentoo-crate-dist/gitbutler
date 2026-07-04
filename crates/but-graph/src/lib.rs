@@ -103,36 +103,41 @@
 //!
 //! ### The Graph - Traversal and more
 //!
-//! There are three distinct steps to processing the git commit-graph into more usable forms.
+//! There are four distinct steps to processing the git commit-graph into more usable forms.
 //!
 //! * **traversal**
-//!     - walk the git commit graph to produce a segmented graph, which assigns commits to segments,
-//!       but also splits segments on incoming and multiple outgoing connections.
-//! * **reconciliation**
-//!     - a post-processing step which adds workspace metadata into the segmented graph, as such information
-//!       can't be held in the commit-graph itself.
+//!     - walk the git commit graph into a [`CommitGraph`]: an arena of commits with ordered
+//!       parent arrays and every encountered ref attached as data.
+//! * **planning**
+//!     - pure decision layers over the commit-graph (`facts`, the lane plan): boundaries,
+//!       lane structure from workspace metadata, and the complete name lifecycle are computed
+//!       as data before any segment exists.
+//! * **materialization**
+//!     - mint the segmented graph directly in its final shape. Segments are FINAL at creation:
+//!       commits, names, connections and endpoints don't change afterwards, only link-level
+//!       fields (sibling and remote-tracking links) are filled in by later passes.
 //! * **projection**
-//!     - transform the segmented and reconciled graph into a view that is application-specific, i.e. see
+//!     - transform the segmented graph into a view that is application-specific, i.e. see
 //!       stacks of first-parent traversed named segments.
 //!
 //! #### Commits are owned by Segments
 //!
 //! A commit can only be owned by a single segment. Thus, there are empty *named* segments which point at other segments,
 //! effectively representing a reference.
-//! Which of these references gets to own a commit depends on the traversal logic, or can be the result of *Reconciliation*.
+//! Which of these references gets to own a commit is a *planning* decision.
 //!
-//! #### Reconciliation
+//! #### Planning lanes from metadata
 //!
-//! *The Graph* is created from traversing the Git commit graph. Thus, information that is not contained in it has to be
-//! reconciled with *what was actually traversed*.
+//! *The Graph* is created from traversing the Git commit graph. Thus, information that is not contained in it,
+//! like workspace metadata, has to shape the segmented graph as it is built.
 //!
-//! Nonetheless, we can create *stacks* as independent branches and dependent branches inside of them without having
+//! That way, we can create *stacks* as independent branches and dependent branches inside of them without having
 //! a single commit to differentiate their respective branches from each other.
 //!
 //! Imagine a repository with a single commit `73a30f8` with the following Git references pointing to it: `gitbutler/workspace`,
 //! `stack1-segment1`, `stack1-segment2`, `stack2-segment1`, and `refs/remotes/origin/main`.
 //!
-//! Right after traversal, a Graph would look like this:
+//! A naive segmentation of the traversal would look like this:
 //!
 //! ```text
 //!   ┌────────────────────┐
@@ -150,14 +155,12 @@
 //! └────────────────────────┘
 //! ```
 //!
-//! This is due to `gitbutler/workspace` finding `73a30f8` first, with `origin/main` arriving later, pointing to the
-//! first commit in `gitbutler/workspace` effectively. The other references aren't participating in the traversal.
+//! This is because `gitbutler/workspace` owns `73a30f8`, with `origin/main` merely pointing to
+//! that commit; the other references would be plain refs on it.
 //!
-//! The tip that finds the commit first is dependent on various factors, and it could also happen that `origin/main` finds
-//! it first. In any case, this needs to be adjusted after traversal in the process called *reconciliation*, so the graph
-//! matches what our [workspace metadata](but_core::ref_metadata::Workspace::stacks) says it should be.
-//!
-//! After reconciling, the graph would become this:
+//! The lane plan instead reads [workspace metadata](but_core::ref_metadata::Workspace::stacks) before any
+//! segment exists and decides which refs form lanes of empty segments. Materialization then mints this
+//! shape directly:
 //!
 //! ```text
 //! ┌───────────────────┐
@@ -261,18 +264,18 @@ pub struct Graph {
     /// longer be resolved in the overlay/repository.
     entrypoint: Option<(SegmentIndex, EntryPointCommit)>,
     /// The ref_name used when starting the graph traversal. It is set to help assure that the entrypoint stays
-    /// on the correctly named segment, knowing that the post-process may alter segments quite substantially
-    /// when crating independent and dependent branches.
+    /// on the correctly named segment, as lane creation can splice empty segments for independent and
+    /// dependent branches around the entrypoint's position.
     entrypoint_ref: Option<gix::refs::FullName>,
     /// Effective initial traversal tips, in segment creation order.
     ///
     /// These are the caller-provided tips plus option-derived tips after
     /// validation, deduplication, and queue-order normalization. Segment ids are
-    /// intentionally not stored here: post-processing can split, delete, and
-    /// reconnect segments, so consumers re-resolve each tip by commit id against
-    /// the final graph shape and filter for the roles they need.
+    /// intentionally not stored here: they are only valid within one built graph,
+    /// so consumers re-resolve each tip by commit id against the final graph
+    /// shape and filter for the roles they need.
     traversal_tips: Vec<init::Tip>,
-    /// Ad-hoc/single-branch local branch orders read from metadata while post-processing.
+    /// Ad-hoc/single-branch local branch orders read from metadata during the graph build.
     ///
     /// These are kept on the graph so projection can tell the difference between
     /// an ordinary ad-hoc lower-bound branch and the bottom branch of a
@@ -359,8 +362,8 @@ impl EntryPointCommit {
 impl Graph {
     /// Return the entrypoint as a segment plus the optional position of its tip commit in that segment.
     ///
-    /// The graph stores the tip as an object id so it survives post-processing that moves the entrypoint to
-    /// an empty or otherwise synthetic segment. Some graph-local consumers, like debug rendering and
+    /// The graph stores the tip as an object id so it stays valid when lane creation places the entrypoint
+    /// on an empty or otherwise synthetic segment. Some graph-local consumers, like debug rendering and
     /// statistics, still need the segment-relative commit position to mark where the entrypoint appears in
     /// the current graph shape, so it is derived here instead of being stored as mutable state.
     fn entrypoint_location(&self) -> Option<(SegmentIndex, Option<CommitIndex>)> {
@@ -378,8 +381,8 @@ pub struct EntryPoint<'graph> {
     pub segment: &'graph Segment,
     /// If present, the commit that started traversal and the segment that owns it.
     ///
-    /// This can differ from [`Self::segment`] when post-processing moved the entrypoint to an
-    /// empty synthetic segment, such as a virtual workspace tip segment.
+    /// This can differ from [`Self::segment`] when the entrypoint sits on an empty synthetic
+    /// segment, such as a virtual workspace tip segment, while the commit lives below it.
     ///
     /// May be `None` if the entrypoint was a reference in a newly born repository,
     /// which doesn't have any commits.

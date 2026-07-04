@@ -1,6 +1,6 @@
 //! Ad-hoc/single-branch mode: persisted GitButler-created branch ordering, applied to a finished
-//! [`Graph`]. Runs in the walk's post-processing and on the flip's non-managed builds — it only
-//! reads segments, refs, and metadata, so it is builder-agnostic.
+//! [`Graph`] by the non-managed builds — it only reads segments, refs, and metadata, so it is
+//! builder-agnostic.
 
 use std::collections::{BTreeMap, BTreeSet};
 
