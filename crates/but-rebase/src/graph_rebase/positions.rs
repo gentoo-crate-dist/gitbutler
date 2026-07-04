@@ -288,6 +288,23 @@ pub(crate) fn chain_members(
         .collect()
 }
 
+/// The legs a co-located chain on `pick` is approached by: the pick edges pointing at it,
+/// as `(source, parent-slot)` pairs, sorted. Every reference co-located on one pick shares
+/// this via — it is the chain's single entry, replicated across members so the renderer can
+/// group them by `(anchor, via)` and order them by rank.
+pub(crate) fn legs_into_pick(
+    graph: &StepGraph,
+    pick: StepGraphIndex,
+) -> Vec<(StepGraphIndex, usize)> {
+    let mut legs: Vec<_> = graph
+        .edges_directed(pick, Direction::Incoming)
+        .filter(|e| matches!(graph[e.source()], Step::Pick(_)))
+        .map(|e| (e.source(), e.weight().order))
+        .collect();
+    legs.sort();
+    legs
+}
+
 /// Resolve `node` to the current pick it stands for: a pick resolves to itself, a tombstone
 /// follows its (preserved) first edge downward, and a reference resolves via its stored
 /// anchor. During the creation finalize pass references may still carry chain edges instead

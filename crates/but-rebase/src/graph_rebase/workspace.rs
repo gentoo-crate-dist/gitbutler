@@ -821,7 +821,10 @@ fn attach_flooded_refs(
         .filter_map(|(node, stored)| {
             // A chain any in-region leg approaches was flooded through before the walk
             // stopped at a boundary — membership is broader than lane assignment, which
-            // stays arity- and ambiguity-aware in `divide_workspace_into_stacks`.
+            // stays arity- and ambiguity-aware in `divide_workspace_into_stacks`. Co-located
+            // chain members all share the same via (`legs_into_pick`), so a lower member is
+            // attached with the whole chain, while a root ref stacked above (its own via
+            // empty, e.g. a remote ref over the tip) stays out.
             let followed = stored.via.iter().any(|(child, _)| nodes.contains(child));
             followed.then_some(node)
         })

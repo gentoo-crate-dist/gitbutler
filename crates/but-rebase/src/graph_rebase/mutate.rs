@@ -1541,8 +1541,10 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 Ok(self.new_selector(new_idx))
             }
             (InsertSide::Above, None) => {
-                // A reference above a pick: it becomes the rank-0 position at that pick and
-                // every existing ref there shifts up one rank. Pure bookkeeping — no edges.
+                // A reference above a pick joins that pick's co-located chain at rank 0; every
+                // existing member shifts up one rank. All members share the chain's via — the
+                // legs entering the pick from above — so the new one adopts them too.
+                let via = positions::legs_into_pick(&self.graph, target.id);
                 let shifts: Vec<_> = self
                     .graph
                     .anchored_refs()
@@ -1560,9 +1562,9 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     new_idx,
                     Some(StoredAnchor {
                         anchor: target.id,
-                        via: vec![],
+                        ambiguous: via.len() > 1,
+                        via,
                         rank: 0,
-                        ambiguous: false,
                     }),
                 );
                 Ok(self.new_selector(new_idx))

@@ -422,6 +422,25 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     }
 }
 
+/// The C2 parity oracle: project the mutated editor graph, then materialize, re-walk the
+/// repository, and project the fresh editor — both projections rendered with
+/// [`Editor::graph_workspace_ascii`]. Equal strings mean mutate-then-project and
+/// rewalk-then-project agree, which is the invariant that lets editor sessions live directly
+/// on the walked graph.
+///
+/// Returns `(mutated, rewalked)` so callers can census divergences before asserting.
+pub fn rewalk_parity_report<M: RefMetadata>(
+    rebase: SuccessfulRebase<'_, '_, M>,
+    repo: &gix::Repository,
+) -> Result<(String, String)> {
+    let editor = rebase.into_editor();
+    let mutated = editor.graph_workspace_ascii()?;
+    let outcome = editor.rebase()?.materialize()?;
+    let fresh = Editor::create(outcome.workspace, outcome.meta, repo)?;
+    let rewalked = fresh.graph_workspace_ascii()?;
+    Ok((mutated, rewalked))
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
