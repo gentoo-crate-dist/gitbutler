@@ -29,7 +29,6 @@ fn unborn() -> anyhow::Result<()> {
                 Some(
                     Segment {
                         id: 0,
-                        generation: 0,
                         ref_info: "►main[🌳]",
                         remote_tracking_ref_name: None,
                         sibling_segment_id: None,
@@ -111,7 +110,6 @@ fn detached() -> anyhow::Result<()> {
                 Some(
                     Segment {
                         id: 0,
-                        generation: 0,
                         ref_info: None,
                         remote_tracking_ref_name: None,
                         sibling_segment_id: None,
@@ -142,7 +140,6 @@ fn detached() -> anyhow::Result<()> {
                 Some(
                     Segment {
                         id: 1,
-                        generation: 1,
                         ref_info: "►other",
                         remote_tracking_ref_name: None,
                         sibling_segment_id: None,

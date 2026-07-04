@@ -7781,8 +7781,7 @@ fn graph_structure(graph: &but_graph::Graph) -> Vec<String> {
                 Some(but_graph::SegmentMetadata::Workspace(_)) => "W",
             };
             format!(
-                "{name}|rt={remote}|gen={}|meta={meta}|wt={worktree}|commits=[{}]|conn=[{}]|sib={sibling}",
-                s.generation,
+                "{name}|rt={remote}|meta={meta}|wt={worktree}|commits=[{}]|conn=[{}]|sib={sibling}",
                 commits.join(","),
                 conns.join(","),
             )

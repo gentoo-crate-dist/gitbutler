@@ -64,7 +64,6 @@ fn post_graph_traversal() -> anyhow::Result<()> {
 
     let branch = Segment {
         id: 3,
-        generation: 2,
         ref_info: Some(RefInfo {
             ref_name: "refs/heads/A".try_into()?,
             commit_id: None,

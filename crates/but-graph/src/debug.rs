@@ -426,6 +426,7 @@ impl Graph {
         let entrypoint = self.entrypoint_location();
         let max_goals = self.max_goals();
         let show_owned_by_repo = self.has_multiple_worktrees();
+        let generations = self.derived_generations();
         let node_attrs = |_: &PetGraph, (sidx, s): (SegmentIndex, &Segment)| {
             let name = format!(
                 "{ref_name_and_remote}{maybe_centering_newline}",
@@ -488,7 +489,7 @@ impl Graph {
                 },
                 entrypoint = if show_segment_entrypoint { "👉" } else { "" },
                 id = sidx,
-                generation = s.generation,
+                generation = generations.get(sidx),
             )
         };
 

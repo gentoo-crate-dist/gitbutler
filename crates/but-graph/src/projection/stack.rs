@@ -277,7 +277,6 @@ impl StackSegment {
         let mut segments_iter = segments.iter();
         let &&crate::Segment {
             id,
-            generation: _,
             ref_info: ref ref_name,
             ref remote_tracking_ref_name,
             sibling_segment_id,

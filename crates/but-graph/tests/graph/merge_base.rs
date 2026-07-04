@@ -302,7 +302,6 @@ fn relation_between_handles_identity_and_disjoint_segments() -> anyhow::Result<(
     );
 
     let orphan = graph.insert_segment(Segment {
-        generation: 0,
         ..Default::default()
     });
     assert_eq!(

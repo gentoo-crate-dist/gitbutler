@@ -391,7 +391,6 @@ fn assemble_unmanaged<T: but_core::RefMetadata>(
         options,
     );
     graph.ad_hoc_branch_stack_upgrades(overlay_repo, overlay_meta, &inputs.worktree_by_branch)?;
-    graph.compute_generation_numbers();
     graph.commit_graph = Some(cg);
     graph.remote_tracking = inputs.remote_tracking;
     Ok(graph)
@@ -748,7 +747,6 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
             .and_then(|ri| remote_tracking.get(&ri.ref_name).cloned());
         let sidx = sg.add_node(Segment {
             id: 0,
-            generation: 0,
             ref_info,
             remote_tracking_ref_name,
             sibling_segment_id: None,
@@ -766,7 +764,6 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
     for float in &plan.floats {
         let sidx = sg.add_node(Segment {
             id: 0,
-            generation: 0,
             ref_info: Some(RefInfo {
                 ref_name: float.name.clone(),
                 commit_id: Some(float.tip),
@@ -1006,7 +1003,6 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
                 }
                 let remote_sidx = sg.add_node(Segment {
                     id: 0,
-                    generation: 0,
                     ref_info: Some(RefInfo {
                         ref_name: tr.clone(),
                         commit_id: Some(tip),
@@ -1134,7 +1130,6 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
                 }
                 let empty_sidx = sg.add_node(Segment {
                     id: 0,
-                    generation: 0,
                     ref_info: Some(RefInfo {
                         ref_name: ref_name.clone(),
                         commit_id: Some(t.id),
@@ -1203,7 +1198,6 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
         };
         let floated = sg.add_node(Segment {
             id: 0,
-            generation: 0,
             ref_info,
             remote_tracking_ref_name: rt_name,
             sibling_segment_id: sibling,
@@ -1349,9 +1343,6 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
         }
     }
 
-    // Generations: longest path from a root (a segment with no incoming connections).
-    assign_generations(&mut sg);
-
     let entrypoint =
         entrypoint_sidx.map(|sidx| (sidx, crate::EntryPointCommit::AtCommit(entrypoint)));
 
@@ -1426,7 +1417,6 @@ fn name_entrypoint_segment(
             Some(existing) if existing != *ep_ref => {
                 let empty = sg.add_node(Segment {
                     id: 0,
-                    generation: 0,
                     ref_info: Some(RefInfo {
                         ref_name: ep_ref.clone(),
                         commit_id: Some(entrypoint),
@@ -2317,7 +2307,6 @@ fn segment_ahead_region(
             .and_then(|ri| remote_tracking.get(&ri.ref_name).cloned());
         let sidx = sg.add_node(Segment {
             id: 0,
-            generation: 0,
             ref_info,
             remote_tracking_ref_name,
             sibling_segment_id: if is_root { local_sidx } else { None },
@@ -2424,7 +2413,6 @@ fn add_untracked_remote_segments(
         {
             let remote_sidx = sg.add_node(Segment {
                 id: 0,
-                generation: 0,
                 ref_info: Some(RefInfo {
                     ref_name: r.clone(),
                     commit_id: Some(tip),
@@ -2472,7 +2460,6 @@ fn add_co_located_remote_empties(
             }
             let empty = sg.add_node(Segment {
                 id: 0,
-                generation: 0,
                 ref_info: Some(RefInfo {
                     ref_name: ri.ref_name.clone(),
                     commit_id: Some(first.id),
@@ -2503,7 +2490,6 @@ fn add_empty_remote_root(
 ) -> SegmentIndex {
     let remote_sidx = sg.add_node(Segment {
         id: 0,
-        generation: 0,
         ref_info: Some(RefInfo {
             ref_name: remote_ref.clone(),
             commit_id: Some(remote_tip),
@@ -2545,7 +2531,6 @@ fn insert_empty_workspace_segment(
     // a stack branch, not the workspace ref.
     let ws_seg = sg.add_node(Segment {
         id: 0,
-        generation: 0,
         ref_info: Some(RefInfo {
             ref_name: ws_ref,
             commit_id: Some(workspace_commit),
@@ -2648,7 +2633,6 @@ fn add_advanced_outside_branches<T: but_core::RefMetadata>(
             .and_then(|ri| remote_tracking.get(&ri.ref_name).cloned());
         let seg = sg.add_node(Segment {
             id: 0,
-            generation: 0,
             ref_info,
             remote_tracking_ref_name,
             sibling_segment_id: None,
@@ -2951,7 +2935,6 @@ fn insert_empty_chain_above(
         .map(|b| {
             let s = sg.add_node(Segment {
                 id: 0,
-                generation: 0,
                 ref_info: Some(RefInfo {
                     ref_name: b.clone(),
                     commit_id: Some(commit_id),
@@ -3047,33 +3030,6 @@ fn insert_empty_chain_above(
 fn connect(sg: &mut SegmentGraph, src: SegmentIndex, dst: SegmentIndex) {
     let conn = Connection::new(dst, None, None, None, None).adjusted_for(src, dst, sg);
     sg.add_edge(src, conn);
-}
-
-/// Longest path from a root (segment with no incoming connection); roots are generation 0.
-fn assign_generations(sg: &mut SegmentGraph) {
-    let order = sg.toposort();
-    // toposort yields sources-before-targets; connections point tip→base, so a base's generation is
-    // 1 + max over its incoming sources.
-    let mut depth: HashMap<SegmentIndex, usize> = HashMap::new();
-    for sidx in &order {
-        depth.entry(*sidx).or_insert(0);
-    }
-    for sidx in order {
-        let g = depth[&sidx];
-        let targets: Vec<SegmentIndex> = sg
-            .node(sidx)
-            .map(|s| s.connections.iter().map(|c| c.target).collect())
-            .unwrap_or_default();
-        for t in targets {
-            let e = depth.entry(t).or_insert(0);
-            *e = (*e).max(g + 1);
-        }
-    }
-    for (sidx, g) in depth {
-        if let Some(s) = sg.node_mut(sidx) {
-            s.generation = g;
-        }
-    }
 }
 
 /// All ancestors of `start` (inclusive) present in the graph, walking every parent.

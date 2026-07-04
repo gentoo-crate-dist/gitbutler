@@ -139,13 +139,14 @@ impl Graph {
         }
 
         let mut flags = SegmentTable::new(self.inner.node_bound(), SegmentFlags::empty());
-        let bases = self.paint_down_to_common(a, b, &mut flags);
+        let generations = self.derived_generations();
+        let bases = self.paint_down_to_common(a, b, &mut flags, &generations);
 
         if bases.is_empty() {
             return None;
         }
 
-        let result = self.remove_redundant(&bases, &mut flags);
+        let result = self.remove_redundant(&bases, &mut flags, &generations);
         result.first().copied()
     }
 
@@ -208,6 +209,7 @@ impl Graph {
     ) -> impl Iterator<Item = &Segment> {
         let first_parent: bool = first_parent.into();
         let mut flags = SegmentTable::new(self.inner.node_bound(), SegmentFlags::empty());
+        let generations = self.derived_generations();
         let mut queue = BinaryHeap::new();
         let mut sequence = 0;
         self.queue_segment_for_reachable_difference(
@@ -216,6 +218,7 @@ impl Graph {
             &mut flags,
             &mut queue,
             &mut sequence,
+            &generations,
         );
         self.queue_segment_for_reachable_difference(
             excluded,
@@ -223,6 +226,7 @@ impl Graph {
             &mut flags,
             &mut queue,
             &mut sequence,
+            &generations,
         );
 
         let mut segments = Vec::new();
@@ -238,12 +242,14 @@ impl Graph {
                         &mut flags,
                         &mut queue,
                         &mut sequence,
+                        &generations,
                     );
                 }
                 if self.excluded_frontier_is_past_emitted_segments(
                     &queue,
                     &flags,
                     max_emitted_generation,
+                    &generations,
                 ) {
                     break;
                 }
@@ -254,7 +260,7 @@ impl Graph {
                 continue;
             }
 
-            let generation = self[segment_id].generation;
+            let generation = generations.get(segment_id);
             max_emitted_generation =
                 Some(max_emitted_generation.map_or(generation, |max| max.max(generation)));
             segments.push(segment_id);
@@ -267,6 +273,7 @@ impl Graph {
                     &mut flags,
                     &mut queue,
                     &mut sequence,
+                    &generations,
                 );
             }
         }
@@ -291,6 +298,7 @@ impl Graph {
         flags: &mut SegmentTable<SegmentFlags>,
         queue: &mut BinaryHeap<(Reverse<usize>, Reverse<usize>, bool, SegmentIndex)>,
         sequence: &mut usize,
+        generations: &SegmentTable<usize>,
     ) {
         let segment_flags = flags.get_mut(segment_id);
         if is_excluded {
@@ -307,7 +315,7 @@ impl Graph {
         }
 
         queue.push((
-            Reverse(self[segment_id].generation),
+            Reverse(generations.get(segment_id)),
             Reverse(*sequence),
             is_excluded,
             segment_id,
@@ -348,6 +356,7 @@ impl Graph {
         queue: &BinaryHeap<(Reverse<usize>, Reverse<usize>, bool, SegmentIndex)>,
         flags: &SegmentTable<SegmentFlags>,
         max_emitted_generation: Option<usize>,
+        generations: &SegmentTable<usize>,
     ) -> bool {
         if queue.iter().any(|(_, _, is_excluded, segment_id)| {
             !*is_excluded && !flags.get(*segment_id).contains(SegmentFlags::SEGMENT2)
@@ -361,7 +370,7 @@ impl Graph {
         let Some(min_excluded_generation) = queue
             .iter()
             .filter_map(|(_, _, is_excluded, segment_id)| {
-                is_excluded.then_some(self[*segment_id].generation)
+                is_excluded.then_some(generations.get(*segment_id))
             })
             .min()
         else {
@@ -503,6 +512,22 @@ impl Graph {
             })
     }
 
+    /// Longest path from a root (a segment with no incoming connection); roots are generation
+    /// 0. Derived on demand — the structure is final once built, so this is a pure function of
+    /// the graph (formerly a stored per-segment field maintained by the builder). Used as the
+    /// walk priority of the merge-base family: lower = closer to the tips.
+    pub(crate) fn derived_generations(&self) -> SegmentTable<usize> {
+        let mut depth = SegmentTable::new(self.inner.node_bound(), 0usize);
+        for sidx in self.inner.toposort() {
+            let g = depth.get(sidx);
+            for edge in self.inner.edges_directed(sidx, Direction::Outgoing) {
+                let e = depth.get_mut(edge.target());
+                *e = (*e).max(g + 1);
+            }
+        }
+        depth
+    }
+
     /// Paint segments reachable from `first` with SEGMENT1 and from `second` with SEGMENT2.
     /// When a segment has both flags, it's a potential merge-base.
     /// Returns all potential merge-bases with their generation numbers.
@@ -511,6 +536,7 @@ impl Graph {
         first: SegmentIndex,
         second: SegmentIndex,
         flags: &mut SegmentTable<SegmentFlags>,
+        generations: &SegmentTable<usize>,
     ) -> Vec<(SegmentIndex, usize)> {
         // Priority queue ordered by generation (higher generation = closer to root = lower priority).
         // We use Reverse because BinaryHeap is a max-heap and we want segments with *lower* generation
@@ -520,12 +546,12 @@ impl Graph {
         // Initialize first segment
         let first_flags = flags.get_mut(first);
         *first_flags |= SegmentFlags::SEGMENT1;
-        queue.push((Reverse(self[first].generation), first));
+        queue.push((Reverse(generations.get(first)), first));
 
         // Initialize second segment
         let second_flags = flags.get_mut(second);
         *second_flags |= SegmentFlags::SEGMENT2;
-        queue.push((Reverse(self[second].generation), second));
+        queue.push((Reverse(generations.get(second)), second));
 
         let mut out = Vec::new();
 
@@ -563,7 +589,7 @@ impl Graph {
                 let parent_flags = flags.get_mut(parent_id);
                 if (*parent_flags & flags_without_result) != flags_without_result {
                     *parent_flags |= flags_without_result;
-                    queue.push((Reverse(self[parent_id].generation), parent_id));
+                    queue.push((Reverse(generations.get(parent_id)), parent_id));
                 }
             }
         }
@@ -577,6 +603,7 @@ impl Graph {
         &self,
         segments: &[(SegmentIndex, usize)],
         flags: &mut SegmentTable<SegmentFlags>,
+        generations: &SegmentTable<usize>,
     ) -> Vec<SegmentIndex> {
         if segments.is_empty() {
             return Vec::new();
@@ -606,7 +633,7 @@ impl Graph {
                 // Prevent double-addition
                 if !parent_flags.contains(SegmentFlags::STALE) {
                     parent_flags.insert(SegmentFlags::STALE);
-                    walk_start.push((parent_id, self[parent_id].generation));
+                    walk_start.push((parent_id, generations.get(parent_id)));
                 }
             }
         }
@@ -669,7 +696,7 @@ impl Graph {
                     let parent_flags = flags.get_mut(parent_id);
                     if !parent_flags.contains(SegmentFlags::STALE) {
                         parent_flags.insert(SegmentFlags::STALE);
-                        stack.push((parent_id, self[parent_id].generation));
+                        stack.push((parent_id, generations.get(parent_id)));
                     }
                 }
 
