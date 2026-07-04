@@ -61,13 +61,36 @@ impl<'graph> StepEdgeRef<'graph> {
     }
 }
 
-/// The rebase step graph: an arena of [`Step`]s with ordered parent edges.
+/// Where a reference sits, stored explicitly: references are POSITIONS, not topology.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredAnchor {
+    /// The node this reference resolves to (a pick, or its tombstone after deletion) — the
+    /// commit the ref points at, reached lazily through tombstones at read time.
+    pub anchor: StepGraphIndex,
+    /// The picks approaching this reference's position from above, with their parent-slots —
+    /// several when a shared chain is entered by more than one leg (a merge convergence).
+    /// Empty for a chain root (nothing above).
+    pub via: Vec<(StepGraphIndex, usize)>,
+    /// Orders co-located references above one anchor, 0 = closest to the anchor.
+    pub rank: usize,
+    /// The entry into this position was ambiguous when derived — more than one thing (legs
+    /// and/or refs stacked above) converged on it. Ambiguous chains belong to their anchor's
+    /// lane, never to a single approaching leg.
+    pub ambiguous: bool,
+}
+
+/// The rebase step graph: an arena of [`Step`]s where PICKS carry ordered parent edges and
+/// REFERENCES carry explicit positions — edges are the truth for commits, anchors the truth
+/// for refs, with no overlap. A reference is never part of the edge graph, so it cannot bear
+/// connectivity.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct StepGraph {
     nodes: Vec<Step>,
     edges: Vec<Option<EdgeRecord>>,
     outgoing: Vec<Vec<StepEdgeIndex>>,
     incoming: Vec<Vec<StepEdgeIndex>>,
+    /// `Some` exactly for reference nodes.
+    anchors: Vec<Option<StoredAnchor>>,
 }
 
 impl StepGraph {
@@ -81,7 +104,28 @@ impl StepGraph {
         self.nodes.push(step);
         self.outgoing.push(Vec::new());
         self.incoming.push(Vec::new());
+        self.anchors.push(None);
         self.nodes.len() - 1
+    }
+
+    /// The stored position of the reference at `node`, if it is a positioned reference.
+    pub(crate) fn anchor_of(&self, node: StepGraphIndex) -> Option<StoredAnchor> {
+        self.anchors.get(node).cloned().flatten()
+    }
+
+    /// Set (or clear) the stored position of the reference at `node`.
+    pub(crate) fn set_anchor(&mut self, node: StepGraphIndex, anchor: Option<StoredAnchor>) {
+        self.anchors[node] = anchor;
+    }
+
+    /// All positioned references, ascending by node id.
+    pub(crate) fn anchored_refs(
+        &self,
+    ) -> impl Iterator<Item = (StepGraphIndex, StoredAnchor)> + '_ {
+        self.anchors
+            .iter()
+            .enumerate()
+            .filter_map(|(node, anchor)| anchor.clone().map(|a| (node, a)))
     }
 
     /// Add an edge from `source` to `target` and return its stable id.

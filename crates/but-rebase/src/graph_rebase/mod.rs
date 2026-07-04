@@ -5,6 +5,7 @@
 //! and in the darknes bind them.
 
 mod creation;
+mod positions;
 pub mod rebase;
 mod step_graph;
 pub mod traverse;
@@ -15,8 +16,6 @@ use but_core::{RefMetadata, commit::SignCommit};
 use but_graph::init::Overlay;
 pub use creation::GraphEditorOptions;
 use gix::refs::transaction::RefEdit;
-
-use crate::graph_rebase::util::first_ordered_parent;
 
 use crate::graph_rebase::cherry_pick::{PickMode, TreeMergeMode};
 pub mod cherry_pick;
@@ -347,7 +346,10 @@ impl<'ws, 'meta, M: RefMetadata> SuccessfulRebase<'ws, 'meta, M> {
                         Step::Pick(Pick { id, .. }) => Some((*id, None)),
                         Step::Reference { refname, .. } => {
                             if let Some(to_reference) =
-                                first_ordered_parent(&self.graph, selector.id)
+                                crate::graph_rebase::positions::resolve_to_pick(
+                                    &self.graph,
+                                    selector.id,
+                                )
                                 && let Step::Pick(Pick { id, .. }) = self.graph[to_reference]
                             {
                                 Some((id, Some(refname.clone())))

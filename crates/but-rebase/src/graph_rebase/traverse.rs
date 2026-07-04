@@ -107,7 +107,28 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             .history
             .normalize_selector(start.to_selector(self)?)?
             .id;
-        Ok(reachable_from(&self.graph, start).map(|id| self.new_selector(id)))
+        Ok(self
+            .reachable_ids(start)
+            .into_iter()
+            .map(|id| self.new_selector(id)))
+    }
+
+    /// Node-era reachability over the positioned graph: picks and tombstones by edges (a
+    /// reference start descends from its anchor), plus every reference chain the walk
+    /// entered.
+    fn reachable_ids(&self, start: StepGraphIndex) -> Vec<StepGraphIndex> {
+        let seed = crate::graph_rebase::positions::resolve_to_pick(&self.graph, start);
+        let picks: std::collections::HashSet<StepGraphIndex> = match seed {
+            Some(seed) => reachable_from(&self.graph, seed).collect(),
+            None => Default::default(),
+        };
+        let mut all: Vec<StepGraphIndex> = picks.iter().copied().collect();
+        all.extend(crate::graph_rebase::positions::refs_reachable_with(
+            &self.graph,
+            start,
+            &picks,
+        ));
+        all
     }
 
     /// The rev-set `start ^excluded`, yielding selectors.
@@ -124,7 +145,14 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             .history
             .normalize_selector(excluded.to_selector(self)?)?
             .id;
-        Ok(a_not_b(&self.graph, start, excluded).map(|id| self.new_selector(id)))
+        let excluded: std::collections::HashSet<StepGraphIndex> =
+            self.reachable_ids(excluded).into_iter().collect();
+        let result: Vec<StepGraphIndex> = self
+            .reachable_ids(start)
+            .into_iter()
+            .filter(|id| !excluded.contains(id))
+            .collect();
+        Ok(result.into_iter().map(|id| self.new_selector(id)))
     }
 
     /// How far `a` is ahead of and behind `b`, counted in commits.
@@ -140,6 +168,15 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     pub fn ahead_behind(&self, a: impl ToSelector, b: impl ToSelector) -> Result<AheadBehind> {
         let a = self.history.normalize_selector(a.to_selector(self)?)?.id;
         let b = self.history.normalize_selector(b.to_selector(self)?)?.id;
+        // Only picks count, so reference endpoints stand for their anchors.
+        let a = crate::graph_rebase::positions::resolve_to_pick(&self.graph, a);
+        let b = crate::graph_rebase::positions::resolve_to_pick(&self.graph, b);
+        let (Some(a), Some(b)) = (a, b) else {
+            return Ok(AheadBehind {
+                ahead: 0,
+                behind: 0,
+            });
+        };
         Ok(AheadBehind {
             ahead: count_picks(&self.graph, a_not_b(&self.graph, a, b)),
             behind: count_picks(&self.graph, a_not_b(&self.graph, b, a)),
@@ -164,7 +201,15 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     .map(|selector| selector.id)
             })
             .transpose()?;
-        Ok(all_until_optional_limit(&self.graph, start, limit).map(|id| self.new_selector(id)))
+        let excluded: std::collections::HashSet<StepGraphIndex> = limit
+            .map(|limit| self.reachable_ids(limit).into_iter().collect())
+            .unwrap_or_default();
+        let result: Vec<StepGraphIndex> = self
+            .reachable_ids(start)
+            .into_iter()
+            .filter(|id| !excluded.contains(id))
+            .collect();
+        Ok(result.into_iter().map(|id| self.new_selector(id)))
     }
 }
 

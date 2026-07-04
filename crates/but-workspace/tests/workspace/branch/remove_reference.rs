@@ -59,7 +59,7 @@ fn no_errors_due_to_idempotency_in_empty_workspace() -> anyhow::Result<()> {
 
     // repo and workspace should still look like before.
     insta::assert_snapshot!(visualize_commit_graph_all(&repo)?, @"* 3183e43 (HEAD -> gitbutler/workspace, main, B, A) M1");
-    let ws = ws.graph.into_workspace_of_redone_traversal(&repo, &meta)?;
+    let ws = ws.redo_with_overlay(&repo, &meta, Default::default())?;
     insta::assert_snapshot!(graph_workspace(&ws), @"📕🏘️⚠️:1:gitbutler/workspace[🌳] <> ✓! on 3183e43");
 
     Ok(())
@@ -107,7 +107,7 @@ fn journey_single_branch_no_ws_commit_no_target() -> anyhow::Result<()> {
         .expect("we deleted something");
     }
 
-    let ws = ws.graph.into_workspace_of_redone_traversal(&repo, &meta)?;
+    let ws = ws.redo_with_overlay(&repo, &meta, Default::default())?;
     insta::assert_snapshot!(graph_workspace(&ws), @"
     📕🏘️⚠️:2:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
     └── ≡:0:anon: on 3183e43
@@ -283,7 +283,7 @@ fn journey_no_ws_commit_no_target() -> anyhow::Result<()> {
         "recreate ref to show metadata is present and unchanged",
     )?;
 
-    let ws = ws.graph.into_workspace_of_redone_traversal(&repo, &meta)?;
+    let ws = ws.redo_with_overlay(&repo, &meta, Default::default())?;
     insta::assert_snapshot!(graph_workspace(&ws), @"
     📕🏘️⚠️:1:gitbutler/workspace[🌳] <> ✓! on 3183e43
     ├── ≡📙:2:A on 3183e43 {0}
@@ -355,7 +355,7 @@ fn journey_no_ws_commit_no_target() -> anyhow::Result<()> {
 
     // A remains as we recreated it.
     insta::assert_snapshot!(visualize_commit_graph_all(&repo)?, @"* 3183e43 (HEAD -> gitbutler/workspace, main, A) M1");
-    let ws = ws.graph.into_workspace_of_redone_traversal(&repo, &meta)?;
+    let ws = ws.redo_with_overlay(&repo, &meta, Default::default())?;
     // The workspace is completely empty.
     insta::assert_snapshot!(graph_workspace(&ws), @"📕🏘️⚠️:1:gitbutler/workspace[🌳] <> ✓! on 3183e43");
 
