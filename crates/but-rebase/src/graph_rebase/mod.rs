@@ -3,6 +3,16 @@
 //! one vector based to find them,
 //! one mess of git2 code to bring them all,
 //! and in the darknes bind them.
+//!
+//! ---
+//!
+//! A graph-based rebase engine. The workspace is loaded into an `Editor` as a `StepGraph`: an
+//! arena of `Step`s where a `Pick` is a commit to cherry-pick and a `Reference` is a branch.
+//! Callers mutate the graph (insert/move/remove picks, create/move references), then
+//! `Editor::rebase` replays it — cherry-picking every mutable pick onto its new parents and
+//! producing the reference updates to write.
+//!
+//! References are POSITIONS, not nodes with edges — see the `positions` module for the model.
 
 mod creation;
 mod positions;
@@ -128,7 +138,12 @@ pub enum Step {
         /// kept in the graph for traversal but never written.
         mutable: bool,
     },
-    /// Used as a placeholder after removing a pick or reference
+    /// A tombstone left behind when a pick or reference is removed.
+    ///
+    /// The node is never deleted from the arena — that would invalidate every node id after it.
+    /// Instead the slot becomes `None`, keeping ids stable. It retains its first
+    /// outgoing edge so that resolving a reference downward walks THROUGH it to the next live
+    /// pick. A tombstone must not survive into materialized output.
     None,
 }
 
@@ -159,13 +174,13 @@ impl Step {
     }
 }
 
-/// Used to represent a connection between a given commit.
+/// A parent link from a child pick to one of its parents.
 #[derive(Debug, Clone)]
 pub(crate) struct Edge {
-    /// Represents in which order the `parent` fields should be written out
+    /// This parent's slot in the child commit's parent list (0 = first parent).
     ///
-    /// A child commit should have edges that all have unique orders. In order
-    /// to achive that we can employ the following semantics.
+    /// A child's outgoing edges must all have distinct orders; the order is what the rebase
+    /// writes out as the commit's parent ordering, so a merge's first/second parent is preserved.
     order: usize,
 }
 
@@ -437,9 +452,17 @@ fn lookup_step(graph: &StepGraph, history: &RevisionHistory, selector: Selector)
     Ok(graph[normalized.id].clone())
 }
 
-/// Provides data about how the editor instance was transformed.
+/// How node ids and commit ids moved as the editor transformed the graph.
+///
+/// Some operations rebuild the graph and renumber its nodes, advancing the editor to a new
+/// REVISION. A [`Selector`] remembers the revision it was minted in, so before it can index the
+/// current graph it must be brought forward with `normalize_selector` — that is what `mappings`
+/// is for.
 #[derive(Debug, Clone, Default)]
 pub struct RevisionHistory {
+    /// One entry per revision transition: `mappings[r]` maps a node id at revision `r` to its id
+    /// at revision `r + 1`. `mappings.len()` is the current revision. `normalize_selector` walks a
+    /// selector's id forward through these until it reaches the current revision.
     mappings: Vec<HashMap<StepGraphIndex, StepGraphIndex>>,
     /// A mapping from any commits that were in the original mapping to a
     /// rewritten version.

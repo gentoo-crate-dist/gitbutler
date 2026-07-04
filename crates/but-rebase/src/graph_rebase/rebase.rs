@@ -47,8 +47,10 @@ impl<'ws, 'graph, M: RefMetadata> Editor<'ws, 'graph, M> {
 
         let mut history = self.history;
 
+        // Replay each step in dependency order into `output_graph`: cherry-pick mutable picks
+        // onto their already-rebuilt parents, copy immutable ones verbatim, and carry references
+        // across as positions.
         for step_idx in steps_to_pick {
-            // Do the frikkin rebase man!
             let step = self.graph[step_idx].clone();
             let new_idx = match step {
                 Step::Pick(pick) if !pick.mutable => {
@@ -212,17 +214,25 @@ impl<'ws, 'graph, M: RefMetadata> Editor<'ws, 'graph, M> {
             else {
                 continue;
             };
-            let via = stored
-                .via
-                .iter()
-                .filter_map(|(child, slot)| graph_mapping.get(child).map(|c| (*c, *slot)))
-                .collect();
+            // `Root`/`AllLegs` are structural and carry as-is; a `Lane`'s stored `(source, slot)`
+            // legs name OLD-graph nodes, so remap the source ids through `graph_mapping` (slots and
+            // ordering are preserved by the isomorphic rebuild).
+            let kind = match &stored.kind {
+                crate::graph_rebase::step_graph::ApproachKind::Lane(legs) => {
+                    crate::graph_rebase::step_graph::ApproachKind::Lane(
+                        legs.iter()
+                            .filter_map(|(src, slot)| graph_mapping.get(src).map(|s| (*s, *slot)))
+                            .collect(),
+                    )
+                }
+                other => other.clone(),
+            };
             output_graph.set_anchor(
                 *new_node,
                 Some(crate::graph_rebase::step_graph::StoredAnchor {
                     anchor: *new_anchor,
-                    via,
                     rank: stored.rank,
+                    kind,
                     ambiguous: stored.ambiguous,
                 }),
             );
@@ -279,11 +289,18 @@ fn order_steps_picking(graph: &StepGraph, heads: &[StepGraphIndex]) -> VecDeque<
     // Positioned references take no part in the dependency order: they have no edges, and
     // their only dependency — the anchor's mapping — is satisfied once every pick is
     // processed. They run at the very end, in stable node order.
-    let anchored_refs: Vec<StepGraphIndex> = graph.anchored_refs().map(|(node, _)| node).collect();
+    let anchored_refs: Vec<StepGraphIndex> = graph
+        .anchored_refs()
+        .filter(|(node, _)| matches!(graph[*node], Step::Reference { .. }))
+        .map(|(node, _)| node)
+        .collect();
+    // References take no part in the pick order (no edges); everything else — picks AND tombstones,
+    // even one carrying a leaked anchor — must be traversed, or its subtree is orphaned. Filter by
+    // the STEP, not by anchor presence (a non-reference with a stray anchor must not be skipped).
     let mut heads: Vec<StepGraphIndex> = heads
         .iter()
         .copied()
-        .filter(|h| graph.anchor_of(*h).is_none())
+        .filter(|h| !matches!(graph[*h], Step::Reference { .. }))
         .collect();
     let mut seen = heads.iter().cloned().collect::<HashSet<StepGraphIndex>>();
     // Reachable nodes with no outgoing nodes.

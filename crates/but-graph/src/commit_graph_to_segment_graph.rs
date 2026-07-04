@@ -639,6 +639,23 @@ fn facts<T: but_core::RefMetadata>(
 ///
 /// Inputs mirror the projection's enrichment: the workspace commit, the target that bounds/integrates,
 /// and the local→remote tracking map. `project_meta`/`options` are carried onto the `Graph`.
+///
+/// This is "gather-then-build": everything is decided as data BEFORE any segment exists, then
+/// materialized in one pass. Roughly, in order:
+///
+/// 1. **Facts** (`facts`) — the boundaries where segments start, which boundary owns each
+///    commit, and the tips in materialization order. Pure facts over `cg`; reads no segment.
+/// 2. **Lower bound** — the base all lanes and the target converge on.
+/// 3. **Lane plan** (`lane_plan`) — the NAME each tip's segment gets (some go anonymous so an
+///    empty named segment can float above them), decided before any segment is built.
+/// 4. **Materialize** — one local segment per tip holding its first-parent commit run, then the
+///    planned float placeholders (empty named segments) spliced above the anonymized tips.
+/// 5. **Connect** — each segment's bottom commit points at the segments owning its parents.
+/// 6. **Lane structure** — empty-workspace segment, advanced-outside branches, empty-branch
+///    splices. Runs before the remote passes so those link the lane segments at creation.
+/// 7. **Remote / target / entrypoint passes** — a remote root segment per local branch whose
+///    remote tip is present; the target's own remote segment when no local tracks it; regions for
+///    an extra (older) target position, an outside checkout, and any explicit tip left uncovered.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
     cg: &CommitGraph,
@@ -725,7 +742,9 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
                 .map(|n| (n.clone(), tip))
                 .or_else(|| plan.renames.get(&tip).cloned())
         };
-        if let Some(displaced) = floated.get(&tip).and_then(|fl| fl.displaced.as_ref())
+        if let Some(displaced) = floated
+            .get(&tip)
+            .and_then(|fl| fl.displaced_ref_name.as_ref())
             && let Some(c0) = commits.first_mut()
             && !c0.refs.iter().any(|r| r.ref_name == *displaced)
         {
@@ -1447,9 +1466,13 @@ fn name_entrypoint_segment(
 /// build-time name pushed aside by a metadata stack branch) returns to the commit as a passive
 /// ref.
 struct Float {
+    /// The commit whose segment goes anonymous so the empty named segment can float above it.
     tip: gix::ObjectId,
+    /// The name given to the empty segment spliced in between the workspace and `tip`.
     name: gix::refs::FullName,
-    displaced: Option<gix::refs::FullName>,
+    /// A build-time name pushed aside by a metadata stack branch; it returns to `tip`'s commit as
+    /// a passive ref. `None` when nothing was displaced.
+    displaced_ref_name: Option<gix::refs::FullName>,
 }
 
 /// The managed lane NAME decisions, computed before any segment mutation happens (phase 2 of
@@ -1719,7 +1742,7 @@ fn lane_plan<T: but_core::RefMetadata>(
             plan.floats.push(Float {
                 tip: parent,
                 name: float_name,
-                displaced,
+                displaced_ref_name: displaced,
             });
         }
     }

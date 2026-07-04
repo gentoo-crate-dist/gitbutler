@@ -1,5 +1,13 @@
 #![deny(missing_docs)]
-//! Testing utilities
+//! Testing utilities for the step graph.
+//!
+//! Two families of helpers:
+//! - **Rendering** — the `Testing` trait's `steps_ascii` draws the graph as an ASCII DAG for
+//!   snapshot tests, and `TestingDot` emits Graphviz `dot`. The rest of the module (chain
+//!   grouping, head finding, topological order) supports that rendering.
+//! - **Parity** — `rewalk_parity_report` is the oracle for the reference-position model:
+//!   mutating the graph and projecting it must match rebuilding ("rewalking") the graph from
+//!   scratch and projecting that. Divergence means a mutation left positions inconsistent.
 
 use std::{
     cmp::Ordering,
@@ -13,7 +21,8 @@ use renderdag::{Ancestor, GraphRowRenderer, Renderer as _};
 #[cfg(test)]
 use crate::graph_rebase::Edge;
 use crate::graph_rebase::{
-    Editor, Pick, Selector, Step, StepGraph, StepGraphIndex, SuccessfulRebase, workspace::Subgraph,
+    Editor, Pick, Selector, Step, StepGraph, StepGraphIndex, SuccessfulRebase, positions,
+    workspace::Subgraph,
 };
 
 /// An extension trait that adds debugging output for graphs
@@ -122,14 +131,14 @@ fn format_step(step: &Step, title: Option<String>) -> String {
     }
 }
 
-/// The reference chains, grouped by their (anchor, via) position and ordered by rank —
+/// The reference chains, grouped by their (anchor, approach) position and ordered by rank —
 /// the render's view of positioned refs as rows.
 type ChainKey = (StepGraphIndex, Vec<(StepGraphIndex, usize)>);
 
 fn chains(graph: &StepGraph) -> HashMap<ChainKey, Vec<StepGraphIndex>> {
     let mut out: HashMap<_, Vec<(usize, StepGraphIndex)>> = HashMap::new();
     for (node, stored) in graph.anchored_refs() {
-        out.entry((stored.anchor, stored.via.clone()))
+        out.entry((stored.anchor, positions::ref_approach(graph, node)))
             .or_default()
             .push((stored.rank, node));
     }
@@ -156,9 +165,10 @@ fn find_heads(graph: &StepGraph) -> Vec<StepGraphIndex> {
         .node_indices()
         .filter(|idx| match graph.anchor_of(*idx) {
             Some(stored) => {
-                stored.via.is_empty()
+                let approach = positions::ref_approach(graph, *idx);
+                approach.is_empty()
                     && chains
-                        .get(&(stored.anchor, stored.via.clone()))
+                        .get(&(stored.anchor, approach))
                         .and_then(|members| members.last())
                         == Some(idx)
             }
@@ -177,7 +187,7 @@ fn get_sorted_parents(graph: &StepGraph, node: StepGraphIndex) -> Vec<StepGraphI
     let chains = chains(graph);
     if let Some(stored) = graph.anchor_of(node) {
         let chain = chains
-            .get(&(stored.anchor, stored.via.clone()))
+            .get(&(stored.anchor, positions::ref_approach(graph, node)))
             .map(Vec::as_slice)
             .unwrap_or_default();
         let below = chain
@@ -198,7 +208,9 @@ fn get_sorted_parents(graph: &StepGraph, node: StepGraphIndex) -> Vec<StepGraphI
         .map(|(order, target)| {
             chains
                 .iter()
-                .find(|((anchor, via), _)| *anchor == target && via.contains(&(node, order)))
+                .find(|((anchor, approach), _)| {
+                    *anchor == target && approach.contains(&(node, order))
+                })
                 .and_then(|(_, chain)| chain.last().copied())
                 .unwrap_or(target)
         })
@@ -420,6 +432,25 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
 
         Ok(sections.join("\n\n"))
     }
+}
+
+/// The C2 parity oracle: project the mutated editor graph, then materialize, re-walk the
+/// repository, and project the fresh editor — both projections rendered with
+/// [`Editor::graph_workspace_ascii`]. Equal strings mean mutate-then-project and
+/// rewalk-then-project agree, which is the invariant that lets editor sessions live directly
+/// on the walked graph.
+///
+/// Returns `(mutated, rewalked)` so callers can census divergences before asserting.
+pub fn rewalk_parity_report<M: RefMetadata>(
+    rebase: SuccessfulRebase<'_, '_, M>,
+    repo: &gix::Repository,
+) -> Result<(String, String)> {
+    let editor = rebase.into_editor();
+    let mutated = editor.graph_workspace_ascii()?;
+    let outcome = editor.rebase()?.materialize()?;
+    let fresh = Editor::create(outcome.workspace, outcome.meta, repo)?;
+    let rewalked = fresh.graph_workspace_ascii()?;
+    Ok((mutated, rewalked))
 }
 
 #[cfg(test)]
@@ -930,7 +961,7 @@ mod tests {
         // C -> shared
         add_edge(&mut graph, c, shared, 0);
 
-        // D forks to E, F, shared (shared is also reached via C)
+        // D forks to E, F, shared (shared is also reached approach C)
         add_edge(&mut graph, d, e, 0);
         add_edge(&mut graph, d, f, 1);
         add_edge(&mut graph, d, shared, 2);

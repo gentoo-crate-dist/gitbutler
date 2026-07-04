@@ -18,7 +18,7 @@ pub(crate) fn collect_ordered_parents(
 /// Pruned depth-first search for `target`'s commit parents in parent order, descending through
 /// non-commit steps.
 ///
-/// A parent slot that carries a reference chain (the edge is a stored via entry of a chain
+/// A parent slot that carries a reference chain (the edge is a stored approach entry of a chain
 /// anchored at its pick) yields to any plain slot resolving to the same pick, and only the
 /// first of several carrying slots survives — the same collapse the node-era search produced
 /// when a ref path and a direct path reached one pick. Plain duplicate slots are all kept
@@ -31,8 +31,9 @@ fn ordered_commit_parents(graph: &StepGraph, target: StepGraphIndex) -> Vec<Step
 
     let carries_chain = |edge: &crate::graph_rebase::step_graph::StepEdgeRef<'_>| {
         matches!(graph[edge.target()], Step::Pick(_))
-            && graph.anchored_refs().any(|(_, stored)| {
-                stored.via.contains(&(target, edge.weight().order))
+            && graph.anchored_refs().any(|(node, stored)| {
+                crate::graph_rebase::positions::ref_approach(graph, node)
+                    .contains(&(target, edge.weight().order))
                     && crate::graph_rebase::positions::resolve_to_pick(graph, stored.anchor)
                         == Some(edge.target())
             })

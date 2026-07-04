@@ -61,22 +61,69 @@ impl<'graph> StepEdgeRef<'graph> {
     }
 }
 
-/// Where a reference sits, stored explicitly: references are POSITIONS, not topology.
+/// How a reference's approaching legs (its `approach`) relate to the picks that currently feed its
+/// anchor — the part of a position that plain edge topology can't recover once reference edges
+/// are stripped. Derived from the fresh `approach` at write time and re-resolved against the CURRENT
+/// pick edges at read time, so it survives edge churn that leaves a stored `(source-pick, slot)`
+/// list stale.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) enum ApproachKind {
+    /// Nothing descends into this position — a chain root (`approach = []`): a remote ref stacked
+    /// above a tip, an empty single-branch top.
+    #[default]
+    Root,
+    /// Every leg into the anchor feeds this position — a plain chain, or a merge chain both
+    /// lanes converge on (`approach = legs_into_pick(anchor)`).
+    AllLegs,
+    /// Only these specific legs feed this position — one lane of a merge. Keyed by the full
+    /// `(source-pick, parent-slot)` leg, not the slot alone: two distinct sources can feed one
+    /// anchor at the same slot (and one source at two slots), so both coordinates are needed to
+    /// pick the right lane. Derived approach = `legs_into_pick(anchor)` intersected with this set. The
+    /// source id is remapped through `graph_mapping` on rebase and re-slotted by `rewrite_approach_leg`.
+    Lane(Vec<(StepGraphIndex, usize)>),
+}
+
+/// Where a reference sits, stored explicitly: references are POSITIONS, not topology. The `approach`
+/// legs are DERIVED from `kind` against the live pick edges (see `positions::ref_approach`), never
+/// stored — a source-pick node id in a leg list goes stale when a later op tombstones or re-slots
+/// it. `kind` is authored once (creation / fresh insert, against complete legs) and PRESERVED
+/// through re-anchors; `ambiguous` is a separate stored convergence bit, NOT `approach.len() > 1`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredAnchor {
     /// The node this reference resolves to (a pick, or its tombstone after deletion) — the
     /// commit the ref points at, reached lazily through tombstones at read time.
     pub anchor: StepGraphIndex,
-    /// The picks approaching this reference's position from above, with their parent-slots —
-    /// several when a shared chain is entered by more than one leg (a merge convergence).
-    /// Empty for a chain root (nothing above).
-    pub via: Vec<(StepGraphIndex, usize)>,
     /// Orders co-located references above one anchor, 0 = closest to the anchor.
     pub rank: usize,
-    /// The entry into this position was ambiguous when derived — more than one thing (legs
-    /// and/or refs stacked above) converged on it. Ambiguous chains belong to their anchor's
-    /// lane, never to a single approaching leg.
+    /// How this reference's approaching legs relate to the picks feeding its anchor.
+    pub kind: ApproachKind,
+    /// The entry into this position converged — more than one thing (legs and/or refs stacked
+    /// above) met here (a merge). A creation-time signal distinct from `approach.len() > 1` (a position
+    /// can converge yet resolve to a single leg), so it is stored and PRESERVED, not re-derived.
     pub ambiguous: bool,
+}
+
+impl StoredAnchor {
+    /// Author a FRESH position: classify the intended `approach` against `anchor`'s CURRENT legs into a
+    /// [`ApproachKind`], with `ambiguous` from the approach convergence. Only correct when the anchor's legs
+    /// are already complete — use for brand-new references, never to re-place an existing one.
+    pub(crate) fn place(
+        graph: &StepGraph,
+        anchor: StepGraphIndex,
+        rank: usize,
+        approach: &[(StepGraphIndex, usize)],
+    ) -> Self {
+        let legs = match crate::graph_rebase::positions::resolve_to_pick(graph, anchor) {
+            Some(pick) => crate::graph_rebase::positions::legs_into_pick(graph, pick),
+            None => Vec::new(),
+        };
+        StoredAnchor {
+            anchor,
+            rank,
+            kind: crate::graph_rebase::positions::classify_approach(approach, &legs),
+            ambiguous: approach.len() > 1,
+        }
+    }
 }
 
 /// The rebase step graph: an arena of [`Step`]s where PICKS carry ordered parent edges and
@@ -89,7 +136,7 @@ pub(crate) struct StepGraph {
     edges: Vec<Option<EdgeRecord>>,
     outgoing: Vec<Vec<StepEdgeIndex>>,
     incoming: Vec<Vec<StepEdgeIndex>>,
-    /// `Some` exactly for reference nodes.
+    /// `Some` exactly for reference nodes; carries the ref's anchor, rank, kind, and ambiguity.
     anchors: Vec<Option<StoredAnchor>>,
 }
 
@@ -113,9 +160,18 @@ impl StepGraph {
         self.anchors.get(node).cloned().flatten()
     }
 
-    /// Set (or clear) the stored position of the reference at `node`.
+    /// Set (or clear) the stored position of the reference at `node`. The [`ApproachKind`] is authored
+    /// by the caller (via [`StoredAnchor::place`] for a fresh position, or preserved on an existing
+    /// anchor being re-anchored), so this just stores it.
     pub(crate) fn set_anchor(&mut self, node: StepGraphIndex, anchor: Option<StoredAnchor>) {
         self.anchors[node] = anchor;
+    }
+
+    /// The [`ApproachKind`] of the reference at `node`, if it is a positioned reference.
+    pub(crate) fn ref_kind(&self, node: StepGraphIndex) -> Option<ApproachKind> {
+        self.anchors
+            .get(node)
+            .and_then(|a| a.as_ref().map(|a| a.kind.clone()))
     }
 
     /// All positioned references, ascending by node id.
