@@ -77,6 +77,9 @@ pub struct CommitGraph {
     by_id: HashMap<gix::ObjectId, CommitIdx>,
     /// Per node, one slot per `parent_ids` entry — presence and connectivity of that edge.
     parent_slots: Vec<Vec<ParentSlot>>,
+    /// Nodes the EDITOR removed (see the mutation surface). A tombstoned node keeps its arena
+    /// index and (stale) payload; id-based reads skip it. Walk-built graphs have none.
+    tombstoned: Vec<bool>,
     /// `parent → children` adjacency, derived at build time so we can detect branch points and walk
     /// downward (the projection walks from the workspace tip toward the base).
     children: Vec<Vec<CommitIdx>>,
@@ -147,11 +150,13 @@ impl CommitGraph {
             }
         }
 
+        let tombstoned = vec![false; nodes.len()];
         let mut graph = CommitGraph {
             nodes,
             by_id,
             parent_slots,
             children,
+            tombstoned,
             entrypoint,
             entrypoint_ref: None,
             managed_ws_commits: HashSet::new(),
@@ -416,6 +421,120 @@ impl CommitGraph {
             .iter()
             .filter(|n| n.commit.flags.contains(CommitFlags::InWorkspace))
             .map(|n| n.commit.id)
+    }
+
+    // --- The EDITOR MUTATION SURFACE ---
+    //
+    // but-rebase's editor mutates a CommitGraph in place: arena indices are the stable node
+    // ids, `ObjectId` is payload. These writes maintain `by_id`, the children adjacency, and
+    // the raw `parent_ids` payload. `generation` is creation-time data and NOT maintained.
+
+    /// Append a fresh node with `id` as payload (`None` = born tombstoned) and no parents.
+    pub fn add_node(&mut self, id: Option<gix::ObjectId>) -> CommitIdx {
+        let idx = self.nodes.len();
+        self.nodes.push(CommitNode {
+            commit: Commit {
+                id: id.unwrap_or_else(|| gix::ObjectId::null(gix::hash::Kind::Sha1)),
+                parent_ids: Vec::new(),
+                flags: CommitFlags::empty(),
+                refs: Vec::new(),
+            },
+            generation: 0,
+        });
+        self.parent_slots.push(Vec::new());
+        self.children.push(Vec::new());
+        self.tombstoned.push(id.is_none());
+        if let Some(id) = id {
+            self.by_id.insert(id, idx);
+        }
+        idx
+    }
+
+    /// Overwrite the node's payload id — `None` tombstones it in place (the stale payload is
+    /// retained, id-based lookups stop finding it), `Some` (re)vitalizes it.
+    pub fn set_node_id(&mut self, idx: CommitIdx, id: Option<gix::ObjectId>) {
+        match id {
+            Some(id) => {
+                self.tombstoned[idx] = false;
+                self.set_commit_id(idx, id);
+            }
+            None => {
+                let old = self.nodes[idx].commit.id;
+                if self.by_id.get(&old) == Some(&idx) {
+                    self.by_id.remove(&old);
+                }
+                self.tombstoned[idx] = true;
+            }
+        }
+    }
+
+    /// Rewrite the commit id at `idx` IN PLACE — THE rebase write. The node index, its slots,
+    /// and its children survive; `by_id`, the children's raw `parent_ids` entries, and the
+    /// id-addressed markers (entrypoint, managed-ws) follow the payload.
+    pub fn set_commit_id(&mut self, idx: CommitIdx, id: gix::ObjectId) {
+        let old = self.nodes[idx].commit.id;
+        self.nodes[idx].commit.id = id;
+        if self.by_id.get(&old) == Some(&idx) {
+            self.by_id.remove(&old);
+        }
+        self.by_id.insert(id, idx);
+        for child in self.children[idx].clone() {
+            for (slot_pos, slot) in self.parent_slots[child].iter().enumerate() {
+                if slot.target == Some(idx) {
+                    self.nodes[child].commit.parent_ids[slot_pos] = id;
+                }
+            }
+        }
+        if self.entrypoint == Some(old) {
+            self.entrypoint = Some(id);
+        }
+        if self.managed_ws_commits.remove(&old) {
+            self.managed_ws_commits.insert(id);
+        }
+    }
+
+    /// Overwrite `idx`'s whole parent array — the editor's ordered-slot write. Every new slot
+    /// is PRESENT and CONNECTED; the raw `parent_ids` payload derives from the targets and the
+    /// children adjacency follows.
+    pub fn set_parents(&mut self, idx: CommitIdx, parents: Vec<CommitIdx>) {
+        for slot in std::mem::take(&mut self.parent_slots[idx]) {
+            if let Some(t) = slot.target
+                && let Some(pos) = self.children[t].iter().position(|&c| c == idx)
+            {
+                self.children[t].remove(pos);
+            }
+        }
+        self.nodes[idx].commit.parent_ids =
+            parents.iter().map(|&p| self.nodes[p].commit.id).collect();
+        self.parent_slots[idx] = parents
+            .iter()
+            .map(|&p| ParentSlot {
+                target: Some(p),
+                connected: true,
+            })
+            .collect();
+        for &p in &parents {
+            self.children[p].push(idx);
+        }
+    }
+
+    /// Arena length, tombstones included.
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// The payload id at `idx` — `None` for tombstones.
+    pub fn node_payload(&self, idx: CommitIdx) -> Option<gix::ObjectId> {
+        (!self.tombstoned[idx]).then(|| self.nodes[idx].commit.id)
+    }
+
+    /// The parent TARGETS of `idx` in slot order. Only meaningful once every slot is
+    /// editor-authored (present) — walk-built graphs can have absent slots.
+    pub fn parent_indices(&self, idx: CommitIdx) -> Vec<CommitIdx> {
+        self.parent_slots[idx]
+            .iter()
+            .map(|slot| slot.target.expect("editor-authored slots are present"))
+            .collect()
     }
 }
 

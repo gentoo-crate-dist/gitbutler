@@ -409,6 +409,15 @@ fn create_native(
         let ix = graph.add_node(Step::Pick(pick));
         pick_by_id.insert(id, ix);
     }
+    // ARENA IDENTITY (dissolve invariant): the pick arena mirrors the CommitGraph arena
+    // index-for-index — Node(i) is commit i. The dissolve swaps the former for the latter on
+    // the strength of this.
+    debug_assert!(
+        cg.commit_ids()
+            .enumerate()
+            .all(|(i, id)| graph.commit_id(StepGraphIndex::Node(i)) == Some(id)),
+        "native pick arena must mirror the CommitGraph arena index-for-index"
+    );
 
     for id in cg.commit_ids().collect::<Vec<_>>() {
         let ix = pick_by_id[&id];
@@ -486,6 +495,11 @@ fn create_native(
         .collect::<Result<Vec<_>>>()?;
 
     crate::graph_rebase::positions::debug_assert_positions_total(&graph);
+    // Assert mode also arms the DISSOLVE oracle: a clone of the carried CommitGraph shadows
+    // every arena write from here on, compared at materialize.
+    if std::env::var("BUT_REBASE_NATIVE").ok().as_deref() == Some("assert") {
+        graph.install_shadow(cg.clone());
+    }
     Ok((graph, references, checkouts))
 }
 

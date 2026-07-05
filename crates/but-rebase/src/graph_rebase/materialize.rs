@@ -14,6 +14,7 @@ use crate::graph_rebase::{Checkout, MaterializeOutcome, Pick, Step, SuccessfulRe
 impl<'ws, 'graph, M: RefMetadata> SuccessfulRebase<'ws, 'graph, M> {
     /// Materializes a history rewrite
     pub fn materialize(mut self) -> Result<MaterializeOutcome<'ws, 'graph, M>> {
+        self.graph.assert_shadow_parity();
         let repo = self.repo.clone();
         if let Some(memory) = self.repo.objects.take_object_memory() {
             memory.persist(self.repo)?;
@@ -113,6 +114,7 @@ impl<'ws, 'graph, M: RefMetadata> SuccessfulRebase<'ws, 'graph, M> {
     /// If I instead called [`Self::materialize`], the changes would instead be
     /// gone from disk.
     pub fn materialize_without_checkout(mut self) -> Result<MaterializeOutcome<'ws, 'graph, M>> {
+        self.graph.assert_shadow_parity();
         let repo = self.repo.clone();
         if let Some(memory) = self.repo.objects.take_object_memory() {
             memory.persist(self.repo)?;

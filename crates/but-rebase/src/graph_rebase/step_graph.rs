@@ -188,6 +188,11 @@ pub(crate) struct StepGraph {
     /// [`Self::set_position`]/[`Self::join_lane_of`], carried by [`Self::rekey_position`],
     /// renamed by [`Self::rename_legs`], read via `positions::ref_approach`.
     lanes: HashMap<StepGraphIndex, Vec<LaneRec>>,
+    /// THE dissolve oracle (`BUT_REBASE_NATIVE=assert` only): a [`but_graph::CommitGraph`]
+    /// that every arena write is mirrored into, compared against the arena at materialize by
+    /// [`Self::assert_shadow_parity`]. Proves the CommitGraph mutation surface can carry the
+    /// editor before the swap makes it THE arena.
+    shadow: Option<but_graph::CommitGraph>,
 }
 
 impl StepGraph {
@@ -212,6 +217,10 @@ impl StepGraph {
         self.ids.push(id);
         self.settings.push(settings);
         self.node_parents.push(Vec::new());
+        if let Some(shadow) = self.shadow.as_mut() {
+            let idx = shadow.add_node(id);
+            debug_assert_eq!(idx, self.ids.len() - 1, "shadow arena fell out of step");
+        }
         StepGraphIndex::Node(self.ids.len() - 1)
     }
 
@@ -232,6 +241,9 @@ impl StepGraph {
                 panic!("BUG: references live in the ref table, not the step arena")
             }
         }
+        if let Some(shadow) = self.shadow.as_mut() {
+            shadow.set_node_id(i, self.ids[i]);
+        }
     }
 
     /// The commit id of the pick at `node` — `None` for tombstones and references. THE fast
@@ -251,6 +263,9 @@ impl StepGraph {
         };
         debug_assert!(self.ids[i].is_some(), "tombstones have no commit id");
         self.ids[i] = Some(id);
+        if let Some(shadow) = self.shadow.as_mut() {
+            shadow.set_commit_id(i, id);
+        }
     }
 
     /// Overwrite the preserved parents of the pick at `node` (see
@@ -654,7 +669,9 @@ impl StepGraph {
     pub(crate) fn push_parent(&mut self, child: StepGraphIndex, parent: StepGraphIndex) -> usize {
         let parents = self.parents_mut(child);
         parents.push(parent);
-        parents.len() - 1
+        let slot = parents.len() - 1;
+        self.shadow_resync(child);
+        slot
     }
 
     /// Insert `parent` at `slot` of `child` (clamped to the array end); later slots shift up
@@ -670,6 +687,7 @@ impl StepGraph {
         let renames: Vec<_> = (slot..len).map(|s| ((child, s), (child, s + 1))).collect();
         self.rename_legs(&renames);
         self.parents_mut(child).insert(slot, parent);
+        self.shadow_resync(child);
         slot
     }
 
@@ -690,6 +708,7 @@ impl StepGraph {
             .map(|s| ((child, s), (child, s - 1)))
             .collect();
         self.rename_legs(&renames);
+        self.shadow_resync(child);
         Some(target)
     }
 
@@ -706,6 +725,7 @@ impl StepGraph {
             return;
         };
         *entry = new_parent;
+        self.shadow_resync(child);
     }
 
     /// Move `from`'s whole parent array onto `to` (which must have none); statements follow
@@ -720,6 +740,8 @@ impl StepGraph {
         let renames: Vec<_> = (0..parents.len()).map(|s| ((from, s), (to, s))).collect();
         *self.parents_mut(to) = parents;
         self.rename_legs(&renames);
+        self.shadow_resync(from);
+        self.shadow_resync(to);
     }
 
     /// Re-target every parent-array entry naming `from` onto `to`, slots preserved —
@@ -736,13 +758,20 @@ impl StepGraph {
                 }
             }
         }
+        if self.shadow.is_some() {
+            for i in 0..self.node_parents.len() {
+                self.shadow_resync(StepGraphIndex::Node(i));
+            }
+        }
     }
 
     /// Empty `child`'s parent array, returning it. Lane statements naming the drained slots
     /// are DELIBERATELY untouched: the caller re-states the orphaned names onto their new
     /// carrier itself (the below-insert path renames them onto the segment's parent-most).
     pub(crate) fn drain_parents(&mut self, child: StepGraphIndex) -> Vec<StepGraphIndex> {
-        std::mem::take(self.parents_mut(child))
+        let parents = std::mem::take(self.parents_mut(child));
+        self.shadow_resync(child);
+        parents
     }
 
     /// Overwrite `node`'s whole parent array — a creation/finalize-phase write: lane
@@ -750,6 +779,7 @@ impl StepGraph {
     /// node's slots.
     pub(crate) fn set_parents(&mut self, node: StepGraphIndex, parents: Vec<StepGraphIndex>) {
         *self.parents_mut(node) = parents;
+        self.shadow_resync(node);
     }
 
     /// Drop every creation-phase reference parent array — the finalize strip's last step;
@@ -757,6 +787,77 @@ impl StepGraph {
     pub(crate) fn clear_ref_parents(&mut self) {
         for parents in self.ref_parents.iter_mut() {
             parents.clear();
+        }
+    }
+
+    /// Arm the dissolve oracle: `cg` (the carried CommitGraph the arena was built from) starts
+    /// shadowing every arena write. All node arrays are resynced up front so absent slots
+    /// become editor-authored — from here shadow and arena must never diverge.
+    pub(crate) fn install_shadow(&mut self, cg: but_graph::CommitGraph) {
+        assert_eq!(
+            cg.node_count(),
+            self.ids.len(),
+            "shadow install requires the arenas to mirror"
+        );
+        self.shadow = Some(cg);
+        for i in 0..self.node_parents.len() {
+            self.shadow_resync(StepGraphIndex::Node(i));
+        }
+        self.assert_shadow_parity();
+    }
+
+    /// Mirror `node`'s whole parent array into the shadow. No-op without a shadow or for
+    /// references (the shadow tracks the node arena only).
+    fn shadow_resync(&mut self, node: StepGraphIndex) {
+        let Some(shadow) = self.shadow.as_mut() else {
+            return;
+        };
+        let StepGraphIndex::Node(i) = node else {
+            return;
+        };
+        let parents = self.node_parents[i]
+            .iter()
+            .map(|parent| match parent {
+                StepGraphIndex::Node(j) => *j,
+                StepGraphIndex::Ref(_) => {
+                    panic!("shadow: node {i} has reference parent {parent} post-finalize")
+                }
+            })
+            .collect();
+        shadow.set_parents(i, parents);
+    }
+
+    /// Panic unless the shadow mirrors the arena exactly — payload ids and parent arrays,
+    /// node for node. No-op without a shadow.
+    pub(crate) fn assert_shadow_parity(&self) {
+        let Some(shadow) = self.shadow.as_ref() else {
+            return;
+        };
+        assert_eq!(
+            shadow.node_count(),
+            self.ids.len(),
+            "SHADOW GRAPH DIVERGENCE: arena sizes differ"
+        );
+        for i in 0..self.ids.len() {
+            assert_eq!(
+                shadow.node_payload(i),
+                self.ids[i],
+                "SHADOW GRAPH DIVERGENCE: payload of node {i}"
+            );
+            let arena_parents: Vec<usize> = self.node_parents[i]
+                .iter()
+                .map(|parent| match parent {
+                    StepGraphIndex::Node(j) => *j,
+                    StepGraphIndex::Ref(_) => {
+                        panic!("shadow: node {i} has reference parent {parent} post-finalize")
+                    }
+                })
+                .collect();
+            assert_eq!(
+                shadow.parent_indices(i),
+                arena_parents,
+                "SHADOW GRAPH DIVERGENCE: parents of node {i}"
+            );
         }
     }
 
