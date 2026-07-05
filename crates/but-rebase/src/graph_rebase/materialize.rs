@@ -160,13 +160,13 @@ fn assert_write_through_parity<M: RefMetadata>(
         // without a repoint) or points outside the editor's graph.
         return Ok(());
     };
-    let (mutated, rewalked) = (
+    let (mutated_fp, rewalked_fp) = (
         projection_fingerprint(&mutated),
         projection_fingerprint(rewalked),
     );
-    if mutated != rewalked {
+    if mutated_fp != rewalked_fp {
         bail!(
-            "WRITE-THROUGH DIVERGENCE\n--- mutate-then-project\n{mutated}\n--- rewalk-then-project\n{rewalked}"
+            "WRITE-THROUGH DIVERGENCE\n--- mutate-then-project\n{mutated_fp}\n--- rewalk-then-project\n{rewalked_fp}"
         );
     }
     Ok(())

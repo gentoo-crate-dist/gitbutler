@@ -310,6 +310,54 @@ impl CommitGraph {
         }
     }
 
+    /// Overwrite the node's flags — the write-through seam flags re-added anchor regions
+    /// Integrated, the walk's convention for target-seeded tips.
+    pub(crate) fn set_flags(&mut self, idx: CommitIdx, flags: crate::CommitFlags) {
+        self.nodes[idx].commit.flags = flags;
+    }
+
+    /// Recompute the `Integrated` flag on every live node as target-reachability from `tips` —
+    /// the write-through seam's flag refresh: an editor-mutated graph carries walk-time flags
+    /// (empty on editor-added nodes), while the rewalk derives integration fresh.
+    pub(crate) fn recompute_integrated(&mut self, tips: impl IntoIterator<Item = gix::ObjectId>) {
+        let mut integrated: HashSet<gix::ObjectId> = HashSet::new();
+        for tip in tips {
+            if self.by_id.contains_key(&tip) && !integrated.contains(&tip) {
+                integrated.extend(self.ancestor_set(tip));
+            }
+        }
+        for (idx, node) in self.nodes.iter_mut().enumerate() {
+            if self.tombstoned[idx] {
+                continue;
+            }
+            node.commit.flags.set(
+                crate::CommitFlags::Integrated,
+                integrated.contains(&node.commit.id),
+            );
+        }
+    }
+
+    /// Bring a TOMBSTONED node holding `id` back to life — the write-through seam's anchor
+    /// revival: a stored/extra target the editor dropped from workspace history is still
+    /// external context on disk, and the walk always seeds it as an integrated tip.
+    ///
+    /// Returns `true` if a tombstone actually came back to life — a revival flips the
+    /// effective parents of every child that was tombstone-substituting through this node,
+    /// so callers may need to re-validate them.
+    pub(crate) fn revive(&mut self, id: gix::ObjectId) -> bool {
+        if self.by_id.contains_key(&id) {
+            return false;
+        }
+        let Some(idx) =
+            (0..self.nodes.len()).find(|&i| self.tombstoned[i] && self.nodes[i].commit.id == id)
+        else {
+            return false;
+        };
+        self.tombstoned[idx] = false;
+        self.by_id.insert(id, idx);
+        true
+    }
+
     /// The node at `id`, if present.
     pub fn node(&self, id: gix::ObjectId) -> Option<&CommitNode> {
         self.by_id.get(&id).map(|&idx| &self.nodes[idx])
@@ -444,7 +492,7 @@ impl CommitGraph {
 
     /// Recompute `generation` for every node (longest path from a root, by Kahn order). Cheap; the
     /// graph is small.
-    fn recompute_generations(&mut self) {
+    pub(crate) fn recompute_generations(&mut self) {
         // Process in topological order (parents before children) so a child's generation is the max
         // over its present parents + 1.
         let order = self.toposort_parents_first();
