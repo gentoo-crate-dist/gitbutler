@@ -206,37 +206,11 @@ impl<'ws, 'graph, M: RefMetadata> Editor<'ws, 'graph, M> {
             }
         }
 
-        // Carry every reference's stored position into the output graph, mapped through the
-        // rebuild — positions are the truth for references, edges never encode them.
-        for (node, stored) in self.graph.anchored_refs() {
-            let (Some(new_node), Some(new_anchor)) =
-                (graph_mapping.get(&node), graph_mapping.get(&stored.anchor))
-            else {
-                continue;
-            };
-            // `Root`/`AllLegs` are structural and carry as-is; a `Lane`'s stored `(source, slot)`
-            // legs name OLD-graph nodes, so remap the source ids through `graph_mapping` (slots and
-            // ordering are preserved by the isomorphic rebuild).
-            let kind = match &stored.kind {
-                crate::graph_rebase::step_graph::ApproachKind::Lane(legs) => {
-                    crate::graph_rebase::step_graph::ApproachKind::Lane(
-                        legs.iter()
-                            .filter_map(|(src, slot)| graph_mapping.get(src).map(|s| (*s, *slot)))
-                            .collect(),
-                    )
-                }
-                other => other.clone(),
-            };
-            output_graph.set_anchor(
-                *new_node,
-                Some(crate::graph_rebase::step_graph::StoredAnchor {
-                    anchor: *new_anchor,
-                    rank: stored.rank,
-                    kind,
-                    ambiguous: stored.ambiguous,
-                }),
-            );
-        }
+        crate::graph_rebase::arrangement::carry_arrangements_mapped(
+            &self.graph,
+            &mut output_graph,
+            &graph_mapping,
+        );
 
         // Find deleted references. `initial_references` only contains mutable
         // references, so immutable references are never considered for deletion.
