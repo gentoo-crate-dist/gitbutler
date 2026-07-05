@@ -15,6 +15,11 @@ pub(crate) type StepGraphIndex = usize;
 /// The stable identifier of an edge slot.
 pub(crate) type StepEdgeIndex = usize;
 
+/// One incoming child edge of a pick, named POSITIONALLY as `(source pick, parent-slot)`.
+/// Lanes state legs by this name (not by edge id) so a leg removed and re-created at the
+/// same coordinates is the SAME statement — see [`LaneRec::legs`].
+pub(crate) type Leg = (StepGraphIndex, usize);
+
 /// The direction of edges to look at from a node's perspective.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Direction {
@@ -70,8 +75,10 @@ pub(crate) struct StoredAnchor {
     /// The node this reference resolves to (a pick, or its tombstone after deletion) — the
     /// commit the ref points at, reached lazily through tombstones at read time.
     pub anchor: StepGraphIndex,
-    /// Orders co-located references above one anchor, 0 = closest to the anchor.
-    pub rank: usize,
+    /// The reference directly underneath in the physical stack (`None` = sits on the anchor).
+    /// Rank is DERIVED: a reference's depth is the length of its below-chain
+    /// (`positions::ref_depth`).
+    pub below: Option<StepGraphIndex>,
     /// The entry into this position converged — more than one thing (legs and/or refs stacked
     /// above) met here (a merge). A creation-time signal distinct from `approach.len() > 1` (a position
     /// can converge yet resolve to a single leg), so it is stored and PRESERVED, not re-derived.
@@ -92,10 +99,10 @@ pub(crate) enum LaneCarry {
 }
 
 /// One lane above a stored anchor: the references sharing an approach at one position.
-/// Membership only — order among members stays rank's job.
+/// Membership only — order among members stays the below-chain's job.
 #[derive(Debug, Clone)]
 pub(crate) struct LaneRec {
-    /// The reference nodes in this lane, unordered (sort by stored rank to read).
+    /// The reference nodes in this lane, unordered (order by below-chain depth to read).
     pub members: Vec<StepGraphIndex>,
     /// How much of the anchor's legs this lane carries.
     pub carry: LaneCarry,
@@ -104,7 +111,7 @@ pub(crate) struct LaneRec {
     /// same slot (and one source at two slots), so both coordinates are needed. Read
     /// filtered against the anchor's LIVE legs, so a stale entry is inert — and reclaims
     /// its leg by itself when surgery revives the same coordinates.
-    pub legs: Vec<(StepGraphIndex, usize)>,
+    pub legs: Vec<Leg>,
 }
 
 /// The rebase step graph: an arena of [`Step`]s where PICKS carry ordered parent edges and
@@ -117,11 +124,12 @@ pub(crate) struct StepGraph {
     edges: Vec<Option<EdgeRecord>>,
     outgoing: Vec<Vec<StepEdgeIndex>>,
     incoming: Vec<Vec<StepEdgeIndex>>,
-    /// `Some` exactly for reference nodes; carries the ref's anchor, rank, kind, and ambiguity.
+    /// `Some` exactly for reference nodes; carries the ref's anchor, below, and ambiguity.
     anchors: Vec<Option<StoredAnchor>>,
-    /// TEMP (store-swap bridge): lane membership shadowing `anchors`, keyed by the STORED
-    /// (unresolved) anchor value. Maintained in [`Self::set_anchor`], read only by the
-    /// `arrangement` census to prove approach is consumption-derivable before the store swaps.
+    /// THE approach store: lane membership per STORED (unresolved) anchor value. Which legs
+    /// descend into a reference's position lives here and only here — authored by
+    /// [`Self::place_anchor`]/[`Self::join_lane_of`], carried by [`Self::rekey_anchor`],
+    /// renamed by [`Self::rename_legs`], read via `positions::ref_approach`.
     lanes: HashMap<StepGraphIndex, Vec<LaneRec>>,
 }
 
@@ -154,9 +162,9 @@ impl StepGraph {
         &mut self,
         node: StepGraphIndex,
         anchor: StepGraphIndex,
-        rank: usize,
         approach: &[(StepGraphIndex, usize)],
         ambiguous: bool,
+        below: Option<StepGraphIndex>,
     ) {
         let live = match crate::graph_rebase::positions::resolve_to_pick(self, anchor) {
             Some(pick) => crate::graph_rebase::positions::legs_into_pick(self, pick),
@@ -183,14 +191,19 @@ impl StepGraph {
         self.lane_insert(node, anchor, carry, legs);
         self.anchors[node] = Some(StoredAnchor {
             anchor,
-            rank,
             ambiguous,
+            below,
         });
     }
 
     /// Join `node` into the lane CONTAINING `mate` — direct membership, not legs-equality —
-    /// at `rank`, copying the mate's anchor and ambiguity.
-    pub(crate) fn join_lane_of(&mut self, node: StepGraphIndex, mate: StepGraphIndex, rank: usize) {
+    /// sitting on `below`, copying the mate's anchor and ambiguity.
+    pub(crate) fn join_lane_of(
+        &mut self,
+        node: StepGraphIndex,
+        mate: StepGraphIndex,
+        below: Option<StepGraphIndex>,
+    ) {
         let Some(m) = self.anchor_of(mate) else {
             return;
         };
@@ -212,13 +225,13 @@ impl StepGraph {
         }
         self.anchors[node] = Some(StoredAnchor {
             anchor: m.anchor,
-            rank,
             ambiguous: m.ambiguous,
+            below,
         });
     }
 
     /// Re-key `node`'s position onto `new_anchor`, carrying its CURRENT lane record — the
-    /// carry and legs as maintained through edge surgery. Rank and ambiguity are preserved.
+    /// carry and legs as maintained through edge surgery. Below and ambiguity are preserved.
     pub(crate) fn rekey_anchor(&mut self, node: StepGraphIndex, new_anchor: StepGraphIndex) {
         let Some(stored) = self.anchor_of(node) else {
             return;
@@ -245,11 +258,11 @@ impl StepGraph {
         }
     }
 
-    /// Change `node`'s rank only — pure chain reordering. The anchor key and lane membership
-    /// are untouched (no lane rebuild, unlike a full re-store).
-    pub(crate) fn set_rank(&mut self, node: StepGraphIndex, rank: usize) {
+    /// Re-hang `node` onto `below` — an adjacency statement only; anchor and lane
+    /// membership are untouched.
+    pub(crate) fn set_below(&mut self, node: StepGraphIndex, below: Option<StepGraphIndex>) {
         if let Some(stored) = self.anchors[node].as_mut() {
-            stored.rank = rank;
+            stored.below = below;
         }
     }
 
@@ -346,8 +359,8 @@ impl StepGraph {
             };
             self.anchors[new_node] = Some(StoredAnchor {
                 anchor: new_anchor,
-                rank: stored.rank,
                 ambiguous: stored.ambiguous,
+                below: stored.below.and_then(|b| mapping.get(&b).copied()),
             });
         }
     }
@@ -429,18 +442,24 @@ impl StepGraph {
     }
 
     /// The leg `old` is now called `new` — its edge re-slotted (or re-sourced onto another
-    /// pick) by surgery: every lane that carried `old` carries `new` instead. Callers
-    /// renaming several legs on one source must two-phase through non-colliding
-    /// temporaries, exactly as with edge orders.
-    pub(crate) fn rename_leg(
-        &mut self,
-        old: (StepGraphIndex, usize),
-        new: (StepGraphIndex, usize),
-    ) {
+    /// pick) by surgery: every lane that carried `old` carries `new` instead.
+    pub(crate) fn rename_leg(&mut self, old: Leg, new: Leg) {
+        self.rename_legs(&[(old, new)]);
+    }
+
+    /// Apply several leg renames SIMULTANEOUSLY: every lane leg is matched against the
+    /// pre-rename names once, so shifting slots in a renumber can't collide mid-flight.
+    pub(crate) fn rename_legs(&mut self, renames: &[(Leg, Leg)]) {
         for lanes in self.lanes.values_mut() {
             for lane in lanes.iter_mut() {
-                if let Some(at) = lane.legs.iter().position(|&leg| leg == old) {
-                    lane.legs[at] = new;
+                let mut changed = false;
+                for leg in lane.legs.iter_mut() {
+                    if let Some((_, new)) = renames.iter().find(|(old, _)| old == leg) {
+                        *leg = *new;
+                        changed = true;
+                    }
+                }
+                if changed {
                     lane.legs.sort_unstable();
                     lane.legs.dedup();
                     if let LaneCarry::Count(_) = lane.carry {

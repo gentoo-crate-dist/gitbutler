@@ -131,7 +131,7 @@ fn format_step(step: &Step, title: Option<String>) -> String {
     }
 }
 
-/// The reference chains, grouped by their (anchor, approach) position and ordered by rank —
+/// The reference chains, grouped by their (anchor, approach) position and ordered by depth —
 /// the render's view of positioned refs as rows.
 type ChainKey = (StepGraphIndex, Vec<(StepGraphIndex, usize)>);
 
@@ -140,11 +140,11 @@ fn chains(graph: &StepGraph) -> HashMap<ChainKey, Vec<StepGraphIndex>> {
     for (node, stored) in graph.anchored_refs() {
         out.entry((stored.anchor, positions::ref_approach(graph, node)))
             .or_default()
-            .push((stored.rank, node));
+            .push((positions::ref_depth(graph, node), node));
     }
     out.into_iter()
         .map(|(key, mut members)| {
-            members.sort_by_key(|(rank, _)| *rank);
+            members.sort_by_key(|(depth, _)| *depth);
             (key, members.into_iter().map(|(_, node)| node).collect())
         })
         .collect()
