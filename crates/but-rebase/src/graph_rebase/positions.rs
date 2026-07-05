@@ -31,14 +31,14 @@ use crate::graph_rebase::{Direction, Step, StepGraph, StepGraphIndex};
 /// the pick). This IS the rank: order among co-located references is adjacency, not a number.
 pub(crate) fn ref_depth(graph: &StepGraph, node: StepGraphIndex) -> usize {
     let mut depth = 0usize;
-    let mut cursor = graph.anchor_of(node).and_then(|s| s.below);
+    let mut cursor = graph.position_of(node).and_then(|s| s.below);
     while let Some(b) = cursor {
         depth += 1;
         if depth > 10_000 {
             debug_assert!(false, "below-chain cycle at ref {node}");
             return depth;
         }
-        cursor = graph.anchor_of(b).and_then(|s| s.below);
+        cursor = graph.position_of(b).and_then(|s| s.below);
     }
     depth
 }
@@ -51,7 +51,7 @@ pub(crate) fn ref_approach(
     graph: &StepGraph,
     node: StepGraphIndex,
 ) -> Vec<(StepGraphIndex, usize)> {
-    let Some(stored) = graph.anchor_of(node) else {
+    let Some(stored) = graph.position_of(node) else {
         return Vec::new();
     };
     let lane = graph
@@ -153,7 +153,7 @@ fn derive_ref_position_from_edges(
 /// ends at it. Order is unspecified (ascending node id), like the node-walking predecessor.
 pub(crate) fn refs_anchored_at(graph: &StepGraph, pick: StepGraphIndex) -> Vec<StepGraphIndex> {
     graph
-        .anchored_refs()
+        .positioned_refs()
         .filter_map(|(node, stored)| {
             (resolve_to_pick(graph, stored.anchor) == Some(pick)).then_some(node)
         })
@@ -181,7 +181,7 @@ pub(crate) fn debug_assert_positions_total(graph: &StepGraph) {
     for node in graph.references().map(|(node, _, _)| node) {
         // A reference without a stored anchor is only legitimate when the graph holds no
         // pick below it at creation (unborn); it resolves to nothing.
-        let Some(stored) = graph.anchor_of(node) else {
+        let Some(stored) = graph.position_of(node) else {
             continue;
         };
         let approach = ref_approach(graph, node);
@@ -210,7 +210,7 @@ fn debug_assert_below_wellformed(graph: &StepGraph) {
         None => format!("{:?}", graph.step_view(node)),
     };
     if std::env::var_os("BUT_BELOW_DUMP").is_some() {
-        for (node, stored) in graph.anchored_refs() {
+        for (node, stored) in graph.positioned_refs() {
             eprintln!(
                 "POS {node} ({}) anchor={} resolved={:?} depth={} below={:?} ambiguous={}",
                 name(node),
@@ -222,7 +222,7 @@ fn debug_assert_below_wellformed(graph: &StepGraph) {
             );
         }
     }
-    for (node, stored) in graph.anchored_refs() {
+    for (node, stored) in graph.positioned_refs() {
         if !graph.is_reference(node) {
             continue;
         }
@@ -230,7 +230,7 @@ fn debug_assert_below_wellformed(graph: &StepGraph) {
         let mut depth = 0usize;
         let mut cursor = stored.below;
         while let Some(b) = cursor {
-            let Some(mate) = graph.anchor_of(b) else {
+            let Some(mate) = graph.position_of(b) else {
                 debug_assert!(false, "ref {node}: below {b} is not a positioned reference");
                 return;
             };
@@ -270,7 +270,7 @@ pub(crate) fn refs_reachable_with(
         })
         .collect();
     let mut out = Vec::new();
-    for (node, stored) in graph.anchored_refs() {
+    for (node, stored) in graph.positioned_refs() {
         // A chain whose anchor commit is reached lies on reached history — anchor-based
         // reachability, exactly what the node-era walk through interposed reference nodes
         // computed (and the ruling the merge-bypass deletion rests on).
@@ -301,7 +301,7 @@ pub(crate) struct ChainJoin {
 
 /// Capture `ref_node`'s chain for a coming join — call BEFORE adding the joining leg's edge.
 pub(crate) fn prepare_chain_join(graph: &StepGraph, ref_node: StepGraphIndex) -> ChainJoin {
-    let Some(stored) = graph.anchor_of(ref_node) else {
+    let Some(stored) = graph.position_of(ref_node) else {
         return ChainJoin {
             members: Vec::new(),
             approach: Vec::new(),
@@ -319,7 +319,7 @@ pub(crate) fn prepare_chain_join(graph: &StepGraph, ref_node: StepGraphIndex) ->
         let mut members = vec![(ref_node, stored.clone())];
         let mut cursor = stored.below;
         while let Some(b) = cursor {
-            let Some(m) = graph.anchor_of(b) else {
+            let Some(m) = graph.position_of(b) else {
                 break;
             };
             if chain.iter().any(|(node, _)| *node == b) {
@@ -349,7 +349,7 @@ pub(crate) fn apply_chain_join(
             approach.push(leg);
         }
         let ambiguous = member.ambiguous || approach.len() > 1;
-        graph.place_anchor(*node, member.anchor, &approach, ambiguous, member.below);
+        graph.place_position(*node, member.anchor, &approach, ambiguous, member.below);
     }
 }
 
@@ -368,7 +368,7 @@ pub(crate) fn reanchor_refs_at(
     reclassify: bool,
 ) {
     let moves: Vec<_> = graph
-        .anchored_refs()
+        .positioned_refs()
         .filter_map(|(node, stored)| {
             (resolve_to_pick(graph, stored.anchor) == Some(from_pick)).then_some((node, stored))
         })
@@ -376,9 +376,9 @@ pub(crate) fn reanchor_refs_at(
     for (node, stored) in moves {
         if reclassify {
             let approach = ref_approach(graph, node);
-            graph.place_anchor(node, to_pick, &approach, stored.ambiguous, stored.below);
+            graph.place_position(node, to_pick, &approach, stored.ambiguous, stored.below);
         } else {
-            graph.rekey_anchor(node, to_pick);
+            graph.rekey_position(node, to_pick);
         }
     }
 }
@@ -389,13 +389,13 @@ pub(crate) fn chain_members(
     graph: &StepGraph,
     ref_node: StepGraphIndex,
 ) -> Vec<(StepGraphIndex, crate::graph_rebase::step_graph::RefPosition)> {
-    let Some(stored) = graph.anchor_of(ref_node) else {
+    let Some(stored) = graph.position_of(ref_node) else {
         return vec![];
     };
     let anchor = resolve_to_pick(graph, stored.anchor);
     let approach = ref_approach(graph, ref_node);
     graph
-        .anchored_refs()
+        .positioned_refs()
         .filter_map(|(node, other)| {
             (ref_approach(graph, node) == approach
                 && resolve_to_pick(graph, other.anchor) == anchor)
@@ -434,7 +434,7 @@ pub(crate) fn resolve_to_pick(graph: &StepGraph, node: StepGraphIndex) -> Option
         // A reference resolves via its stored anchor (or its chain edge during the creation
         // finalize pass); a tombstone follows its preserved first edge downward.
         cursor = match graph
-            .anchor_of(cursor)
+            .position_of(cursor)
             .filter(|_| graph.is_reference(cursor))
         {
             Some(stored) => stored.anchor,
@@ -452,7 +452,7 @@ pub(crate) fn resolve_to_pick(graph: &StepGraph, node: StepGraphIndex) -> Option
 /// is redirected to the pick its chain resolves to (order preserved — dup-parents chains over
 /// one base yield the duplicate parent edges the real workspace commit has). After this pass,
 /// edges are the truth for picks and anchors the truth for references.
-pub(crate) fn initialize_anchors_and_strip_ref_edges(graph: &mut StepGraph) {
+pub(crate) fn initialize_positions_and_strip_ref_edges(graph: &mut StepGraph) {
     // Derive every reference's intended position (anchor, approach, ambiguous, below) from the
     // chain topology while it still exists. `unborn` chains (no pick below) keep no stored anchor.
     let ref_nodes: Vec<_> = graph.references().map(|(node, _, _)| node).collect();
@@ -466,7 +466,7 @@ pub(crate) fn initialize_anchors_and_strip_ref_edges(graph: &mut StepGraph) {
     // Set anchors provisionally with the correct anchor (so the strip's `resolve_to_pick` works);
     // the lane is authored below against the STRIPPED legs.
     for (node, pos, _) in &positions {
-        graph.place_anchor(*node, pos.anchor, &[], false, pos.below);
+        graph.place_position(*node, pos.anchor, &[], false, pos.below);
     }
     // Strip: collect the full edge picture first, then rewrite.
     let mut to_remove = Vec::new();
@@ -493,6 +493,6 @@ pub(crate) fn initialize_anchors_and_strip_ref_edges(graph: &mut StepGraph) {
     // intended approach classifies to the right `Root`/`AllLegs`/`Lane`. `ambiguous` keeps the
     // convergence signal from the chain topology (distinct from `approach.len()`).
     for (node, pos, approach) in &positions {
-        graph.place_anchor(*node, pos.anchor, approach, pos.ambiguous, pos.below);
+        graph.place_position(*node, pos.anchor, approach, pos.ambiguous, pos.below);
     }
 }

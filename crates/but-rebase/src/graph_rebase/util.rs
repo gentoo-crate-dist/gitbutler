@@ -31,7 +31,7 @@ fn ordered_commit_parents(graph: &StepGraph, target: StepGraphIndex) -> Vec<Step
 
     let carries_chain = |edge: &crate::graph_rebase::step_graph::StepEdgeRef<'_>| {
         graph.is_pick(edge.target())
-            && graph.anchored_refs().any(|(node, stored)| {
+            && graph.positioned_refs().any(|(node, stored)| {
                 crate::graph_rebase::positions::ref_approach(graph, node)
                     .contains(&(target, edge.weight().order))
                     && crate::graph_rebase::positions::resolve_to_pick(graph, stored.anchor)

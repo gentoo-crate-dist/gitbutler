@@ -154,7 +154,7 @@ pub(crate) struct LaneRec {
 /// a table of [`RefRecord`]s where REFERENCES carry explicit positions — edges are the truth
 /// for commits, positions the truth for refs, with no overlap. During CREATION a reference
 /// temporarily bears edges (its own adjacency lists) until
-/// `positions::initialize_anchors_and_strip_ref_edges` converts them to a position; from then
+/// `positions::initialize_positions_and_strip_ref_edges` converts them to a position; from then
 /// on references are edgeless.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct StepGraph {
@@ -168,7 +168,7 @@ pub(crate) struct StepGraph {
     ref_incoming: Vec<Vec<StepEdgeIndex>>,
     /// THE approach store: lane membership per STORED (unresolved) anchor value. Which legs
     /// descend into a reference's position lives here and only here — authored by
-    /// [`Self::place_anchor`]/[`Self::join_lane_of`], carried by [`Self::rekey_anchor`],
+    /// [`Self::place_position`]/[`Self::join_lane_of`], carried by [`Self::rekey_position`],
     /// renamed by [`Self::rename_legs`], read via `positions::ref_approach`.
     lanes: HashMap<StepGraphIndex, Vec<LaneRec>>,
 }
@@ -302,7 +302,7 @@ impl StepGraph {
     }
 
     /// The stored position of the reference at `node`, live or dead.
-    pub(crate) fn anchor_of(&self, node: StepGraphIndex) -> Option<RefPosition> {
+    pub(crate) fn position_of(&self, node: StepGraphIndex) -> Option<RefPosition> {
         match node {
             StepGraphIndex::Ref(i) => self.refs.get(i)?.position.clone(),
             StepGraphIndex::Node(_) => None,
@@ -321,7 +321,7 @@ impl StepGraph {
     /// shared `All` lane, any other set a `Count` lane stating exactly those legs. Only
     /// correct when the anchor's legs are already complete — never use to re-place an
     /// existing position wholesale.
-    pub(crate) fn place_anchor(
+    pub(crate) fn place_position(
         &mut self,
         node: StepGraphIndex,
         anchor: StepGraphIndex,
@@ -347,7 +347,7 @@ impl StepGraph {
                 (LaneCarry::Count(legs.len()), legs)
             }
         };
-        if let Some(previous) = self.anchor_of(node) {
+        if let Some(previous) = self.position_of(node) {
             self.lane_remove(node, previous.anchor);
         }
         self.lane_insert(node, anchor, carry, legs);
@@ -366,10 +366,10 @@ impl StepGraph {
         mate: StepGraphIndex,
         below: Option<StepGraphIndex>,
     ) {
-        let Some(m) = self.anchor_of(mate) else {
+        let Some(m) = self.position_of(mate) else {
             return;
         };
-        if let Some(previous) = self.anchor_of(node) {
+        if let Some(previous) = self.position_of(node) {
             self.lane_remove(node, previous.anchor);
         }
         let joined = self
@@ -393,8 +393,8 @@ impl StepGraph {
 
     /// Re-key `node`'s position onto `new_anchor`, carrying its CURRENT lane record — the
     /// carry and legs as maintained through edge surgery. Below and ambiguity are preserved.
-    pub(crate) fn rekey_anchor(&mut self, node: StepGraphIndex, new_anchor: StepGraphIndex) {
-        let Some(stored) = self.anchor_of(node) else {
+    pub(crate) fn rekey_position(&mut self, node: StepGraphIndex, new_anchor: StepGraphIndex) {
+        let Some(stored) = self.position_of(node) else {
             return;
         };
         if stored.anchor == new_anchor {
@@ -512,7 +512,7 @@ impl StepGraph {
                 self.lanes.insert(new_key, carried);
             }
         }
-        for (node, stored) in source.anchored_refs() {
+        for (node, stored) in source.positioned_refs() {
             let (Some(&new_node), Some(&new_anchor)) =
                 (mapping.get(&node), mapping.get(&stored.anchor))
             else {
@@ -539,7 +539,9 @@ impl StepGraph {
     }
 
     /// All positioned references — live AND dead — ascending by id.
-    pub(crate) fn anchored_refs(&self) -> impl Iterator<Item = (StepGraphIndex, RefPosition)> + '_ {
+    pub(crate) fn positioned_refs(
+        &self,
+    ) -> impl Iterator<Item = (StepGraphIndex, RefPosition)> + '_ {
         self.refs
             .iter()
             .enumerate()

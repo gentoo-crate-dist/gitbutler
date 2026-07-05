@@ -297,7 +297,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         let target = self.history.normalize_selector(target.to_selector(self)?)?;
         // A reference's children are the legs approaching its position (the node-era edges
         // into the reference).
-        if self.graph.anchor_of(target.id).is_some() {
+        if self.graph.position_of(target.id).is_some() {
             return Ok(positions::ref_approach(&self.graph, target.id)
                 .into_iter()
                 .map(|(leg, slot)| (self.new_selector(leg), slot))
@@ -316,7 +316,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     pub fn direct_parents(&self, target: impl ToSelector) -> Result<Vec<(Selector, usize)>> {
         let target = self.history.normalize_selector(target.to_selector(self)?)?;
         // A reference's one downward link is its anchor.
-        if let Some(stored) = self.graph.anchor_of(target.id) {
+        if let Some(stored) = self.graph.position_of(target.id) {
             let anchor = positions::resolve_to_pick(&self.graph, stored.anchor)
                 .context("Reference target should resolve to a commit")?;
             return Ok(vec![(self.new_selector(anchor), 0)]);
@@ -336,7 +336,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     /// anchor. Useful for renderers that interleave references with commits.
     pub fn position_parents(&self, target: impl ToSelector) -> Result<Vec<Selector>> {
         let target = self.history.normalize_selector(target.to_selector(self)?)?;
-        if let Some(stored) = self.graph.anchor_of(target.id) {
+        if let Some(stored) = self.graph.position_of(target.id) {
             let anchor = positions::resolve_to_pick(&self.graph, stored.anchor)
                 .context("Reference target should resolve to a commit")?;
             // The physical member directly below is stored adjacency; the anchor when at
@@ -354,7 +354,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             .map(|(slot, pick)| {
                 let carried_top = self
                     .graph
-                    .anchored_refs()
+                    .positioned_refs()
                     .filter(|(node, stored)| {
                         positions::ref_approach(&self.graph, *node).contains(&(target.id, slot))
                             && positions::resolve_to_pick(&self.graph, stored.anchor) == Some(pick)
@@ -372,20 +372,20 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     /// plain legs into it; for a reference, the next chain member above, else its legs.
     pub fn position_children(&self, target: impl ToSelector) -> Result<Vec<Selector>> {
         let target = self.history.normalize_selector(target.to_selector(self)?)?;
-        if let Some(stored) = self.graph.anchor_of(target.id) {
+        if let Some(stored) = self.graph.position_of(target.id) {
             let anchor = positions::resolve_to_pick(&self.graph, stored.anchor);
             // Everything that pointed at this reference in the node era: members sitting
             // directly on it (chain-mates and root siblings stacked above), plus — when
             // this is the top of its own approach group — the legs that enter its chain.
             let mut out: Vec<Selector> = self
                 .graph
-                .anchored_refs()
+                .positioned_refs()
                 .filter(|(node, other)| *node != target.id && other.below == Some(target.id))
                 .map(|(node, _)| self.new_selector(node))
                 .collect();
             let target_approach = positions::ref_approach(&self.graph, target.id);
             let target_depth = positions::ref_depth(&self.graph, target.id);
-            let top_of_approach_group = !self.graph.anchored_refs().any(|(node, other)| {
+            let top_of_approach_group = !self.graph.positioned_refs().any(|(node, other)| {
                 node != target.id
                     && positions::ref_approach(&self.graph, node) == target_approach
                     && positions::ref_depth(&self.graph, node) > target_depth
@@ -405,7 +405,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         // Bottom members sit directly on the pick; other legs are plain.
         let mut out: Vec<Selector> = self
             .graph
-            .anchored_refs()
+            .positioned_refs()
             .filter(|(_, stored)| {
                 stored.below.is_none()
                     && positions::resolve_to_pick(&self.graph, stored.anchor) == Some(target.id)
@@ -413,7 +413,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             .map(|(node, _)| self.new_selector(node))
             .collect();
         for edge in self.graph.edges_directed(target.id, Direction::Incoming) {
-            let carrying = self.graph.anchored_refs().any(|(node, stored)| {
+            let carrying = self.graph.positioned_refs().any(|(node, stored)| {
                 positions::ref_approach(&self.graph, node)
                     .contains(&(edge.source(), edge.weight().order))
                     && positions::resolve_to_pick(&self.graph, stored.anchor) == Some(target.id)
@@ -461,7 +461,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             (true, Step::None) => {
                 let was_live = self.graph.is_reference(target.id);
                 self.graph.tombstone_reference(target.id);
-                if was_live && let Some(stored) = self.graph.anchor_of(target.id) {
+                if was_live && let Some(stored) = self.graph.position_of(target.id) {
                     splice_out(&mut self.graph, target.id, stored.below);
                 }
             }
@@ -510,7 +510,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         // reference pending a reconnect. As a position: it leaves its chain (members above
         // close the gap) and gives up its legs — with a reconnect they stay as plain edges
         // onto the anchor (the node-era rewire), without one they are removed outright.
-        if target_child.id == target_parent.id && self.graph.anchor_of(target_child.id).is_some() {
+        if target_child.id == target_parent.id && self.graph.position_of(target_child.id).is_some()
+        {
             unhook_ref(&mut self.graph, target_child.id, skip_reconnect_step);
             return Ok(());
         }
@@ -518,7 +519,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         // picks, and the reference's chain rides the pick's links as position data. A
         // reference child only owns the legs approaching its own chain — plain edges into
         // its anchor belong to the pick and stay.
-        let child_ref_stored = self.graph.anchor_of(target_child.id);
+        let child_ref_stored = self.graph.position_of(target_child.id);
         let child_ref_approach = child_ref_stored
             .as_ref()
             .map(|_| positions::ref_approach(&self.graph, target_child.id));
@@ -624,7 +625,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         let children_to_disconnect = children_to_disconnect.map(|children| {
             children
                 .into_iter()
-                .flat_map(|selector| match self.graph.anchor_of(selector.id) {
+                .flat_map(|selector| match self.graph.position_of(selector.id) {
                     Some(_) => {
                         let legs = positions::ref_approach(&self.graph, selector.id)
                             .into_iter()
@@ -680,7 +681,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 // every derived approach automatically (no approach bookkeeping needed).
                 let carried: Vec<_> = self
                     .graph
-                    .anchored_refs()
+                    .positioned_refs()
                     .filter(|(node, _)| {
                         positions::ref_approach(&self.graph, *node).contains(&removed)
                     })
@@ -715,7 +716,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             if !should_disconnect {
                 continue;
             }
-            let carrying = self.graph.anchored_refs().any(|(node, stored)| {
+            let carrying = self.graph.positioned_refs().any(|(node, stored)| {
                 positions::ref_approach(&self.graph, node)
                     .contains(&(edge_source, edge_weight.order))
                     && positions::resolve_to_pick(&self.graph, stored.anchor)
@@ -975,8 +976,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
 
         // An empty segment — a lone reference — is pure position data: it slots into the
         // target's chain, and any nodes to connect become its approaching legs.
-        if child.id == parent.id && self.graph.anchor_of(child.id).is_some() {
-            let slot = match (side, self.graph.anchor_of(target.id)) {
+        if child.id == parent.id && self.graph.position_of(child.id).is_some() {
+            let slot = match (side, self.graph.position_of(target.id)) {
                 (InsertSide::Above, Some(_)) => StackSlot::Above(target.id),
                 (InsertSide::Below, Some(_)) => StackSlot::Below(target.id),
                 (InsertSide::Above, None) => StackSlot::Bottom(target.id),
@@ -1025,7 +1026,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                         let order = self.next_outgoing_order(node.id);
                         self.add_edge(node, child, order)?;
                     }
-                } else if let Some(stored) = self.graph.anchor_of(target.id) {
+                } else if let Some(stored) = self.graph.position_of(target.id) {
                     // Above a reference: split the chain there. Members above move onto the
                     // segment's child-most pick; the reference and members below are now
                     // approached by its parent-most pick.
@@ -1069,7 +1070,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     // Connect the parent-most node to the reference's anchor; a reference
                     // parent-most (an empty segment) re-anchors instead of gaining edges. The
                     // target reference and members below are now approached through that leg.
-                    let entry_slot = if self.graph.anchor_of(parent.id).is_some() {
+                    let entry_slot = if self.graph.position_of(parent.id).is_some() {
                         let anchor_selector = self.new_selector(anchor_pick);
                         self.add_edge(parent, anchor_selector, 0)?;
                         // The segment is positioned data: the split-off lower chain is
@@ -1124,10 +1125,10 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 // the requested parent ordering policy. A reference target stands for its
                 // anchor, with the new leg entering its chain; a reference parent-most (an
                 // empty segment) has no edges — it re-anchors onto the target instead.
-                if self.graph.anchor_of(parent.id).is_some() {
+                if self.graph.position_of(parent.id).is_some() {
                     self.add_edge(parent, target, 0)?;
                 } else {
-                    let connect_to = match self.graph.anchor_of(target.id) {
+                    let connect_to = match self.graph.position_of(target.id) {
                         Some(stored) => positions::resolve_to_pick(&self.graph, stored.anchor)
                             .context("Reference target should resolve to a commit")?,
                         None => target.id,
@@ -1154,7 +1155,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                         let node = self.history.normalize_selector(selector)?;
                         // A reference parent: the pick edge goes to its anchor and the leg
                         // joins its chain once the final slot is known.
-                        if self.graph.anchor_of(node.id).is_some() {
+                        if self.graph.position_of(node.id).is_some() {
                             let anchor = positions::resolve_to_pick(&self.graph, node.id)
                                 .context("Reference target should resolve to a commit")?;
                             ref_parents.push((nodes.len(), node.id));
@@ -1164,7 +1165,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                         }
                     }
                     nodes
-                } else if let Some(t_stored) = self.graph.anchor_of(target.id) {
+                } else if let Some(t_stored) = self.graph.position_of(target.id) {
                     // A reference target's one downward link is its anchor: the segment goes
                     // between the reference and it. The reference's own re-anchoring onto the
                     // segment happens in the connect step below.
@@ -1214,7 +1215,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
 
                 // A reference parent-most (an empty segment) has no edges — it re-anchors
                 // onto its first new parent instead of gaining edges.
-                if self.graph.anchor_of(parent.id).is_some() {
+                if self.graph.position_of(parent.id).is_some() {
                     if let Some(first) = parents_to_add.first() {
                         let first = self.new_selector(*first);
                         self.add_edge(parent, first, 0)?;
@@ -1305,7 +1306,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     ) -> Result<Selector> {
         let target = self.history.normalize_selector(target.to_selector(self)?)?;
         let inserting_reference = matches!(step, Step::Reference { .. });
-        let target_anchor = self.graph.anchor_of(target.id);
+        let target_anchor = self.graph.position_of(target.id);
         match (side, target_anchor) {
             (InsertSide::Above, None) if !inserting_reference => {
                 // Above a pick: the interposed node slides under the pick's chains — its
@@ -1497,7 +1498,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         // not a reference and must not be treated as one, or the re-anchor cascades the stale
         // position through the graph.
         if self.graph.is_reference(child.id) {
-            let new_anchor = match self.graph.anchor_of(parent.id) {
+            let new_anchor = match self.graph.position_of(parent.id) {
                 Some(parent_stored) => {
                     positions::resolve_to_pick(&self.graph, parent_stored.anchor)
                         .context("Reference target should resolve to a commit")?
@@ -1511,7 +1512,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         // reference (with members below it) gains the new leg. The chain is captured BEFORE the
         // edge lands (a consistent store) and applied after, so the join classifies against the
         // final legs (the new leg included) without mid-surgery reads.
-        let parent_ref = self.graph.anchor_of(parent.id);
+        let parent_ref = self.graph.position_of(parent.id);
         let parent_pick = match &parent_ref {
             Some(stored) => positions::resolve_to_pick(&self.graph, stored.anchor)
                 .context("Reference target should resolve to a commit")?,
@@ -1546,12 +1547,12 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         // A reference child holds one conceptual downward edge (order 0) — its anchor. It is
         // reported but not cleared; a follow-up add_edge re-anchors, and a position without a
         // resolving anchor is not representable.
-        if let Some(stored) = self.graph.anchor_of(child.id) {
+        if let Some(stored) = self.graph.position_of(child.id) {
             let resolves_to_parent = positions::resolve_to_pick(&self.graph, stored.anchor)
                 == positions::resolve_to_pick(&self.graph, parent.id);
             return Ok(if resolves_to_parent { vec![0] } else { vec![] });
         }
-        let edges = match self.graph.anchor_of(parent.id) {
+        let edges = match self.graph.position_of(parent.id) {
             // Disconnecting from a reference removes the legs carrying its chain — the
             // node-era edge into the reference node.
             Some(stored) => {

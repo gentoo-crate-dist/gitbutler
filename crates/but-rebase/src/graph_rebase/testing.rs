@@ -137,7 +137,7 @@ type ChainKey = (StepGraphIndex, Vec<(StepGraphIndex, usize)>);
 
 fn chains(graph: &StepGraph) -> HashMap<ChainKey, Vec<StepGraphIndex>> {
     let mut out: HashMap<_, Vec<(usize, StepGraphIndex)>> = HashMap::new();
-    for (node, stored) in graph.anchored_refs() {
+    for (node, stored) in graph.positioned_refs() {
         out.entry((stored.anchor, positions::ref_approach(graph, node)))
             .or_default()
             .push((positions::ref_depth(graph, node), node));
@@ -164,7 +164,7 @@ fn find_heads(graph: &StepGraph) -> Vec<StepGraphIndex> {
     graph
         .node_indices()
         .chain(graph.ref_indices())
-        .filter(|idx| match graph.anchor_of(*idx) {
+        .filter(|idx| match graph.position_of(*idx) {
             Some(stored) => {
                 let approach = positions::ref_approach(graph, *idx);
                 approach.is_empty()
@@ -186,7 +186,7 @@ fn find_heads(graph: &StepGraph) -> Vec<StepGraphIndex> {
 /// when they were nodes.
 fn get_sorted_parents(graph: &StepGraph, node: StepGraphIndex) -> Vec<StepGraphIndex> {
     let chains = chains(graph);
-    if let Some(stored) = graph.anchor_of(node) {
+    if let Some(stored) = graph.position_of(node) {
         let chain = chains
             .get(&(stored.anchor, positions::ref_approach(graph, node)))
             .map(Vec::as_slice)
@@ -336,7 +336,7 @@ where
         // A positioned reference whose anchor lies outside the set is a boundary chain the
         // edge-era walk never reached from this subgraph's heads — don't seed it.
         .filter(|n| {
-            graph.anchor_of(*n).is_none_or(|stored| {
+            graph.position_of(*n).is_none_or(|stored| {
                 crate::graph_rebase::positions::resolve_to_pick(graph, stored.anchor)
                     .is_some_and(|pick| nodes.contains(&pick))
             })
