@@ -26,7 +26,6 @@ impl<'ws, 'graph, M: RefMetadata> SuccessfulRebase<'ws, 'graph, M> {
                     selector,
                     merge_base_override,
                 } => {
-                    let selector = self.history.normalize_selector(selector)?;
                     let step = self.graph.step_view(selector.id);
 
                     let (new_head, new_head_refname) = match step {
@@ -38,7 +37,7 @@ impl<'ws, 'graph, M: RefMetadata> SuccessfulRebase<'ws, 'graph, M> {
                                 selector.id,
                             )
                             .context("No commit to reference")?;
-                            let Step::Pick(Pick { id, .. }) = self.graph[parent_step_id] else {
+                            let Some(id) = self.graph.commit_id(parent_step_id) else {
                                 bail!("resolve_to_pick should always return a commit pick");
                             };
                             (id, Some(refname))

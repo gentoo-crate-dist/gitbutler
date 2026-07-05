@@ -13,7 +13,7 @@ use but_core::RefMetadata;
 use serde::{Deserialize, Serialize};
 
 use crate::graph_rebase::{
-    Editor, Pick, Selector, Step, ToCommitSelector, ToReferenceSelector, ToSelector,
+    Editor, Selector, Step, ToCommitSelector, ToReferenceSelector, ToSelector,
 };
 
 /// Parent-slot names captured at one instant (a frame), resolved against a store that has
@@ -316,9 +316,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     /// Get a selector to a particular commit in the graph
     pub fn try_select_commit(&self, target: gix::ObjectId) -> Option<Selector> {
         for node_idx in self.graph.node_indices() {
-            if let Step::Pick(Pick { id, .. }) = self.graph[node_idx]
-                && id == target
-            {
+            if self.graph.commit_id(node_idx) == Some(target) {
                 return Some(self.new_selector(node_idx));
             }
         }
@@ -341,7 +339,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     ///
     /// Children are represented as incoming edges into `target` in the step graph.
     pub fn direct_children(&self, target: impl ToSelector) -> Result<Vec<(Selector, usize)>> {
-        let target = self.history.normalize_selector(target.to_selector(self)?)?;
+        let target = target.to_selector(self)?;
         // A reference's children are the legs approaching its position (the node-era edges
         // into the reference).
         if self.graph.position_of(target.id).is_some() {
@@ -362,7 +360,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     ///
     /// Parents are represented as outgoing edges from `target` in the step graph.
     pub fn direct_parents(&self, target: impl ToSelector) -> Result<Vec<(Selector, usize)>> {
-        let target = self.history.normalize_selector(target.to_selector(self)?)?;
+        let target = target.to_selector(self)?;
         // A reference's one downward link is its anchor.
         if let Some(stored) = self.graph.position_of(target.id) {
             let anchor = positions::resolve_to_pick(&self.graph, stored.anchor)
@@ -386,7 +384,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     /// to the pick it points at); for a reference, the next chain member below, then the
     /// anchor. Useful for renderers that interleave references with commits.
     pub fn position_parents(&self, target: impl ToSelector) -> Result<Vec<Selector>> {
-        let target = self.history.normalize_selector(target.to_selector(self)?)?;
+        let target = target.to_selector(self)?;
         if let Some(stored) = self.graph.position_of(target.id) {
             let anchor = positions::resolve_to_pick(&self.graph, stored.anchor)
                 .context("Reference target should resolve to a commit")?;
@@ -420,7 +418,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     /// For a pick, its children are the bottom members of the chains anchored on it plus the
     /// plain legs into it; for a reference, the next chain member above, else its legs.
     pub fn position_children(&self, target: impl ToSelector) -> Result<Vec<Selector>> {
-        let target = self.history.normalize_selector(target.to_selector(self)?)?;
+        let target = target.to_selector(self)?;
         if let Some(stored) = self.graph.position_of(target.id) {
             let anchor = positions::resolve_to_pick(&self.graph, stored.anchor);
             // Everything that pointed at this reference in the node era: members sitting
@@ -479,7 +477,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     ///
     /// The reference selectors are provided in no particular order.
     pub fn step_references(&self, target: impl ToSelector) -> Result<Vec<Selector>> {
-        let target = self.history.normalize_selector(target.to_selector(self)?)?;
+        let target = target.to_selector(self)?;
 
         Ok(
             crate::graph_rebase::positions::refs_anchored_at(&self.graph, target.id)
@@ -496,11 +494,11 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     ///
     /// Returns the replaced step.
     pub fn replace(&mut self, target: impl ToSelector, step: Step) -> Result<Step> {
-        let target = self.history.normalize_selector(target.to_selector(self)?)?;
+        let target = target.to_selector(self)?;
         let old = self.graph.step_view(target.id);
         let is_ref_slot = self.graph.reference_record(target.id).is_some();
         match (is_ref_slot, step) {
-            (false, step @ (Step::Pick(_) | Step::None)) => self.graph[target.id] = step,
+            (false, step @ (Step::Pick(_) | Step::None)) => self.graph.set_step(target.id, step),
             (true, Step::Reference { refname, mutable }) => {
                 self.graph.set_reference(target.id, refname, mutable)
             }
@@ -552,8 +550,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         P: ToSelector,
     {
         let SegmentDelimiter { child, parent } = target;
-        let mut target_child = self.history.normalize_selector(child.to_selector(self)?)?;
-        let mut target_parent = self.history.normalize_selector(parent.to_selector(self)?)?;
+        let mut target_child = child.to_selector(self)?;
+        let mut target_parent = parent.to_selector(self)?;
         // A single-node segment that is just a reference: the node-era op unhooked the
         // reference pending a reconnect. As a position: it leaves its chain (members above
         // close the gap) and gives up its legs — with a reconnect they stay as plain edges
@@ -592,9 +590,6 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     .as_slice()
                     .iter()
                     .map(|from_child| from_child.to_selector(self))
-                    .collect::<Result<Vec<_>>>()?
-                    .into_iter()
-                    .map(|selector| self.history.normalize_selector(selector))
                     .collect::<Result<Vec<_>>>()?,
             ),
         };
@@ -615,9 +610,6 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     .as_slice()
                     .iter()
                     .map(|from_parent| from_parent.to_selector(self))
-                    .collect::<Result<Vec<_>>>()?
-                    .into_iter()
-                    .map(|selector| self.history.normalize_selector(selector))
                     .collect::<Result<Vec<_>>>()?,
             ),
         };
@@ -957,9 +949,9 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         P: ToSelector,
     {
         let SegmentDelimiter { child, parent } = delimiter;
-        let target = self.history.normalize_selector(target.to_selector(self)?)?;
-        let child = self.history.normalize_selector(child.to_selector(self)?)?;
-        let parent = self.history.normalize_selector(parent.to_selector(self)?)?;
+        let target = target.to_selector(self)?;
+        let child = child.to_selector(self)?;
+        let parent = parent.to_selector(self)?;
 
         // An empty segment — a lone reference — is pure position data: it slots into the
         // target's chain, and any nodes to connect become its approaching legs.
@@ -986,7 +978,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             if let Some(nodes_to_connect) = nodes_to_connect {
                 for any_selector in nodes_to_connect.as_slice() {
                     let selector = any_selector.to_selector(self)?;
-                    let node = self.history.normalize_selector(selector)?;
+                    let node = selector;
                     self.push_edge(node, child)?;
                 }
             }
@@ -1001,7 +993,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     // handles a reference child-most (the leg joins its chain).
                     for any_selector in nodes_to_connect.as_slice() {
                         let selector = any_selector.to_selector(self)?;
-                        let node = self.history.normalize_selector(selector)?;
+                        let node = selector;
                         self.push_edge(node, child)?;
                     }
                 } else if let Some(stored) = self.graph.position_of(target.id) {
@@ -1087,7 +1079,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     let mut nodes = Vec::new();
                     for any_selector in nodes_to_connect.as_slice() {
                         let selector = any_selector.to_selector(self)?;
-                        let node = self.history.normalize_selector(selector)?;
+                        let node = selector;
                         // A reference parent: the pick edge goes to its anchor and the leg
                         // joins its chain once the final slot is known.
                         if self.graph.position_of(node.id).is_some() {
@@ -1227,7 +1219,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         step: Step,
         side: InsertSide,
     ) -> Result<Selector> {
-        let target = self.history.normalize_selector(target.to_selector(self)?)?;
+        let target = target.to_selector(self)?;
         let inserting_reference = matches!(step, Step::Reference { .. });
         let target_anchor = self.graph.position_of(target.id);
         match (side, target_anchor) {
@@ -1356,8 +1348,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         parent: impl ToSelector,
         slot: usize,
     ) -> Result<()> {
-        let child = self.history.normalize_selector(child.to_selector(self)?)?;
-        let parent = self.history.normalize_selector(parent.to_selector(self)?)?;
+        let child = child.to_selector(self)?;
+        let parent = parent.to_selector(self)?;
         self.debug_assert_acyclic(child.id, parent.id)?;
 
         if self.graph.is_reference(child.id) {
@@ -1414,8 +1406,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         child: impl ToSelector,
         parent: impl ToSelector,
     ) -> Result<Vec<usize>> {
-        let child = self.history.normalize_selector(child.to_selector(self)?)?;
-        let parent = self.history.normalize_selector(parent.to_selector(self)?)?;
+        let child = child.to_selector(self)?;
+        let parent = parent.to_selector(self)?;
 
         // A reference child holds one conceptual downward edge (order 0) — its anchor. It is
         // reported but not cleared; a follow-up insert_edge re-anchors, and a position without

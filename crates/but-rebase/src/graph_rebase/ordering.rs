@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Result, bail};
 use but_core::RefMetadata;
 
-use crate::graph_rebase::{Editor, Pick, Selector, Step, StepGraphIndex, ToCommitSelector, util};
+use crate::graph_rebase::{Editor, Selector, StepGraphIndex, ToCommitSelector, util};
 
 impl<M: RefMetadata> Editor<'_, '_, M> {
     /// Order commit selectors by parentage, with parents first and children last.
@@ -108,7 +108,7 @@ fn step_graph_parent_to_child_rank<M: RefMetadata>(
             }
 
             if expanded {
-                if let Step::Pick(Pick { id, .. }) = editor.graph[node]
+                if let Some(id) = editor.graph.commit_id(node)
                     && selected_ids.contains(&id)
                 {
                     rank_by_id.entry(id).or_insert_with(|| {

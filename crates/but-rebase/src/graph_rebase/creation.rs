@@ -120,10 +120,7 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                 }
                 let ix = graph.add_reference(refname.clone(), mutable);
                 if Some(reference) == entrypoint.segment.ref_name() {
-                    head_selectors.push(Selector {
-                        id: ix,
-                        revision: 0,
-                    });
+                    head_selectors.push(Selector { id: ix });
                 }
                 nodes.push(ix);
             }
@@ -188,11 +185,11 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                     bail!("BUG: Listed commit does not have corresponding idx.");
                 };
 
-                let Step::Pick(pick) = &mut graph[*idx] else {
+                if graph.commit_id(*idx).is_none() {
                     bail!("BUG: Listed commit does not have corresponding pick step.");
-                };
+                }
 
-                pick.preserved_parents = Some(c.parent_ids.clone());
+                graph.set_preserved_parents(*idx, Some(c.parent_ids.clone()));
             };
         }
 
@@ -263,7 +260,7 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
             if let Step::Pick(Pick {
                 preserved_parents: Some(_),
                 ..
-            }) = &graph[pick_ix]
+            }) = graph.step_view(pick_ix)
             {
                 continue;
             }
@@ -272,10 +269,7 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
             let graph_parents = util::collect_ordered_parents(&graph, pick_ix);
             let graph_parent_ids: Vec<gix::ObjectId> = graph_parents
                 .iter()
-                .filter_map(|idx| match &graph[*idx] {
-                    Step::Pick(Pick { id, .. }) => Some(*id),
-                    _ => None,
-                })
+                .filter_map(|idx| graph.commit_id(*idx))
                 .collect();
 
             if graph_parent_ids == c.parent_ids {

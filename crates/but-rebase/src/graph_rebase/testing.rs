@@ -19,8 +19,7 @@ use but_core::RefMetadata;
 use renderdag::{Ancestor, GraphRowRenderer, Renderer as _};
 
 use crate::graph_rebase::{
-    Editor, Pick, Selector, Step, StepGraph, StepGraphIndex, SuccessfulRebase, positions,
-    workspace::Subgraph,
+    Editor, Pick, Step, StepGraph, StepGraphIndex, SuccessfulRebase, positions, workspace::Subgraph,
 };
 
 /// An extension trait that adds debugging output for graphs
@@ -383,9 +382,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     /// Render a [`Subgraph`] (e.g. one of the parts of [`Editor::graph_workspace`])
     /// as a box-drawing DAG, in the same style as [`Testing::steps_ascii`].
     pub fn subgraph_ascii(&self, subgraph: &Subgraph) -> String {
-        let resolve = |s: &Selector| self.history.normalize_selector(*s).ok().map(|s| s.id);
-        let nodes: HashSet<StepGraphIndex> = subgraph.nodes.iter().filter_map(resolve).collect();
-        let heads: Vec<StepGraphIndex> = subgraph.heads.iter().filter_map(resolve).collect();
+        let nodes: HashSet<StepGraphIndex> = subgraph.nodes.iter().map(|s| s.id).collect();
+        let heads: Vec<StepGraphIndex> = subgraph.heads.iter().map(|s| s.id).collect();
         render_step_graph(&self.graph, &nodes, &heads, |id| {
             lookup_commit_title(&self.repo, id)
         })
