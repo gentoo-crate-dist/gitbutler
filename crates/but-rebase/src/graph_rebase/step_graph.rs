@@ -675,7 +675,11 @@ impl StepGraph {
     /// Renumber `child`'s parent slots to dense `0..n`, renaming live statements along and
     /// purging statements that name a slot `child` does not hold. Returns the edge ids in
     /// slot order. Duplicate stored orders make slot names ambiguous and are a bug.
-    fn normalize_parent_slots(&mut self, child: StepGraphIndex) -> Vec<StepEdgeIndex> {
+    ///
+    /// Every slot mutator calls this itself; ops call it directly as a BRIDGE when they need
+    /// slot names and statements aligned before reading (a no-op once every writer authors
+    /// dense slots — it dies with the store swap).
+    pub(crate) fn normalize_parent_slots(&mut self, child: StepGraphIndex) -> Vec<StepEdgeIndex> {
         let ids = self.parent_edge_ids(child);
         let live: HashSet<usize> = ids
             .iter()
@@ -710,13 +714,13 @@ impl StepGraph {
     }
 
     /// Insert `parent` at `slot` of `child` (clamped to the array end); later slots shift up
-    /// with their statements.
+    /// with their statements. Returns the slot actually used.
     pub(crate) fn insert_parent(
         &mut self,
         child: StepGraphIndex,
         slot: usize,
         parent: StepGraphIndex,
-    ) {
+    ) -> usize {
         let ids = self.normalize_parent_slots(child);
         let slot = slot.min(ids.len());
         let mut renames = Vec::new();
@@ -730,6 +734,48 @@ impl StepGraph {
         }
         self.rename_legs(&renames);
         self.add_edge(child, parent, Edge { order: slot });
+        slot
+    }
+
+    /// Remove `child`'s parent at `slot`, returning it; later slots shift down with their
+    /// statements, and statements naming the removed slot are dropped.
+    pub(crate) fn remove_parent(
+        &mut self,
+        child: StepGraphIndex,
+        slot: usize,
+    ) -> Option<StepGraphIndex> {
+        let ids = self.normalize_parent_slots(child);
+        let &id = ids.get(slot)?;
+        let target = self.edge_ref(id).target;
+        self.remove_edge(id);
+        self.retain_legs(|&leg| leg != (child, slot));
+        let mut renames = Vec::new();
+        for &id in &ids[slot + 1..] {
+            let record = self.edges[id]
+                .as_mut()
+                .expect("adjacency lists only hold live edge ids");
+            let old = record.weight.order;
+            record.weight.order = old - 1;
+            renames.push(((child, old), (child, old - 1)));
+        }
+        self.rename_legs(&renames);
+        Some(target)
+    }
+
+    /// Re-point `child`'s parent at `slot` onto `new_parent`. The slot — and so the
+    /// statement name — is untouched: chains stated on the leg follow it to its new target.
+    pub(crate) fn replace_parent(
+        &mut self,
+        child: StepGraphIndex,
+        slot: usize,
+        new_parent: StepGraphIndex,
+    ) {
+        let ids = self.normalize_parent_slots(child);
+        let Some(&id) = ids.get(slot) else {
+            debug_assert!(false, "replace_parent: {child} has no slot {slot}");
+            return;
+        };
+        self.move_edge(id, new_parent, Edge { order: slot });
     }
 
     /// Move `from`'s whole parent array onto `to` (which must have none); statements follow

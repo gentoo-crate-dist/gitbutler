@@ -438,11 +438,11 @@ pub fn integrate_upstream_with_hints<'ws, 'meta, M: RefMetadata>(
 
             for (child, parent) in edges_to_replace {
                 let removed = editor.remove_edges(child, parent)?;
-                // Add back the lowest ordered parent that was removed.
+                // Put the target ref where the lowest removed parent slot was.
                 // We could add back multiple, but it's likely unintentional
                 // that there were two parents in the first place.
-                if let Some(removed) = removed.iter().min() {
-                    editor.add_edge(child, target_ref_selector, *removed)?;
+                if let Some(slot) = removed.iter().min() {
+                    editor.insert_edge(child, target_ref_selector, *slot)?;
                 }
             }
         }
