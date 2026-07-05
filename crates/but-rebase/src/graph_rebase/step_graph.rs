@@ -4,7 +4,7 @@
 //! call sites were written against: `edges_directed` yields newest-first, `node_indices` and
 //! `edge_references` ascend.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::graph_rebase::{Edge, Step};
 
@@ -63,33 +63,8 @@ impl<'graph> StepEdgeRef<'graph> {
     }
 }
 
-/// How a reference's approaching legs (its `approach`) relate to the picks that currently feed its
-/// anchor — the part of a position that plain edge topology can't recover once reference edges
-/// are stripped. Derived from the fresh `approach` at write time and re-resolved against the CURRENT
-/// pick edges at read time, so it survives edge churn that leaves a stored `(source-pick, slot)`
-/// list stale.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) enum ApproachKind {
-    /// Nothing descends into this position — a chain root (`approach = []`): a remote ref stacked
-    /// above a tip, an empty single-branch top.
-    #[default]
-    Root,
-    /// Every leg into the anchor feeds this position — a plain chain, or a merge chain both
-    /// lanes converge on (`approach = legs_into_pick(anchor)`).
-    AllLegs,
-    /// Only these specific legs feed this position — one lane of a merge. Keyed by the full
-    /// `(source-pick, parent-slot)` leg, not the slot alone: two distinct sources can feed one
-    /// anchor at the same slot (and one source at two slots), so both coordinates are needed to
-    /// pick the right lane. Derived approach = `legs_into_pick(anchor)` intersected with this set. The
-    /// source id is remapped through `graph_mapping` on rebase and re-slotted by `rewrite_approach_leg`.
-    Lane(Vec<(StepGraphIndex, usize)>),
-}
-
-/// Where a reference sits, stored explicitly: references are POSITIONS, not topology. The `approach`
-/// legs are DERIVED from `kind` against the live pick edges (see `positions::ref_approach`), never
-/// stored — a source-pick node id in a leg list goes stale when a later op tombstones or re-slots
-/// it. `kind` is authored once (creation / fresh insert, against complete legs) and PRESERVED
-/// through re-anchors; `ambiguous` is a separate stored convergence bit, NOT `approach.len() > 1`.
+/// Where a reference sits, stored explicitly: references are POSITIONS, not topology. The
+/// approach legs live in the reference's LANE (see [`StepGraph::lane_of`]), not here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredAnchor {
     /// The node this reference resolves to (a pick, or its tombstone after deletion) — the
@@ -97,35 +72,10 @@ pub(crate) struct StoredAnchor {
     pub anchor: StepGraphIndex,
     /// Orders co-located references above one anchor, 0 = closest to the anchor.
     pub rank: usize,
-    /// How this reference's approaching legs relate to the picks feeding its anchor.
-    pub kind: ApproachKind,
     /// The entry into this position converged — more than one thing (legs and/or refs stacked
     /// above) met here (a merge). A creation-time signal distinct from `approach.len() > 1` (a position
     /// can converge yet resolve to a single leg), so it is stored and PRESERVED, not re-derived.
     pub ambiguous: bool,
-}
-
-impl StoredAnchor {
-    /// Author a FRESH position: classify the intended `approach` against `anchor`'s CURRENT legs into a
-    /// [`ApproachKind`], with `ambiguous` from the approach convergence. Only correct when the anchor's legs
-    /// are already complete — use for brand-new references, never to re-place an existing one.
-    pub(crate) fn place(
-        graph: &StepGraph,
-        anchor: StepGraphIndex,
-        rank: usize,
-        approach: &[(StepGraphIndex, usize)],
-    ) -> Self {
-        let legs = match crate::graph_rebase::positions::resolve_to_pick(graph, anchor) {
-            Some(pick) => crate::graph_rebase::positions::legs_into_pick(graph, pick),
-            None => Vec::new(),
-        };
-        StoredAnchor {
-            anchor,
-            rank,
-            kind: crate::graph_rebase::positions::classify_approach(approach, &legs),
-            ambiguous: approach.len() > 1,
-        }
-    }
 }
 
 /// How much of its anchor's incoming legs a lane carries.
@@ -136,22 +86,24 @@ pub(crate) enum LaneCarry {
     /// Every leg into the anchor descends through this lane (a plain chain, or a shared
     /// chain all merge lanes converge on).
     All,
-    /// This lane carries exactly `n` legs — one lane of a merge. Which legs is derived by
-    /// consuming the anchor's sorted legs in lane order.
+    /// This lane carries exactly the legs its [`LaneRec::legs`] statement names — one lane
+    /// of a merge.
     Count(usize),
 }
 
-/// TEMP (store-swap bridge): one lane of the shadow table — the references sharing an
-/// approach above one stored anchor. Membership only: order among members stays rank's job.
+/// One lane above a stored anchor: the references sharing an approach at one position.
+/// Membership only — order among members stays rank's job.
 #[derive(Debug, Clone)]
 pub(crate) struct LaneRec {
     /// The reference nodes in this lane, unordered (sort by stored rank to read).
     pub members: Vec<StepGraphIndex>,
     /// How much of the anchor's legs this lane carries.
     pub carry: LaneCarry,
-    /// Bridge-era lane identity: the legs the authored [`ApproachKind::Lane`] carried at
-    /// write time. Finds the lane again on later writes and orders lanes at read time; dies
-    /// with the bridge (the end-state persists lane order instead).
+    /// The legs this lane STATES it carries (`Count` lanes only). Keyed by the full
+    /// `(source-pick, parent-slot)` leg: two distinct sources can feed one anchor at the
+    /// same slot (and one source at two slots), so both coordinates are needed. Read
+    /// filtered against the anchor's LIVE legs, so a stale entry is inert — and reclaims
+    /// its leg by itself when surgery revives the same coordinates.
     pub legs: Vec<(StepGraphIndex, usize)>,
 }
 
@@ -193,24 +145,11 @@ impl StepGraph {
         self.anchors.get(node).cloned().flatten()
     }
 
-    /// Set (or clear) the stored position of the reference at `node`. The [`ApproachKind`] is authored
-    /// by the caller (via [`StoredAnchor::place`] for a fresh position, or preserved on an existing
-    /// anchor being re-anchored), so this just stores it.
-    pub(crate) fn set_anchor(&mut self, node: StepGraphIndex, anchor: Option<StoredAnchor>) {
-        if let Some(previous) = &self.anchors[node] {
-            let key = previous.anchor;
-            self.lane_remove(node, key);
-        }
-        if let Some(stored) = &anchor {
-            self.lane_insert(node, stored.anchor, &stored.kind);
-        }
-        self.anchors[node] = anchor;
-    }
-
     /// Author a FRESH position for `node`: `approach` is the lane intent, classified against
-    /// `anchor`'s CURRENT legs for the kind oracle and opening (or joining, when a lane already
-    /// carries exactly these legs) the matching lane. Only correct when the anchor's legs are
-    /// already complete — never use to re-place an existing position wholesale.
+    /// `anchor`'s CURRENT legs — empty opens (or joins) the root lane, the whole live set the
+    /// shared `All` lane, any other set a `Count` lane stating exactly those legs. Only
+    /// correct when the anchor's legs are already complete — never use to re-place an
+    /// existing position wholesale.
     pub(crate) fn place_anchor(
         &mut self,
         node: StepGraphIndex,
@@ -219,13 +158,38 @@ impl StepGraph {
         approach: &[(StepGraphIndex, usize)],
         ambiguous: bool,
     ) {
-        let mut stored = StoredAnchor::place(self, anchor, rank, approach);
-        stored.ambiguous = ambiguous;
-        self.set_anchor(node, Some(stored));
+        let live = match crate::graph_rebase::positions::resolve_to_pick(self, anchor) {
+            Some(pick) => crate::graph_rebase::positions::legs_into_pick(self, pick),
+            None => Vec::new(),
+        };
+        let (carry, legs) = if approach.is_empty() {
+            (LaneCarry::None, Vec::new())
+        } else {
+            let approach_set: HashSet<_> = approach.iter().copied().collect();
+            let live_set: HashSet<_> = live.iter().copied().collect();
+            if approach_set == live_set {
+                (LaneCarry::All, Vec::new())
+            } else {
+                let mut legs = approach.to_vec();
+                legs.sort_unstable();
+                legs.dedup();
+                (LaneCarry::Count(legs.len()), legs)
+            }
+        };
+        if let Some(previous) = &self.anchors[node] {
+            let key = previous.anchor;
+            self.lane_remove(node, key);
+        }
+        self.lane_insert(node, anchor, carry, legs);
+        self.anchors[node] = Some(StoredAnchor {
+            anchor,
+            rank,
+            ambiguous,
+        });
     }
 
     /// Join `node` into the lane CONTAINING `mate` — direct membership, not legs-equality —
-    /// at `rank`, copying the mate's anchor, kind, and ambiguity.
+    /// at `rank`, copying the mate's anchor and ambiguity.
     pub(crate) fn join_lane_of(&mut self, node: StepGraphIndex, mate: StepGraphIndex, rank: usize) {
         let Some(m) = self.anchor_of(mate) else {
             return;
@@ -242,20 +206,19 @@ impl StepGraph {
             .find(|lane| lane.members.contains(&mate))
             .map(|lane| lane.members.push(node))
             .is_some();
+        debug_assert!(joined, "positioned mate {mate} must own a lane");
         if !joined {
-            self.lane_insert(node, m.anchor, &m.kind);
+            self.lane_insert(node, m.anchor, LaneCarry::All, Vec::new());
         }
         self.anchors[node] = Some(StoredAnchor {
             anchor: m.anchor,
             rank,
-            kind: m.kind,
             ambiguous: m.ambiguous,
         });
     }
 
     /// Re-key `node`'s position onto `new_anchor`, carrying its CURRENT lane record — the
-    /// carry and legs as maintained through edge surgery, NOT re-derived from the stored kind.
-    /// Rank, kind, and ambiguity are preserved.
+    /// carry and legs as maintained through edge surgery. Rank and ambiguity are preserved.
     pub(crate) fn rekey_anchor(&mut self, node: StepGraphIndex, new_anchor: StepGraphIndex) {
         let Some(stored) = self.anchor_of(node) else {
             return;
@@ -271,24 +234,11 @@ impl StepGraph {
         });
         self.lane_remove(node, stored.anchor);
         match lane_data {
-            Some((carry, legs)) => {
-                let lanes = self.lanes.entry(new_anchor).or_default();
-                let existing = lanes.iter_mut().find(|lane| match carry {
-                    LaneCarry::Count(_) => {
-                        matches!(lane.carry, LaneCarry::Count(_)) && lane.legs == legs
-                    }
-                    _ => lane.carry == carry,
-                });
-                match existing {
-                    Some(lane) => lane.members.push(node),
-                    None => lanes.push(LaneRec {
-                        members: vec![node],
-                        carry,
-                        legs,
-                    }),
-                }
+            Some((carry, legs)) => self.lane_insert(node, new_anchor, carry, legs),
+            None => {
+                debug_assert!(false, "positioned node {node} must own a lane");
+                self.lane_insert(node, new_anchor, LaneCarry::All, Vec::new());
             }
-            None => self.lane_insert(node, new_anchor, &stored.kind),
         }
         if let Some(a) = self.anchors[node].as_mut() {
             a.anchor = new_anchor;
@@ -316,15 +266,16 @@ impl StepGraph {
         }
     }
 
-    fn lane_insert(&mut self, node: StepGraphIndex, key: StepGraphIndex, kind: &ApproachKind) {
-        let (carry, legs) = match kind {
-            ApproachKind::Root => (LaneCarry::None, Vec::new()),
-            ApproachKind::AllLegs => (LaneCarry::All, Vec::new()),
-            ApproachKind::Lane(legs) => (LaneCarry::Count(legs.len()), legs.clone()),
-        };
+    fn lane_insert(
+        &mut self,
+        node: StepGraphIndex,
+        key: StepGraphIndex,
+        carry: LaneCarry,
+        legs: Vec<(StepGraphIndex, usize)>,
+    ) {
         let lanes = self.lanes.entry(key).or_default();
         let existing = lanes.iter_mut().find(|lane| match carry {
-            // `Count` lanes are identified by their bridge legs (same legs => same count).
+            // `Count` lanes are identified by their stated legs (same legs => same lane).
             LaneCarry::Count(_) => matches!(lane.carry, LaneCarry::Count(_)) && lane.legs == legs,
             // One `None` and one `All` lane per key.
             _ => lane.carry == carry,
@@ -339,7 +290,8 @@ impl StepGraph {
         }
     }
 
-    /// TEMP (store-swap bridge): the shadow lane table, for the census derivation.
+    /// The lane table: every positioned reference's approach statement, keyed by the STORED
+    /// (unresolved) anchor value.
     pub(crate) fn lane_table(&self) -> &HashMap<StepGraphIndex, Vec<LaneRec>> {
         &self.lanes
     }
@@ -392,20 +344,9 @@ impl StepGraph {
             else {
                 continue;
             };
-            // The kind is only the shadow oracle now; a `Lane`'s legs name old-graph nodes,
-            // so remap the sources to keep it comparable.
-            let kind = match &stored.kind {
-                ApproachKind::Lane(legs) => ApproachKind::Lane(
-                    legs.iter()
-                        .filter_map(|(src, slot)| mapping.get(src).map(|src| (*src, *slot)))
-                        .collect(),
-                ),
-                other => other.clone(),
-            };
             self.anchors[new_node] = Some(StoredAnchor {
                 anchor: new_anchor,
                 rank: stored.rank,
-                kind,
                 ambiguous: stored.ambiguous,
             });
         }
@@ -418,13 +359,6 @@ impl StepGraph {
             .get(&stored.anchor)?
             .iter()
             .find(|lane| lane.members.contains(&node))
-    }
-
-    /// The [`ApproachKind`] of the reference at `node`, if it is a positioned reference.
-    pub(crate) fn ref_kind(&self, node: StepGraphIndex) -> Option<ApproachKind> {
-        self.anchors
-            .get(node)
-            .and_then(|a| a.as_ref().map(|a| a.kind.clone()))
     }
 
     /// All positioned references, ascending by node id.
@@ -495,9 +429,9 @@ impl StepGraph {
     }
 
     /// The leg `old` is now called `new` — its edge re-slotted (or re-sourced onto another
-    /// pick) by surgery: every lane and every stored kind that carried `old` carries `new`
-    /// instead. Callers renaming several legs on one source must two-phase through
-    /// non-colliding temporaries, exactly as with edge orders.
+    /// pick) by surgery: every lane that carried `old` carries `new` instead. Callers
+    /// renaming several legs on one source must two-phase through non-colliding
+    /// temporaries, exactly as with edge orders.
     pub(crate) fn rename_leg(
         &mut self,
         old: (StepGraphIndex, usize),
@@ -513,15 +447,6 @@ impl StepGraph {
                         lane.carry = LaneCarry::Count(lane.legs.len());
                     }
                 }
-            }
-        }
-        for stored in self.anchors.iter_mut().flatten() {
-            if let ApproachKind::Lane(legs) = &mut stored.kind
-                && let Some(at) = legs.iter().position(|&leg| leg == old)
-            {
-                legs[at] = new;
-                legs.sort_unstable();
-                legs.dedup();
             }
         }
     }
