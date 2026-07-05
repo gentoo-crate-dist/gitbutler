@@ -337,6 +337,50 @@ impl CommitGraph {
         }
     }
 
+    /// Set [`CommitFlags::InWorkspace`](crate::CommitFlags::InWorkspace) on exactly the
+    /// ancestors of `ws_commit` (`None` clears the flag everywhere) — the walk's rule, where
+    /// only the workspace tip seeds the flag and it propagates to everything reachable.
+    pub(crate) fn recompute_in_workspace(&mut self, ws_commit: Option<gix::ObjectId>) {
+        let in_workspace = ws_commit
+            .filter(|tip| self.by_id.contains_key(tip))
+            .map(|tip| self.ancestor_set(tip))
+            .unwrap_or_default();
+        for (idx, node) in self.nodes.iter_mut().enumerate() {
+            if self.tombstoned[idx] {
+                continue;
+            }
+            node.commit.flags.set(
+                crate::CommitFlags::InWorkspace,
+                in_workspace.contains(&node.commit.id),
+            );
+        }
+    }
+
+    /// Set [`CommitFlags::NotInRemote`](crate::CommitFlags::NotInRemote) on exactly the
+    /// ancestors of `local_tips` (the walk's rule: every LOCAL branch tip seeds the flag,
+    /// remote tips don't) — clearing it elsewhere, e.g. on a commit the editor dropped from
+    /// local history that a remote ref still holds.
+    pub(crate) fn recompute_not_in_remote(
+        &mut self,
+        local_tips: impl IntoIterator<Item = gix::ObjectId>,
+    ) {
+        let mut not_in_remote: HashSet<gix::ObjectId> = HashSet::new();
+        for tip in local_tips {
+            if self.by_id.contains_key(&tip) && !not_in_remote.contains(&tip) {
+                not_in_remote.extend(self.ancestor_set(tip));
+            }
+        }
+        for (idx, node) in self.nodes.iter_mut().enumerate() {
+            if self.tombstoned[idx] {
+                continue;
+            }
+            node.commit.flags.set(
+                crate::CommitFlags::NotInRemote,
+                not_in_remote.contains(&node.commit.id),
+            );
+        }
+    }
+
     /// Bring a TOMBSTONED node holding `id` back to life — the write-through seam's anchor
     /// revival: a stored/extra target the editor dropped from workspace history is still
     /// external context on disk, and the walk always seeds it as an integrated tip.
@@ -423,6 +467,21 @@ impl CommitGraph {
             }
         }
         parents
+    }
+
+    /// The RAW recorded parent ids of `idx` — the payload array, cut slots included. Unlike
+    /// [`Self::all_parent_ids`] this does NOT substitute through tombstones, so a slot whose
+    /// target was editor-dropped still shows the dropped commit's id.
+    pub(crate) fn raw_parent_ids(&self, idx: CommitIdx) -> &[gix::ObjectId] {
+        &self.nodes[idx].commit.parent_ids
+    }
+
+    /// `true` if any CONNECTED parent slot of `idx` targets a tombstone — traversal would
+    /// substitute through it, so the raw recorded parents disagree with what a walk sees.
+    pub(crate) fn has_tombstoned_parent(&self, idx: CommitIdx) -> bool {
+        self.parent_slots[idx]
+            .iter()
+            .any(|slot| slot.connected && slot.target.is_some_and(|t| self.tombstoned[t]))
     }
 
     /// All ancestors of `tip` (inclusive), following CONNECTED parent edges — history the

@@ -137,8 +137,9 @@ impl<'ws, 'graph, M: RefMetadata> SuccessfulRebase<'ws, 'graph, M> {
 
 /// THE WRITE-THROUGH ORACLE (`BUT_REBASE_WRITE_THROUGH=assert`): projecting the editor's
 /// MUTATED arena must equal the rewalk's projection — the dissolve's parity obligation
-/// (mutate-then-project == rewalk-then-project). Compared on an index-free fingerprint of
-/// the stack shape, since segment indices differ between independently built graphs.
+/// (mutate-then-project == rewalk-then-project). Compared on a field-exact fingerprint of
+/// everything the projection derives except graph indices, which differ between
+/// independently built graphs.
 fn assert_write_through_parity<M: RefMetadata>(
     graph: &crate::graph_rebase::StepGraph,
     rewalked: &but_graph::Workspace,
@@ -172,29 +173,80 @@ fn assert_write_through_parity<M: RefMetadata>(
     Ok(())
 }
 
-/// The parity view: stack ids, segment names, per-segment commit ids and bases — everything
-/// the rebase is obliged to preserve, nothing graph-index-dependent.
+/// The parity view: everything the projection derives that is NOT a graph index — kind,
+/// bounds, target, stacks, segments, per-commit ids/parents/flags/refs, remote and outside
+/// commit sets. Graph-index-dependent fields (segment indices, sibling links) are excluded
+/// since independently built graphs number segments differently.
 fn projection_fingerprint(ws: &but_graph::Workspace) -> String {
     use std::fmt::Write as _;
+    let commit_line = |out: &mut String, prefix: &str, c: &but_graph::workspace::StackCommit| {
+        writeln!(
+            out,
+            "{prefix}{} parents=[{}] flags={:?} refs=[{}]",
+            c.id,
+            c.parent_ids
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            c.flags,
+            c.refs
+                .iter()
+                .map(|r| r.ref_name.as_bstr().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+        .ok();
+    };
     let mut out = String::new();
+    let kind = match &ws.kind {
+        but_graph::workspace::WorkspaceKind::Managed { ref_info } => {
+            format!("Managed({})", ref_info.ref_name.as_bstr())
+        }
+        but_graph::workspace::WorkspaceKind::ManagedMissingWorkspaceCommit { ref_info } => {
+            format!("ManagedMissing({})", ref_info.ref_name.as_bstr())
+        }
+        but_graph::workspace::WorkspaceKind::AdHoc => "AdHoc".to_string(),
+    };
+    writeln!(
+        out,
+        "kind={kind} lower_bound={:?} target_ref={:?} target_commit={:?} metadata={}",
+        ws.lower_bound,
+        ws.target_ref
+            .as_ref()
+            .map(|t| (t.ref_name.as_bstr().to_string(), t.commits_ahead)),
+        ws.target_commit.as_ref().map(|t| t.commit_id),
+        ws.metadata.is_some(),
+    )
+    .ok();
     for stack in &ws.stacks {
         writeln!(out, "stack {:?}", stack.id).ok();
         for segment in &stack.segments {
             writeln!(
                 out,
-                "  {} base={:?} commits=[{}]",
+                "  {} base={:?} remote={:?} projected_name={} entrypoint={} metadata={}",
                 segment
                     .ref_name()
                     .map_or_else(|| "<anon>".to_string(), |n| n.as_bstr().to_string()),
                 segment.base,
                 segment
-                    .commits
-                    .iter()
-                    .map(|c| c.id.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                    .remote_tracking_ref_name
+                    .as_ref()
+                    .map(|n| n.as_bstr().to_string()),
+                segment.name_projected_from_outside,
+                segment.is_entrypoint,
+                segment.metadata.is_some(),
             )
             .ok();
+            for commit in &segment.commits {
+                commit_line(&mut out, "    ", commit);
+            }
+            for commit in &segment.commits_on_remote {
+                commit_line(&mut out, "    remote ", commit);
+            }
+            for commit in segment.commits_outside.iter().flatten() {
+                commit_line(&mut out, "    outside ", commit);
+            }
         }
     }
     out
