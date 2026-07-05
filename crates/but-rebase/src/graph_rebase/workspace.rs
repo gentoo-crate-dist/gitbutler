@@ -671,7 +671,7 @@ fn divide_workspace_into_stacks(
                 tips.push(pick);
             }
             while let Some(tip) = tips.pop() {
-                for &parent in graph.parents(tip) {
+                for parent in graph.parents(tip) {
                     let Some(pick) = positions::resolve_to_pick(graph, parent) else {
                         continue;
                     };

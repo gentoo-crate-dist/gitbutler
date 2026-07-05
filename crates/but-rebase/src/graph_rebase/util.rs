@@ -91,8 +91,8 @@ mod test {
             // First parent
             let b_id = gix::ObjectId::from_str("1000000000000000000000000000000000000000")?;
             let b = graph.add_node(Step::new_pick(b_id));
-            // Second parent - is a reference
-            let c = graph.add_reference("refs/heads/foobar".try_into()?, true);
+            // Second parent - is a tombstone, so it flattens to its own parents
+            let c = graph.add_node(Step::None);
             // Second parent's first child
             let d_id = gix::ObjectId::from_str("3000000000000000000000000000000000000000")?;
             let d = graph.add_node(Step::new_pick(d_id));

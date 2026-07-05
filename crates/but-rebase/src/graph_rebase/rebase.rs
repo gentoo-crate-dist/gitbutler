@@ -229,7 +229,7 @@ fn order_steps_picking(graph: &StepGraph, heads: &[StepGraphIndex]) -> VecDeque<
             continue;
         }
 
-        for &t in parents {
+        for t in parents {
             if seen.insert(t) {
                 heads.push(t);
             }

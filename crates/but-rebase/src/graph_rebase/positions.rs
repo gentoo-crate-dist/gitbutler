@@ -77,73 +77,6 @@ pub(crate) fn ref_approach(
     }
 }
 
-/// Derive the position of the reference at `ref_node` from CHAIN TOPOLOGY — only meaningful
-/// while reference edges still exist, i.e. inside the creation finalize pass. The second
-/// return is the approach legs to author into the reference's lane. `None` for non-references
-/// and for unborn chains (no pick below — those keep no stored position).
-fn derive_ref_position_from_edges(
-    graph: &StepGraph,
-    ref_node: StepGraphIndex,
-) -> Option<(RefPosition, Vec<(StepGraphIndex, usize)>)> {
-    if !graph.is_reference(ref_node) {
-        return None;
-    }
-    // Descend: the anchor is the first pick below, through references and tombstones.
-    let mut cursor = ref_node;
-    let mut anchor = None;
-    let mut below = None;
-    for _ in 0..10_000 {
-        let Some(next) = graph.parents(cursor).first().copied() else {
-            break;
-        };
-        if graph.is_pick(next) {
-            anchor = Some(next);
-            break;
-        }
-        if graph.is_reference(next) && below.is_none() {
-            below = Some(next);
-        }
-        cursor = next;
-    }
-    // Ascend for the approaching child: a DIRECT pick edge into this position is the entry
-    // point, even when further refs are stacked above (those become their own root chain —
-    // nothing descends into them). Without a direct pick, follow a unique ref/tombstone edge
-    // upward; anything ambiguous means no approach (a root).
-    let mut cursor = ref_node;
-    let mut approach = Vec::new();
-    let mut ambiguous = false;
-    for _ in 0..10_000 {
-        let incoming = graph.incoming_legs(cursor);
-        let picks: Vec<_> = incoming
-            .iter()
-            .copied()
-            .filter(|&(child, _)| graph.is_pick(child))
-            .collect();
-        if !picks.is_empty() {
-            // Direct pick edges are the entry points, even with refs stacked above (those
-            // become their own root chain). Several legs may enter a shared chain; any
-            // convergence at the entry makes the position AMBIGUOUS — it belongs to its
-            // anchor, not to one leg.
-            ambiguous = incoming.len() > 1;
-            approach = picks;
-            break;
-        }
-        let mut others = incoming.iter().filter(|&&(child, _)| !graph.is_pick(child));
-        match (others.next(), others.next()) {
-            (Some(&(child, _)), None) => cursor = child,
-            _ => break,
-        }
-    }
-    Some((
-        RefPosition {
-            anchor: anchor?,
-            below,
-            ambiguous,
-        },
-        approach,
-    ))
-}
-
 /// Every reference that RESOLVES to `pick` — its stored anchor, followed through tombstones,
 /// ends at it. Order is unspecified (ascending node id), like the node-walking predecessor.
 pub(crate) fn refs_anchored_at(graph: &StepGraph, pick: StepGraphIndex) -> Vec<StepGraphIndex> {
@@ -468,87 +401,20 @@ pub(crate) fn legs_into_pick(
 
 /// Resolve `node` to the current pick it stands for: a pick resolves to itself, a tombstone
 /// follows its (preserved) first edge downward, and a reference resolves via its stored
-/// anchor. During the creation finalize pass references may still carry chain edges instead
-/// of anchors; those resolve by descending the chain.
+/// anchor — dead references via their RETAINED anchor, the retention pointer stale
+/// selectors normalize through (unborn refs carry none and resolve to nothing).
 pub(crate) fn resolve_to_pick(graph: &StepGraph, node: StepGraphIndex) -> Option<StepGraphIndex> {
     let mut cursor = node;
     for _ in 0..10_000 {
         if graph.is_pick(cursor) {
             return Some(cursor);
         }
-        // A reference resolves via its stored anchor (or its chain edge during the creation
-        // finalize pass); a tombstone follows its preserved first edge downward.
-        cursor = match graph
-            .position_of(cursor)
-            .filter(|_| graph.is_reference(cursor))
-        {
+        // A reference resolves via its stored anchor; a tombstone follows its preserved
+        // first edge downward.
+        cursor = match graph.position_of(cursor) {
             Some(stored) => stored.anchor,
             None => graph.parents(cursor).first().copied()?,
         };
     }
     None
-}
-
-/// Initialize stored anchors from the freshly built node graph, then STRIP reference edges:
-/// reference parent arrays are dropped wholesale, and every arena parent entry naming a
-/// reference is rewritten to the pick its chain resolves to (relative order preserved —
-/// dup-parents chains over one base yield the duplicate parent slots the real workspace
-/// commit has), or compacted away when the chain is unborn. After this pass, parent arrays
-/// are the truth for picks and positions the truth for references.
-pub(crate) fn initialize_positions_and_strip_ref_edges(graph: &mut StepGraph) {
-    // Derive every reference's intended position (anchor, approach, ambiguous, below) from the
-    // chain topology while it still exists. `unborn` chains (no pick below) keep no stored anchor.
-    let ref_nodes: Vec<_> = graph.references().map(|(node, _, _)| node).collect();
-    let mut positions = Vec::new();
-    for node in ref_nodes {
-        let Some((pos, approach)) = derive_ref_position_from_edges(graph, node) else {
-            continue;
-        };
-        positions.push((node, pos, approach));
-    }
-    // Set anchors provisionally with the correct anchor (so the strip's `resolve_to_pick` works);
-    // the lane is authored below against the STRIPPED legs.
-    for (node, pos, _) in &positions {
-        graph.set_position(*node, pos.anchor, &[], false, pos.below);
-    }
-    // Strip: rewrite each arena node's parent array, resolving reference entries to their
-    // pick or dropping them (unborn chains vacate their slot; the rebuild compacts). Safe to
-    // write raw: the provisional positions above carry no legs, so no statement names a slot.
-    let mut dropped = Vec::new();
-    for node in graph.node_indices().collect::<Vec<_>>() {
-        let old = graph.parents(node).to_vec();
-        if !old
-            .iter()
-            .any(|target| matches!(target, StepGraphIndex::Ref(_)))
-        {
-            continue;
-        }
-        let mut new_parents = Vec::with_capacity(old.len());
-        for (slot, target) in old.into_iter().enumerate() {
-            match target {
-                StepGraphIndex::Node(_) => new_parents.push(target),
-                StepGraphIndex::Ref(_) => match resolve_to_pick(graph, target) {
-                    Some(pick) => new_parents.push(pick),
-                    None => dropped.push((node, slot)),
-                },
-            }
-        }
-        graph.set_parents(node, new_parents);
-    }
-    graph.clear_ref_parents();
-    // Rename the captured approach legs to match the compaction.
-    for (_, _, approach) in &mut positions {
-        for (leg_source, slot) in approach.iter_mut() {
-            *slot -= dropped
-                .iter()
-                .filter(|(source, vacated)| source == leg_source && vacated < slot)
-                .count();
-        }
-    }
-    // Author each kind against the FINAL legs: the chain legs now target picks directly, so the
-    // intended approach classifies to the right `Root`/`AllLegs`/`Lane`. `ambiguous` keeps the
-    // convergence signal from the chain topology (distinct from `approach.len()`).
-    for (node, pos, approach) in &positions {
-        graph.set_position(*node, pos.anchor, approach, pos.ambiguous, pos.below);
-    }
 }

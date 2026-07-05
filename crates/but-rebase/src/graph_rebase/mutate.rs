@@ -1337,10 +1337,10 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     /// (clamped to the end); parents at `slot` and later shift up, statements following.
     ///
     /// An edge FROM a reference is its downward link: it POSITIONS the reference at the
-    /// parent, never a raw edge (references are positions). Only a LIVE reference does so; a
-    /// tombstone carrying a stale anchor (which upstream-integration retention still reads) is
-    /// not a reference and must not be treated as one, or the re-anchor cascades the stale
-    /// position through the graph. An edge INTO a reference enters its chain: the pick edge
+    /// parent, never a raw edge (references are positions). A LIVE reference re-anchors
+    /// through the arrangement machinery; a DEAD one (which upstream-integration retention
+    /// still redirects) just re-points its retained anchor — no chain cascade, since its
+    /// stored position is stale. An edge INTO a reference enters its chain: the pick edge
     /// goes to the anchor and the reference (with members below it) gains the new leg.
     pub fn insert_edge(
         &mut self,
@@ -1352,7 +1352,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         let parent = parent.to_selector(self)?;
         self.debug_assert_acyclic(child.id, parent.id)?;
 
-        if self.graph.is_reference(child.id) {
+        if self.graph.reference_record(child.id).is_some() {
             let new_anchor = match self.graph.position_of(parent.id) {
                 Some(parent_stored) => {
                     positions::resolve_to_pick(&self.graph, parent_stored.anchor)
@@ -1360,7 +1360,11 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 }
                 None => parent.id,
             };
-            repoint_ref(&mut self.graph, child.id, new_anchor);
+            if self.graph.is_reference(child.id) {
+                repoint_ref(&mut self.graph, child.id, new_anchor);
+            } else {
+                self.graph.set_retained_anchor(child.id, new_anchor);
+            }
             return Ok(());
         }
         let parent_ref = self.graph.position_of(parent.id);
@@ -1385,7 +1389,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             let mut tips = vec![parent];
 
             while let Some(tip) = tips.pop() {
-                for &parent in self.graph.parents(tip) {
+                for parent in self.graph.parents(tip) {
                     if seen.insert(parent) {
                         tips.push(parent);
                     }
