@@ -4,8 +4,8 @@ use std::collections::HashSet;
 
 use crate::graph_rebase::arrangement::{
     SplitBoundary, StackSlot, carry_stack_above, land_stack_above, move_ref, place_ref,
-    readopt_dangling_refs, repoint_ref, settle_chain_lower, split_chain, transfer_stack,
-    unhook_ref,
+    readopt_dangling_refs, repoint_ref, settle_chain_lower, splice_out, split_chain,
+    transfer_stack, unhook_ref,
 };
 use crate::graph_rebase::{Direction, StepGraphIndex, positions};
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -454,6 +454,14 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     pub fn replace(&mut self, target: impl ToSelector, mut step: Step) -> Result<Step> {
         let target = self.history.normalize_selector(target.to_selector(self)?)?;
         std::mem::swap(&mut self.graph[target.id], &mut step);
+        // Replacing a reference with a non-reference (tombstoning) removes it from the physical
+        // stack: splice dependents past it. The stored anchor itself is kept for retention reads.
+        if matches!(step, Step::Reference { .. })
+            && !matches!(self.graph[target.id], Step::Reference { .. })
+            && let Some(stored) = self.graph.anchor_of(target.id)
+        {
+            splice_out(&mut self.graph, target.id, stored.below);
+        }
         Ok(step)
     }
 

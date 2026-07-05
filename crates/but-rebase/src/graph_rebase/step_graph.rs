@@ -77,6 +77,10 @@ pub(crate) struct StoredAnchor {
     pub anchor: StepGraphIndex,
     /// Orders co-located references above one anchor, 0 = closest to the anchor.
     pub rank: usize,
+    /// The reference directly underneath in the physical stack (`None` = sits on the anchor).
+    /// Stage B dual-write: authored beside `rank` by every writer; depth along the below-chain
+    /// must equal `rank` (checkpoint-asserted) until rank is deleted and depth takes over.
+    pub below: Option<StepGraphIndex>,
     /// The entry into this position converged — more than one thing (legs and/or refs stacked
     /// above) met here (a merge). A creation-time signal distinct from `approach.len() > 1` (a position
     /// can converge yet resolve to a single leg), so it is stored and PRESERVED, not re-derived.
@@ -163,6 +167,7 @@ impl StepGraph {
         rank: usize,
         approach: &[(StepGraphIndex, usize)],
         ambiguous: bool,
+        below: Option<StepGraphIndex>,
     ) {
         let live = match crate::graph_rebase::positions::resolve_to_pick(self, anchor) {
             Some(pick) => crate::graph_rebase::positions::legs_into_pick(self, pick),
@@ -191,12 +196,19 @@ impl StepGraph {
             anchor,
             rank,
             ambiguous,
+            below,
         });
     }
 
     /// Join `node` into the lane CONTAINING `mate` — direct membership, not legs-equality —
-    /// at `rank`, copying the mate's anchor and ambiguity.
-    pub(crate) fn join_lane_of(&mut self, node: StepGraphIndex, mate: StepGraphIndex, rank: usize) {
+    /// at `rank` sitting on `below`, copying the mate's anchor and ambiguity.
+    pub(crate) fn join_lane_of(
+        &mut self,
+        node: StepGraphIndex,
+        mate: StepGraphIndex,
+        rank: usize,
+        below: Option<StepGraphIndex>,
+    ) {
         let Some(m) = self.anchor_of(mate) else {
             return;
         };
@@ -220,6 +232,7 @@ impl StepGraph {
             anchor: m.anchor,
             rank,
             ambiguous: m.ambiguous,
+            below,
         });
     }
 
@@ -256,6 +269,14 @@ impl StepGraph {
     pub(crate) fn set_rank(&mut self, node: StepGraphIndex, rank: usize) {
         if let Some(stored) = self.anchors[node].as_mut() {
             stored.rank = rank;
+        }
+    }
+
+    /// Re-hang `node` onto `below` — an adjacency statement only; anchor, rank, and lane
+    /// membership are untouched.
+    pub(crate) fn set_below(&mut self, node: StepGraphIndex, below: Option<StepGraphIndex>) {
+        if let Some(stored) = self.anchors[node].as_mut() {
+            stored.below = below;
         }
     }
 
@@ -354,6 +375,7 @@ impl StepGraph {
                 anchor: new_anchor,
                 rank: stored.rank,
                 ambiguous: stored.ambiguous,
+                below: stored.below.and_then(|b| mapping.get(&b).copied()),
             });
         }
     }
