@@ -165,30 +165,25 @@ pub(crate) struct LaneRec {
     pub legs: Vec<Leg>,
 }
 
-/// The rebase step graph: an arena of [`Step`]s where PICKS carry ordered parent arrays, plus
-/// a table of [`RefRecord`]s where REFERENCES carry explicit positions — parent arrays are
-/// the truth for commits, positions the truth for refs, with no overlap. References are
-/// edgeless: native creation authors their positions straight from the placement ledger.
+/// The rebase step graph: a [`but_graph::CommitGraph`] arena where PICKS carry ordered
+/// parent slots, plus a table of [`RefRecord`]s where REFERENCES carry explicit positions —
+/// the CommitGraph is the truth for commits, positions the truth for refs, with no overlap.
+/// References are edgeless: native creation authors their positions straight from the
+/// placement ledger.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct StepGraph {
-    /// THE commit payload: the arena stores commit ids, `None` is a tombstone. Rewriting a
-    /// commit is rewriting its id here, in place — the node id survives the rewrite.
-    ids: Vec<Option<gix::ObjectId>>,
-    /// Each node's pick options, parallel to `ids`.
+    /// THE arena: `StepGraphIndex::Node(i)` IS `CommitIdx` `i`. Commit ids are the payload
+    /// (tombstoning flags a node in place, the node id survives every rewrite), parent
+    /// slots are the ordered structure.
+    arena: but_graph::CommitGraph,
+    /// Each node's pick options, parallel to the arena.
     settings: Vec<PickSettings>,
-    /// THE ordered parent arrays, parallel to `ids` — slot position is the parent order.
-    node_parents: Vec<Vec<StepGraphIndex>>,
     refs: Vec<RefRecord>,
     /// THE approach store: lane membership per STORED (unresolved) anchor value. Which legs
     /// descend into a reference's position lives here and only here — authored by
     /// [`Self::set_position`]/[`Self::join_lane_of`], carried by [`Self::rekey_position`],
     /// renamed by [`Self::rename_legs`], read via `positions::ref_approach`.
     lanes: HashMap<StepGraphIndex, Vec<LaneRec>>,
-    /// THE dissolve oracle (`BUT_REBASE_NATIVE=assert` only): a [`but_graph::CommitGraph`]
-    /// that every arena write is mirrored into, compared against the arena at materialize by
-    /// [`Self::assert_shadow_parity`]. Proves the CommitGraph mutation surface can carry the
-    /// editor before the swap makes it THE arena.
-    shadow: Option<but_graph::CommitGraph>,
 }
 
 impl StepGraph {
@@ -210,14 +205,14 @@ impl StepGraph {
                 panic!("references go through add_reference, not the step arena")
             }
         };
-        self.ids.push(id);
+        let i = self.arena.add_node(id);
         self.settings.push(settings);
-        self.node_parents.push(Vec::new());
-        if let Some(shadow) = self.shadow.as_mut() {
-            let idx = shadow.add_node(id);
-            debug_assert_eq!(idx, self.ids.len() - 1, "shadow arena fell out of step");
-        }
-        StepGraphIndex::Node(self.ids.len() - 1)
+        debug_assert_eq!(
+            self.settings.len(),
+            self.arena.node_count(),
+            "settings table fell out of step with the arena"
+        );
+        StepGraphIndex::Node(i)
     }
 
     /// Replace the node payload at `node` with `step` — a pick decomposes into id and
@@ -229,16 +224,13 @@ impl StepGraph {
         match step {
             Step::Pick(pick) => {
                 let (id, settings) = PickSettings::split(pick);
-                self.ids[i] = Some(id);
+                self.arena.set_node_id(i, Some(id));
                 self.settings[i] = settings;
             }
-            Step::None => self.ids[i] = None,
+            Step::None => self.arena.set_node_id(i, None),
             Step::Reference { .. } => {
                 panic!("BUG: references live in the ref table, not the step arena")
             }
-        }
-        if let Some(shadow) = self.shadow.as_mut() {
-            shadow.set_node_id(i, self.ids[i]);
         }
     }
 
@@ -246,7 +238,7 @@ impl StepGraph {
     /// payload read; whole-step consumers use [`Self::step_view`].
     pub(crate) fn commit_id(&self, node: StepGraphIndex) -> Option<gix::ObjectId> {
         match node {
-            StepGraphIndex::Node(i) => self.ids[i],
+            StepGraphIndex::Node(i) => self.arena.node_payload(i),
             StepGraphIndex::Ref(_) => None,
         }
     }
@@ -257,11 +249,11 @@ impl StepGraph {
         let StepGraphIndex::Node(i) = node else {
             panic!("BUG: only picks carry commit ids");
         };
-        debug_assert!(self.ids[i].is_some(), "tombstones have no commit id");
-        self.ids[i] = Some(id);
-        if let Some(shadow) = self.shadow.as_mut() {
-            shadow.set_commit_id(i, id);
-        }
+        debug_assert!(
+            self.arena.node_payload(i).is_some(),
+            "tombstones have no commit id"
+        );
+        self.arena.set_commit_id(i, id);
     }
 
     /// Overwrite the preserved parents of the pick at `node` (see
@@ -274,7 +266,10 @@ impl StepGraph {
         let StepGraphIndex::Node(i) = node else {
             panic!("BUG: only picks carry preserved parents");
         };
-        debug_assert!(self.ids[i].is_some(), "tombstones carry no pick options");
+        debug_assert!(
+            self.arena.node_payload(i).is_some(),
+            "tombstones carry no pick options"
+        );
         self.settings[i].preserved_parents = parents;
     }
 
@@ -368,7 +363,7 @@ impl StepGraph {
     /// a reference entry `Step::Reference` while live and `Step::None` once dead.
     pub(crate) fn step_view(&self, node: StepGraphIndex) -> Step {
         match node {
-            StepGraphIndex::Node(i) => match self.ids[i] {
+            StepGraphIndex::Node(i) => match self.arena.node_payload(i) {
                 Some(id) => Step::Pick(self.settings[i].pick(id)),
                 None => Step::None,
             },
@@ -634,18 +629,46 @@ impl StepGraph {
 
     /// The ordered parents of `node` — slot position is the parent order. References are
     /// edgeless by construction.
-    pub(crate) fn parents(&self, node: StepGraphIndex) -> &[StepGraphIndex] {
+    pub(crate) fn parents(&self, node: StepGraphIndex) -> Vec<StepGraphIndex> {
         match node {
-            StepGraphIndex::Node(i) => &self.node_parents[i],
-            StepGraphIndex::Ref(_) => &[],
+            StepGraphIndex::Node(i) => self
+                .arena
+                .parent_indices(i)
+                .into_iter()
+                .map(StepGraphIndex::Node)
+                .collect(),
+            StepGraphIndex::Ref(_) => Vec::new(),
         }
     }
 
-    fn parents_mut(&mut self, node: StepGraphIndex) -> &mut Vec<StepGraphIndex> {
-        match node {
-            StepGraphIndex::Node(i) => &mut self.node_parents[i],
-            StepGraphIndex::Ref(_) => panic!("references are edgeless — no parent array"),
-        }
+    /// Rewrite `child`'s parent array through `f` — the single seam every parent mutation
+    /// flows through into the arena's slot write.
+    fn update_parents<R>(
+        &mut self,
+        child: StepGraphIndex,
+        f: impl FnOnce(&mut Vec<StepGraphIndex>) -> R,
+    ) -> R {
+        let StepGraphIndex::Node(i) = child else {
+            panic!("references are edgeless — no parent array");
+        };
+        let mut parents: Vec<StepGraphIndex> = self
+            .arena
+            .parent_indices(i)
+            .into_iter()
+            .map(StepGraphIndex::Node)
+            .collect();
+        let result = f(&mut parents);
+        let targets = parents
+            .into_iter()
+            .map(|parent| match parent {
+                StepGraphIndex::Node(j) => j,
+                StepGraphIndex::Ref(_) => {
+                    panic!("references are edgeless — they cannot be parents")
+                }
+            })
+            .collect();
+        self.arena.set_parents(i, targets);
+        result
     }
 
     /// How many parent slots `node` has.
@@ -657,14 +680,10 @@ impl StepGraph {
     /// children read.
     pub(crate) fn incoming_legs(&self, node: StepGraphIndex) -> Vec<Leg> {
         let mut legs = Vec::new();
-        let arrays = self
-            .node_parents
-            .iter()
-            .enumerate()
-            .map(|(i, parents)| (StepGraphIndex::Node(i), parents));
-        for (child, parents) in arrays {
-            for (slot, &parent) in parents.iter().enumerate() {
-                if parent == node {
+        for i in 0..self.arena.node_count() {
+            let child = StepGraphIndex::Node(i);
+            for (slot, parent) in self.arena.parent_indices(i).into_iter().enumerate() {
+                if StepGraphIndex::Node(parent) == node {
                     legs.push((child, slot));
                 }
             }
@@ -675,11 +694,10 @@ impl StepGraph {
 
     /// Append `parent` as `child`'s last parent slot; returns the slot.
     pub(crate) fn push_parent(&mut self, child: StepGraphIndex, parent: StepGraphIndex) -> usize {
-        let parents = self.parents_mut(child);
-        parents.push(parent);
-        let slot = parents.len() - 1;
-        self.shadow_resync(child);
-        slot
+        self.update_parents(child, |parents| {
+            parents.push(parent);
+            parents.len() - 1
+        })
     }
 
     /// Insert `parent` at `slot` of `child` (clamped to the array end); later slots shift up
@@ -694,8 +712,7 @@ impl StepGraph {
         let slot = slot.min(len);
         let renames: Vec<_> = (slot..len).map(|s| ((child, s), (child, s + 1))).collect();
         self.rename_legs(&renames);
-        self.parents_mut(child).insert(slot, parent);
-        self.shadow_resync(child);
+        self.update_parents(child, |parents| parents.insert(slot, parent));
         slot
     }
 
@@ -710,13 +727,12 @@ impl StepGraph {
         if slot >= len {
             return None;
         }
-        let target = self.parents_mut(child).remove(slot);
+        let target = self.update_parents(child, |parents| parents.remove(slot));
         self.retain_legs(|&leg| leg != (child, slot));
         let renames: Vec<_> = (slot + 1..len)
             .map(|s| ((child, s), (child, s - 1)))
             .collect();
         self.rename_legs(&renames);
-        self.shadow_resync(child);
         Some(target)
     }
 
@@ -728,12 +744,10 @@ impl StepGraph {
         slot: usize,
         new_parent: StepGraphIndex,
     ) {
-        let Some(entry) = self.parents_mut(child).get_mut(slot) else {
-            debug_assert!(false, "replace_parent: {child} has no slot {slot}");
-            return;
-        };
-        *entry = new_parent;
-        self.shadow_resync(child);
+        self.update_parents(child, |parents| match parents.get_mut(slot) {
+            Some(entry) => *entry = new_parent,
+            None => debug_assert!(false, "replace_parent: {child} has no slot {slot}"),
+        });
     }
 
     /// Move `from`'s whole parent array onto `to` (which must have none); statements follow
@@ -744,28 +758,27 @@ impl StepGraph {
             0,
             "transplant target {to} already has parents"
         );
-        let parents = std::mem::take(self.parents_mut(from));
+        let parents = self.update_parents(from, std::mem::take);
         let renames: Vec<_> = (0..parents.len()).map(|s| ((from, s), (to, s))).collect();
-        *self.parents_mut(to) = parents;
+        self.update_parents(to, |slot| *slot = parents);
         self.rename_legs(&renames);
-        self.shadow_resync(from);
-        self.shadow_resync(to);
     }
 
     /// Re-target every parent-array entry naming `from` onto `to`, slots preserved —
     /// statement names are `(source, slot)`, so they stay valid untouched.
     pub(crate) fn redirect_children(&mut self, from: StepGraphIndex, to: StepGraphIndex) {
-        for parents in self.node_parents.iter_mut() {
-            for parent in parents.iter_mut() {
-                if *parent == from {
-                    *parent = to;
+        for i in 0..self.arena.node_count() {
+            let child = StepGraphIndex::Node(i);
+            if !self.parents(child).contains(&from) {
+                continue;
+            }
+            self.update_parents(child, |parents| {
+                for parent in parents.iter_mut() {
+                    if *parent == from {
+                        *parent = to;
+                    }
                 }
-            }
-        }
-        if self.shadow.is_some() {
-            for i in 0..self.node_parents.len() {
-                self.shadow_resync(StepGraphIndex::Node(i));
-            }
+            });
         }
     }
 
@@ -773,80 +786,7 @@ impl StepGraph {
     /// are DELIBERATELY untouched: the caller re-states the orphaned names onto their new
     /// carrier itself (the below-insert path renames them onto the segment's parent-most).
     pub(crate) fn drain_parents(&mut self, child: StepGraphIndex) -> Vec<StepGraphIndex> {
-        let parents = std::mem::take(self.parents_mut(child));
-        self.shadow_resync(child);
-        parents
-    }
-
-    /// Arm the dissolve oracle: `cg` (the carried CommitGraph the arena was built from) starts
-    /// shadowing every arena write. All node arrays are resynced up front so absent slots
-    /// become editor-authored — from here shadow and arena must never diverge.
-    pub(crate) fn install_shadow(&mut self, cg: but_graph::CommitGraph) {
-        assert_eq!(
-            cg.node_count(),
-            self.ids.len(),
-            "shadow install requires the arenas to mirror"
-        );
-        self.shadow = Some(cg);
-        for i in 0..self.node_parents.len() {
-            self.shadow_resync(StepGraphIndex::Node(i));
-        }
-        self.assert_shadow_parity();
-    }
-
-    /// Mirror `node`'s whole parent array into the shadow. No-op without a shadow or for
-    /// references (the shadow tracks the node arena only).
-    fn shadow_resync(&mut self, node: StepGraphIndex) {
-        let Some(shadow) = self.shadow.as_mut() else {
-            return;
-        };
-        let StepGraphIndex::Node(i) = node else {
-            return;
-        };
-        let parents = self.node_parents[i]
-            .iter()
-            .map(|parent| match parent {
-                StepGraphIndex::Node(j) => *j,
-                StepGraphIndex::Ref(_) => {
-                    panic!("shadow: node {i} has reference parent {parent} post-finalize")
-                }
-            })
-            .collect();
-        shadow.set_parents(i, parents);
-    }
-
-    /// Panic unless the shadow mirrors the arena exactly — payload ids and parent arrays,
-    /// node for node. No-op without a shadow.
-    pub(crate) fn assert_shadow_parity(&self) {
-        let Some(shadow) = self.shadow.as_ref() else {
-            return;
-        };
-        assert_eq!(
-            shadow.node_count(),
-            self.ids.len(),
-            "SHADOW GRAPH DIVERGENCE: arena sizes differ"
-        );
-        for i in 0..self.ids.len() {
-            assert_eq!(
-                shadow.node_payload(i),
-                self.ids[i],
-                "SHADOW GRAPH DIVERGENCE: payload of node {i}"
-            );
-            let arena_parents: Vec<usize> = self.node_parents[i]
-                .iter()
-                .map(|parent| match parent {
-                    StepGraphIndex::Node(j) => *j,
-                    StepGraphIndex::Ref(_) => {
-                        panic!("shadow: node {i} has reference parent {parent} post-finalize")
-                    }
-                })
-                .collect();
-            assert_eq!(
-                shadow.parent_indices(i),
-                arena_parents,
-                "SHADOW GRAPH DIVERGENCE: parents of node {i}"
-            );
-        }
+        self.update_parents(child, std::mem::take)
     }
 
     /// Drop every lane statement `keep` rejects, keeping `Count` carries consistent.
@@ -867,16 +807,18 @@ impl StepGraph {
     /// All node-arena ids (picks and tombstones), ascending. References are NOT included —
     /// see [`Self::references`] and [`Self::ref_indices`].
     pub(crate) fn node_indices(&self) -> impl Iterator<Item = StepGraphIndex> + '_ {
-        (0..self.ids.len()).map(StepGraphIndex::Node)
+        (0..self.arena.node_count()).map(StepGraphIndex::Node)
     }
 
     /// The ARENA nodes no parent array names — the child-less tips, ascending. References
-    /// never appear here: post-strip they are edgeless by construction, and the consumers
+    /// never appear here: they are edgeless by construction, and the consumers
     /// (head discovery) want picks and tombstones only.
     pub(crate) fn tips(&self) -> impl Iterator<Item = StepGraphIndex> + '_ {
-        let referenced: HashSet<StepGraphIndex> =
-            self.node_parents.iter().flatten().copied().collect();
-        (0..self.ids.len())
+        let referenced: HashSet<StepGraphIndex> = (0..self.arena.node_count())
+            .flat_map(|i| self.arena.parent_indices(i))
+            .map(StepGraphIndex::Node)
+            .collect();
+        (0..self.arena.node_count())
             .map(StepGraphIndex::Node)
             .filter(move |node| !referenced.contains(node))
     }

@@ -182,11 +182,6 @@ fn create_native(
         .collect::<Result<Vec<_>>>()?;
 
     crate::graph_rebase::positions::debug_assert_positions_total(&graph);
-    // Assert mode also arms the DISSOLVE oracle: a clone of the carried CommitGraph shadows
-    // every arena write from here on, compared at materialize.
-    if std::env::var("BUT_REBASE_NATIVE").ok().as_deref() == Some("assert") {
-        graph.install_shadow(cg.clone());
-    }
     Ok((graph, references, checkouts))
 }
 
