@@ -26,7 +26,6 @@ impl<'ws, 'graph, M: RefMetadata> SuccessfulRebase<'ws, 'graph, M> {
                     selector,
                     merge_base_override,
                 } => {
-                    let selector = self.history.normalize_selector(selector)?;
                     let step = self.graph.step_view(selector.id);
 
                     let (new_head, new_head_refname) = match step {

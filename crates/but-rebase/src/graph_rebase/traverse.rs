@@ -96,10 +96,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         &self,
         start: impl ToSelector,
     ) -> Result<impl Iterator<Item = Selector> + '_> {
-        let start = self
-            .history
-            .normalize_selector(start.to_selector(self)?)?
-            .id;
+        let start = start.to_selector(self)?.id;
         Ok(self
             .reachable_ids(start)
             .into_iter()
@@ -130,14 +127,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         start: impl ToSelector,
         excluded: impl ToSelector,
     ) -> Result<impl Iterator<Item = Selector> + '_> {
-        let start = self
-            .history
-            .normalize_selector(start.to_selector(self)?)?
-            .id;
-        let excluded = self
-            .history
-            .normalize_selector(excluded.to_selector(self)?)?
-            .id;
+        let start = start.to_selector(self)?.id;
+        let excluded = excluded.to_selector(self)?.id;
         let excluded: std::collections::HashSet<StepGraphIndex> =
             self.reachable_ids(excluded).into_iter().collect();
         let result: Vec<StepGraphIndex> = self
@@ -159,8 +150,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     /// rather than the first-parent-only branch-line reasoning of
     /// `but_workspace`'s `derive_push_status_from_graph`.
     pub fn ahead_behind(&self, a: impl ToSelector, b: impl ToSelector) -> Result<AheadBehind> {
-        let a = self.history.normalize_selector(a.to_selector(self)?)?.id;
-        let b = self.history.normalize_selector(b.to_selector(self)?)?.id;
+        let a = a.to_selector(self)?.id;
+        let b = b.to_selector(self)?.id;
         // Only picks count, so reference endpoints stand for their anchors.
         let a = crate::graph_rebase::positions::resolve_to_pick(&self.graph, a);
         let b = crate::graph_rebase::positions::resolve_to_pick(&self.graph, b);
@@ -183,17 +174,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         start: impl ToSelector,
         limit: Option<Selector>,
     ) -> Result<impl Iterator<Item = Selector> + '_> {
-        let start = self
-            .history
-            .normalize_selector(start.to_selector(self)?)?
-            .id;
-        let limit = limit
-            .map(|limit| {
-                self.history
-                    .normalize_selector(limit)
-                    .map(|selector| selector.id)
-            })
-            .transpose()?;
+        let start = start.to_selector(self)?.id;
+        let limit = limit.map(|limit| limit.id);
         let excluded: std::collections::HashSet<StepGraphIndex> = limit
             .map(|limit| self.reachable_ids(limit).into_iter().collect())
             .unwrap_or_default();

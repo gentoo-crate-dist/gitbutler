@@ -134,20 +134,10 @@ struct NodeSet {
 }
 
 impl NodeSet {
-    /// Convert into a [`Subgraph`] by pointing every index at `revision` - the
-    /// editor revision the node set was traversed against.
-    fn into_subgraph(self, revision: usize) -> Subgraph {
+    fn into_subgraph(self) -> Subgraph {
         Subgraph {
-            heads: self
-                .heads
-                .into_iter()
-                .map(|id| Selector { id, revision })
-                .collect(),
-            nodes: self
-                .nodes
-                .into_iter()
-                .map(|id| Selector { id, revision })
-                .collect(),
+            heads: self.heads.into_iter().map(|id| Selector { id }).collect(),
+            nodes: self.nodes.into_iter().map(|id| Selector { id }).collect(),
         }
     }
 }
@@ -192,7 +182,6 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             .is_some_and(|(refname, _)| *refname == ws_ref);
 
         let target_ix = self.target_selector().map(|s| s.id);
-        let revision = self.history.current_revision();
 
         // The entrypoint is a reference: the region floods from the pick it resolves to
         // (references carry no edges).
@@ -222,12 +211,9 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 );
 
                 Ok(GraphWorkspace {
-                    above_workspace: above_workspace.into_subgraph(revision),
+                    above_workspace: above_workspace.into_subgraph(),
                     workspace_commit: Some(self.new_selector(workspace_commit_ix)),
-                    stacks: stacks
-                        .into_iter()
-                        .map(|s| s.into_subgraph(revision))
-                        .collect(),
+                    stacks: stacks.into_iter().map(|s| s.into_subgraph()).collect(),
                     reference_status: HashMap::new(),
                     commit_state: HashMap::new(),
                 })
@@ -238,7 +224,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     Some(entrypoint_ix),
                 );
                 Ok(GraphWorkspace {
-                    above_workspace: head_not_target_commit.into_subgraph(revision),
+                    above_workspace: head_not_target_commit.into_subgraph(),
                     workspace_commit: None,
                     stacks: vec![],
                     reference_status: HashMap::new(),
@@ -260,7 +246,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             Ok(GraphWorkspace {
                 above_workspace: Subgraph::empty(),
                 workspace_commit: None,
-                stacks: vec![stack.into_subgraph(revision)],
+                stacks: vec![stack.into_subgraph()],
                 reference_status: HashMap::new(),
                 commit_state: HashMap::new(),
             })
@@ -270,20 +256,14 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     /// The entrypoint (`HEAD`) reference node, or `None` if HEAD isn't on a ref.
     fn head_index(&self) -> Option<StepGraphIndex> {
         self.checkouts
-            .iter()
-            .find_map(|Checkout::Head { selector, .. }| {
-                self.history
-                    .normalize_selector(*selector)
-                    .ok()
-                    .map(|s| s.id)
-            })
+            .first()
+            .map(|Checkout::Head { selector, .. }| selector.id)
     }
 
     /// The target commit's node, if a target is configured and present.
     fn target_selector(&self) -> Option<Selector> {
         let target = self.workspace.graph.project_meta.target_commit_id?;
-        let selector = self.try_select_commit(target)?;
-        self.history.normalize_selector(selector).ok()
+        self.try_select_commit(target)
     }
 
     /// Compute the per-reference status for every local-branch reference in the

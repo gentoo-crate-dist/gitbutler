@@ -120,10 +120,7 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                 }
                 let ix = graph.add_reference(refname.clone(), mutable);
                 if Some(reference) == entrypoint.segment.ref_name() {
-                    head_selectors.push(Selector {
-                        id: ix,
-                        revision: 0,
-                    });
+                    head_selectors.push(Selector { id: ix });
                 }
                 nodes.push(ix);
             }

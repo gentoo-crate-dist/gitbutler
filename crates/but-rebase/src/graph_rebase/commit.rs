@@ -44,9 +44,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         &self,
         selector: impl ToCommitSelector,
     ) -> Result<(Selector, but_core::CommitOwned)> {
-        let selector = self
-            .history
-            .normalize_selector(selector.to_commit_selector(self)?)?;
+        let selector = selector.to_commit_selector(self)?;
         let Some(id) = self.graph.commit_id(selector.id) else {
             bail!("BUG: Expected pick step from commit selector. This should never happen");
         };
@@ -58,9 +56,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         &self,
         selector: impl ToReferenceSelector,
     ) -> Result<(Selector, but_core::CommitOwned)> {
-        let selector = self
-            .history
-            .normalize_selector(selector.to_reference_selector(self)?)?;
+        let selector = selector.to_reference_selector(self)?;
 
         let first_parent =
             crate::graph_rebase::positions::resolve_to_pick(&self.graph, selector.id)
