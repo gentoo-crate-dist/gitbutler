@@ -2,8 +2,8 @@
 
 use std::collections::HashSet;
 
-use crate::graph_rebase::arrangement::{StackSlot, place_ref};
-use crate::graph_rebase::step_graph::{ApproachKind, StoredAnchor};
+use crate::graph_rebase::arrangement::{StackSlot, move_ref, place_ref, repoint_ref, unhook_ref};
+use crate::graph_rebase::step_graph::StoredAnchor;
 use crate::graph_rebase::{Direction, StepGraphIndex, positions};
 use anyhow::{Context as _, Result, anyhow, bail};
 use but_core::RefMetadata;
@@ -491,41 +491,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         // reference pending a reconnect. As a position: it leaves its chain (members above
         // close the gap) and gives up its legs — with a reconnect they stay as plain edges
         // onto the anchor (the node-era rewire), without one they are removed outright.
-        if target_child.id == target_parent.id
-            && let Some(unhooked) = self.graph.anchor_of(target_child.id)
-        {
-            let shifts: Vec<_> = positions::chain_members(&self.graph, target_child.id)
-                .into_iter()
-                .filter(|(node, m)| *node != target_child.id && m.rank > unhooked.rank)
-                .collect();
-            for (node, mut member) in shifts {
-                member.rank -= 1;
-                self.graph.set_anchor(node, Some(member));
-            }
-            if skip_reconnect_step
-                && let Some(anchor) =
-                    crate::graph_rebase::positions::resolve_to_pick(&self.graph, unhooked.anchor)
-            {
-                for (leg, slot) in positions::ref_approach(&self.graph, target_child.id) {
-                    let removed: Vec<_> = self
-                        .graph
-                        .edges_directed(leg, Direction::Outgoing)
-                        .filter(|e| e.target() == anchor && e.weight().order == slot)
-                        .map(|e| e.id())
-                        .collect();
-                    for id in removed {
-                        self.graph.remove_edge(id);
-                    }
-                }
-            }
-            self.graph.set_anchor(
-                target_child.id,
-                Some(StoredAnchor {
-                    kind: ApproachKind::Root,
-                    ambiguous: false,
-                    ..unhooked
-                }),
-            );
+        if target_child.id == target_parent.id && self.graph.anchor_of(target_child.id).is_some() {
+            unhook_ref(&mut self.graph, target_child.id, skip_reconnect_step);
             return Ok(());
         }
         // A reference delimiter stands for the pick it resolves to: edges are the truth for
@@ -1082,62 +1049,11 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
 
         // An empty segment — a lone reference — is pure position data: it slots into the
         // target's chain, and any nodes to connect become its approaching legs.
-        if child.id == parent.id
-            && let Some(moving) = self.graph.anchor_of(child.id)
-        {
-            let moving_approach = positions::ref_approach(&self.graph, child.id);
-            // Each arm yields the new position as (anchor, rank, approach); the moving reference's
-            // legs are merged into the approach below and the whole thing classified once (all leg
-            // edges are moved by then, so `place` sees the complete legs).
-            let (anchor, rank, mut approach) = match (side, self.graph.anchor_of(target.id)) {
-                (InsertSide::Above, Some(t_stored)) => {
-                    let shifts: Vec<_> = positions::chain_members(&self.graph, target.id)
-                        .into_iter()
-                        .filter(|(node, m)| *node != child.id && m.rank > t_stored.rank)
-                        .collect();
-                    for (node, mut member) in shifts {
-                        member.rank += 1;
-                        self.graph.set_anchor(node, Some(member));
-                    }
-                    (
-                        t_stored.anchor,
-                        t_stored.rank + 1,
-                        positions::ref_approach(&self.graph, target.id),
-                    )
-                }
-                (InsertSide::Below, Some(t_stored)) => {
-                    let shifts: Vec<_> = positions::chain_members(&self.graph, target.id)
-                        .into_iter()
-                        .filter(|(node, m)| *node != child.id && m.rank >= t_stored.rank)
-                        .collect();
-                    for (node, mut member) in shifts {
-                        member.rank += 1;
-                        self.graph.set_anchor(node, Some(member));
-                    }
-                    (
-                        t_stored.anchor,
-                        t_stored.rank,
-                        positions::ref_approach(&self.graph, target.id),
-                    )
-                }
-                (InsertSide::Above, None) => {
-                    // The rank-0 position at the target pick; existing refs shift up.
-                    let shifts: Vec<_> = self
-                        .graph
-                        .anchored_refs()
-                        .filter_map(|(node, stored)| {
-                            (node != child.id
-                                && positions::resolve_to_pick(&self.graph, stored.anchor)
-                                    == Some(target.id))
-                            .then(|| (node, stored.clone()))
-                        })
-                        .collect();
-                    for (node, mut member) in shifts {
-                        member.rank += 1;
-                        self.graph.set_anchor(node, Some(member));
-                    }
-                    (target.id, 0, vec![])
-                }
+        if child.id == parent.id && self.graph.anchor_of(child.id).is_some() {
+            let slot = match (side, self.graph.anchor_of(target.id)) {
+                (InsertSide::Above, Some(_)) => StackSlot::Above(target.id),
+                (InsertSide::Below, Some(_)) => StackSlot::Below(target.id),
+                (InsertSide::Above, None) => StackSlot::Bottom(target.id),
                 (InsertSide::Below, None) => {
                     // On top of the chain the target pick's first-parent leg approaches.
                     let first_parent = self
@@ -1146,67 +1062,13 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                         .min_by_key(|e| e.weight().order)
                         .map(|e| (e.target(), e.weight().order))
                         .context("Cannot insert a reference below a parentless commit")?;
-                    let approach = vec![(target.id, first_parent.1)];
-                    let rank = self
-                        .graph
-                        .anchored_refs()
-                        .filter(|(node, _)| {
-                            *node != child.id
-                                && positions::ref_approach(&self.graph, *node) == approach
-                        })
-                        .map(|(_, stored)| stored.rank + 1)
-                        .max()
-                        .unwrap_or(0);
-                    (first_parent.0, rank, approach)
+                    StackSlot::LaneTop {
+                        pick: first_parent.0,
+                        leg: (target.id, first_parent.1),
+                    }
                 }
             };
-            // The legs that approached the reference follow it (node-era edges pointed at
-            // the reference itself), entering the chain at its new position — but only when
-            // it was their sole carrier: chain members staying behind keep their approach.
-            let old_anchor_pick = positions::resolve_to_pick(&self.graph, moving.anchor);
-            let new_anchor_pick = positions::resolve_to_pick(&self.graph, anchor);
-            let sole_carrier = !positions::chain_members(&self.graph, child.id)
-                .into_iter()
-                .any(|(node, m)| node != child.id && m.rank < moving.rank);
-            if sole_carrier
-                && let (Some(old_pick), Some(new_pick)) = (old_anchor_pick, new_anchor_pick)
-            {
-                for (leg, slot) in &moving_approach {
-                    if old_pick != new_pick {
-                        let moved: Vec<_> = self
-                            .graph
-                            .edges_directed(*leg, Direction::Outgoing)
-                            .filter(|e| e.target() == old_pick && e.weight().order == *slot)
-                            .map(|e| (e.id(), e.weight().clone()))
-                            .collect();
-                        for (id, weight) in moved {
-                            self.graph.remove_edge(id);
-                            self.graph.add_edge(*leg, new_pick, weight);
-                        }
-                    }
-                    if !approach.contains(&(*leg, *slot)) {
-                        approach.push((*leg, *slot));
-                    }
-                }
-                approach.sort();
-                // Members below in the joined chain are now approached through the moved
-                // reference: they share the merged entry set.
-                if matches!(side, InsertSide::Above)
-                    && let Some(t_stored) = self.graph.anchor_of(target.id)
-                {
-                    let mates: Vec<_> = positions::chain_members(&self.graph, target.id)
-                        .into_iter()
-                        .filter(|(node, m)| *node != child.id && m.rank <= t_stored.rank)
-                        .map(|(node, m)| (node, m.anchor, m.rank))
-                        .collect();
-                    for (node, m_anchor, m_rank) in mates {
-                        let placed = StoredAnchor::place(&self.graph, m_anchor, m_rank, &approach);
-                        self.graph.set_anchor(node, Some(placed));
-                    }
-                }
-            }
-            let placed = StoredAnchor::place(&self.graph, anchor, rank, &approach);
-            self.graph.set_anchor(child.id, Some(placed));
+            move_ref(&mut self.graph, child.id, slot);
             if let Some(nodes_to_connect) = nodes_to_connect {
                 for any_selector in nodes_to_connect.as_slice() {
                     let selector = any_selector.to_selector(self)?;
@@ -1779,65 +1641,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 }
                 None => parent.id,
             };
-            let Some(stored) = self.graph.anchor_of(child.id) else {
-                // A fresh, anchorless reference gaining its first downward link (the transaction's
-                // `add_step` + `add_edge` branch-creation path): position it at the target as a
-                // root chain — nothing descends into it yet.
-                place_ref(&mut self.graph, child.id, StackSlot::Root(new_anchor));
-                return Ok(());
-            };
-            // An existing reference re-anchors onto the parent. The legs approaching it (node-era
-            // edges into the reference) follow it; chain members left behind at the old anchor lose
-            // their approach and become root chains.
-            let old_anchor = positions::resolve_to_pick(&self.graph, stored.anchor);
-            if let Some(old_anchor) = old_anchor
-                && old_anchor != new_anchor
-            {
-                // Snapshot the reference's legs before moving their edges (derived approach tracks
-                // live edges), so it can be re-placed against `new_anchor`'s final legs below.
-                let child_approach = positions::ref_approach(&self.graph, child.id);
-                for (leg, slot) in &child_approach {
-                    let moved: Vec<_> = self
-                        .graph
-                        .edges_directed(*leg, Direction::Outgoing)
-                        .filter(|e| e.target() == old_anchor && e.weight().order == *slot)
-                        .map(|e| (e.id(), e.weight().clone()))
-                        .collect();
-                    for (id, weight) in moved {
-                        self.graph.remove_edge(id);
-                        self.graph.add_edge(*leg, new_anchor, weight);
-                    }
-                }
-                let mates: Vec<_> = positions::chain_members(&self.graph, child.id)
-                    .into_iter()
-                    .filter(|(node, _)| *node != child.id)
-                    .collect();
-                for (node, mut member) in mates {
-                    if member.rank < stored.rank {
-                        // Left behind at the old anchor without an approach.
-                        member.kind = ApproachKind::Root;
-                        member.ambiguous = false;
-                    } else {
-                        // Stacked above the moved reference: it carries them along.
-                        member.anchor = new_anchor;
-                    }
-                    self.graph.set_anchor(node, Some(member));
-                }
-                // The reference's legs moved with it; re-classify its lane against `new_anchor`'s
-                // final legs (its old `Lane` slot may not exist there).
-                let mut placed =
-                    StoredAnchor::place(&self.graph, new_anchor, stored.rank, &child_approach);
-                placed.ambiguous = stored.ambiguous;
-                self.graph.set_anchor(child.id, Some(placed));
-                return Ok(());
-            }
-            self.graph.set_anchor(
-                child.id,
-                Some(StoredAnchor {
-                    anchor: new_anchor,
-                    ..stored
-                }),
-            );
+            repoint_ref(&mut self.graph, child.id, new_anchor);
             return Ok(());
         }
         // An edge into a reference enters its chain: the pick edge goes to the anchor and the
