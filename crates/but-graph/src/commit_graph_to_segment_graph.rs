@@ -76,14 +76,22 @@ pub fn workspace_from_commit_graph<T: but_core::RefMetadata>(
     let (overlay_repo, overlay_meta, _entrypoint) =
         crate::init::Overlay::default().into_parts(repo, meta);
     let ws_ref: gix::refs::FullName = but_core::WORKSPACE_REF_NAME.try_into()?;
-    let ws_commit = overlay_repo
+    let ws_tip_on_disk = overlay_repo
         .try_find_reference(ws_ref.as_ref())?
         .and_then(|mut r| r.peel_to_commit().ok())
-        .map(|c| c.id().detach())
-        .filter(|c| cg.node(*c).is_some());
+        .map(|c| c.id().detach());
+    let ws_commit = ws_tip_on_disk.filter(|c| cg.node(*c).is_some());
+    // The walk seeds `InWorkspace` and the project target only for a workspace with METADATA
+    // whose ref resolves — a bare `gitbutler/workspace` ref without it walks (and projects)
+    // as a plain branch.
+    let ws_meta = overlay_meta.workspace_opt(ws_ref.as_ref())?;
+    let ws_has_meta = ws_meta.is_some();
+    let ws_exists = ws_has_meta && ws_tip_on_disk.is_some();
     // A target anchor the editor dropped or rewrote away is still external context on disk —
     // the walk seeds it as an integrated tip whenever the commit exists, so re-represent it.
-    let target_ref_tip = match project_meta.target_ref.as_ref() {
+    // The stored target commit and the target REF tip only count when a workspace exists (the
+    // walk pushes them per discovered workspace); the extra target is seeded unconditionally.
+    let target_ref_tip = match project_meta.target_ref.as_ref().filter(|_| ws_exists) {
         Some(tr) => overlay_repo
             .try_find_reference(tr.as_ref())?
             .and_then(|mut r| r.peel_to_commit().ok())
@@ -93,6 +101,7 @@ pub fn workspace_from_commit_graph<T: but_core::RefMetadata>(
     let target_anchors = || {
         project_meta
             .target_commit_id
+            .filter(|_| ws_exists)
             .into_iter()
             .chain(options.extra_target_commit_id)
             .chain(target_ref_tip)
@@ -119,7 +128,38 @@ pub fn workspace_from_commit_graph<T: but_core::RefMetadata>(
     // effective parents that must then be re-validated against the odb.
     complete_parents_from_odb(&mut cg, &overlay_repo)?;
     cg.recompute_integrated(target_anchors());
+    cg.recompute_in_workspace(ws_commit.filter(|_| ws_has_meta));
+    // `NotInRemote` mirrors the walk's seeding: only tips the walk QUEUES seed it — HEAD,
+    // and for a discovered workspace its tip, the target's local tracking branch, and the
+    // workspace stack branch refs. A local branch that merely points into remote-reachable
+    // history is NOT a seed, and an editor drop must lose the flag entirely (a stale flag
+    // would hide the remote region from projection).
+    let mut not_in_remote_tips: Vec<gix::ObjectId> = head_tip.into_iter().collect();
+    if ws_exists {
+        not_in_remote_tips.extend(ws_tip_on_disk);
+        if let Some((_, _, Some((_, local_tip)))) =
+            crate::init::workspace_target_tip(&overlay_repo, project_meta.target_ref.as_ref())?
+        {
+            not_in_remote_tips.push(local_tip);
+        }
+        for branch in ws_meta
+            .iter()
+            .flat_map(|ws| ws.stacks.iter())
+            .filter(|s| s.is_in_workspace())
+            .flat_map(|s| s.branches.iter())
+        {
+            not_in_remote_tips.extend(crate::init::walk::try_refname_to_id(
+                &overlay_repo,
+                branch.ref_name.as_ref(),
+            )?);
+        }
+    }
+    cg.recompute_not_in_remote(not_in_remote_tips);
     cg.recompute_generations();
+    // Editor tombstones are seam-internal: reconciliation left no live edge into them, so
+    // compaction yields the same graph a fresh walk would — which matters now that the
+    // projection's carried graph becomes THE workspace graph downstream consumers reuse.
+    cg.compact();
     let ref_prefixes = || {
         ["refs/heads/", "refs/remotes/"]
             .into_iter()
@@ -190,27 +230,33 @@ pub fn workspace_from_commit_graph<T: but_core::RefMetadata>(
 /// After materialization the odb is authoritative for every kept id: an editor pick applied
 /// AS-IS carries no arena edges at all (parents implied by the odb), and a `preserved_parents`
 /// pick was WRITTEN with parents its arena position never had (edit mode's parent override).
-/// A node whose effective parents are an in-order TRIM (subsequence) of its odb parents keeps
-/// them — that is the walk's own cut (limits, integrated stop-early, display cuts), which the
-/// rewalk reproduces — anything else is rewired to the odb parents, adding (or reviving)
-/// missing commits recursively, each reconciled the same way.
+/// A node is kept only when its RAW recorded parents equal its odb parents AND no connected
+/// slot targets a tombstone — the projection reads the raw payload, so a stale id left behind
+/// by an editor drop is as much a divergence as a wrong edge. Walk cuts (absent slots with
+/// odb-true payload) survive. Anything else is rewired to the odb parents, adding (or
+/// reviving) missing commits recursively, each reconciled the same way.
 fn complete_parents_from_odb(cg: &mut CommitGraph, repo: &OverlayRepo<'_>) -> anyhow::Result<()> {
     let mut queue: Vec<gix::ObjectId> = (0..cg.node_count())
         .filter_map(|idx| cg.node_payload(idx))
         .collect();
     while let Some(id) = queue.pop() {
         let idx = cg.index_of(id).expect("queued ids are live");
-        let arena_parents = cg.all_parent_ids(id);
         let Ok(commit) = repo.find_commit(id) else {
             continue;
         };
-        let odb_parents: Vec<_> = commit.parent_ids().map(|p| p.detach()).collect();
-        let keep = if arena_parents.is_empty() {
-            odb_parents.is_empty()
-        } else {
-            is_subsequence(&arena_parents, &odb_parents)
-        };
-        if keep {
+        let mut odb_parents: Vec<_> = commit.parent_ids().map(|p| p.detach()).collect();
+        // Collapse exact duplicate parents like the walk and the graph reader do (a
+        // workspace merge encodes empty lanes as repeated parents).
+        if odb_parents.len() > 1 {
+            let mut deduped = Vec::with_capacity(odb_parents.len());
+            for p in odb_parents {
+                if !deduped.contains(&p) {
+                    deduped.push(p);
+                }
+            }
+            odb_parents = deduped;
+        }
+        if cg.raw_parent_ids(idx) == odb_parents && !cg.has_tombstoned_parent(idx) {
             continue;
         }
         let mut revived = Vec::new();
@@ -227,23 +273,12 @@ fn complete_parents_from_odb(cg: &mut CommitGraph, repo: &OverlayRepo<'_>) -> an
             })
             .collect();
         cg.set_parents(idx, parent_indices);
-        // A revival flips the effective parents of every child that was substituting
-        // through the tombstone — re-validate them (and the revived node itself).
-        for r in revived {
-            queue.push(r);
-            let live_children: Vec<_> = cg
-                .children(r)
-                .filter(|&c| cg.index_of(c).is_some())
-                .collect();
-            queue.extend(live_children);
-        }
+        // A revived node is newly live — it wasn't in the initial sweep, so validate it now.
+        // (Its children need no re-queue: any child kept earlier already passed the
+        // tombstone-free check, so it can't have been substituting through this node.)
+        queue.extend(revived);
     }
     Ok(())
-}
-
-fn is_subsequence(needle: &[gix::ObjectId], hay: &[gix::ObjectId]) -> bool {
-    let mut hay = hay.iter();
-    needle.iter().all(|n| hay.any(|h| h == n))
 }
 
 /// The write-through seam's external-context refresh: `anchor` (a stored/extra target, or a

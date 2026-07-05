@@ -85,10 +85,7 @@ impl<'ws, 'graph, M: RefMetadata> SuccessfulRebase<'ws, 'graph, M> {
         }
         repo.edit_references(ref_edits)?;
 
-        let project_meta = self.workspace.graph.project_meta.clone();
-        self.workspace
-            .refresh_from_head(&repo, &*self.meta, project_meta)?;
-        assert_write_through_parity(&self.graph, self.workspace, &repo, &*self.meta)?;
+        refresh_workspace_from_arena(&self.graph, self.workspace, &repo, &*self.meta)?;
 
         Ok(MaterializeOutcome {
             graph: self.graph,
@@ -121,10 +118,7 @@ impl<'ws, 'graph, M: RefMetadata> SuccessfulRebase<'ws, 'graph, M> {
 
         repo.edit_references(self.ref_edits.clone())?;
 
-        let project_meta = self.workspace.graph.project_meta.clone();
-        self.workspace
-            .refresh_from_head(&repo, &*self.meta, project_meta)?;
-        assert_write_through_parity(&self.graph, self.workspace, &repo, &*self.meta)?;
+        refresh_workspace_from_arena(&self.graph, self.workspace, &repo, &*self.meta)?;
 
         Ok(MaterializeOutcome {
             graph: self.graph,
@@ -135,66 +129,123 @@ impl<'ws, 'graph, M: RefMetadata> SuccessfulRebase<'ws, 'graph, M> {
     }
 }
 
-/// THE WRITE-THROUGH ORACLE (`BUT_REBASE_WRITE_THROUGH=assert`): projecting the editor's
-/// MUTATED arena must equal the rewalk's projection — the dissolve's parity obligation
-/// (mutate-then-project == rewalk-then-project). Compared on an index-free fingerprint of
-/// the stack shape, since segment indices differ between independently built graphs.
-fn assert_write_through_parity<M: RefMetadata>(
+/// THE FLIP (dissolve stage D4d-b): the editor's mutated arena IS the next workspace —
+/// materialization projects it directly instead of rewalking the repository. The rewalk
+/// survives as an env-gated verifier (`BUT_REBASE_WRITE_THROUGH=assert`): the dissolve's
+/// parity obligation, mutate-then-project == rewalk-then-project, compared on a field-exact
+/// fingerprint of everything the projection derives except graph indices (independently
+/// built graphs number segments differently).
+///
+/// Falls back to a rewalk when the arena has nothing to project: HEAD is unborn (e.g. its
+/// referent was deleted without a repoint) or points outside the editor's graph.
+fn refresh_workspace_from_arena<M: RefMetadata>(
     graph: &crate::graph_rebase::StepGraph,
-    rewalked: &but_graph::Workspace,
+    workspace: &mut but_graph::Workspace,
     repo: &gix::Repository,
     meta: &M,
 ) -> anyhow::Result<()> {
-    if std::env::var_os("BUT_REBASE_WRITE_THROUGH").is_none_or(|v| v != "assert") {
-        return Ok(());
-    }
+    let project_meta = workspace.graph.project_meta.clone();
+    let options = workspace.graph.options.clone();
     let Some(mutated) = but_graph::workspace_from_commit_graph(
         graph.arena().clone(),
         repo,
         meta,
-        rewalked.graph.project_meta.clone(),
-        rewalked.graph.options.clone(),
+        project_meta.clone(),
+        options.clone(),
     )?
     else {
-        // Nothing the seam can project: HEAD is unborn (e.g. its referent was deleted
-        // without a repoint) or points outside the editor's graph.
-        return Ok(());
+        return workspace.refresh_from_head(repo, meta, project_meta);
     };
-    let (mutated_fp, rewalked_fp) = (
-        projection_fingerprint(&mutated),
-        projection_fingerprint(rewalked),
-    );
-    if mutated_fp != rewalked_fp {
-        bail!(
-            "WRITE-THROUGH DIVERGENCE\n--- mutate-then-project\n{mutated_fp}\n--- rewalk-then-project\n{rewalked_fp}"
+    *workspace = mutated;
+    if std::env::var_os("BUT_REBASE_WRITE_THROUGH").is_some_and(|v| v == "assert") {
+        let rewalked = but_graph::Workspace::from_head(repo, meta, project_meta, options)?;
+        let (mutated_fp, rewalked_fp) = (
+            projection_fingerprint(workspace),
+            projection_fingerprint(&rewalked),
         );
+        if mutated_fp != rewalked_fp {
+            bail!(
+                "WRITE-THROUGH DIVERGENCE\n--- mutate-then-project\n{mutated_fp}\n--- rewalk-then-project\n{rewalked_fp}"
+            );
+        }
     }
     Ok(())
 }
 
-/// The parity view: stack ids, segment names, per-segment commit ids and bases — everything
-/// the rebase is obliged to preserve, nothing graph-index-dependent.
+/// The parity view: everything the projection derives that is NOT a graph index — kind,
+/// bounds, target, stacks, segments, per-commit ids/parents/flags/refs, remote and outside
+/// commit sets. Graph-index-dependent fields (segment indices, sibling links) are excluded
+/// since independently built graphs number segments differently.
 fn projection_fingerprint(ws: &but_graph::Workspace) -> String {
     use std::fmt::Write as _;
+    let commit_line = |out: &mut String, prefix: &str, c: &but_graph::workspace::StackCommit| {
+        writeln!(
+            out,
+            "{prefix}{} parents=[{}] flags={:?} refs=[{}]",
+            c.id,
+            c.parent_ids
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            c.flags,
+            c.refs
+                .iter()
+                .map(|r| r.ref_name.as_bstr().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+        .ok();
+    };
     let mut out = String::new();
+    let kind = match &ws.kind {
+        but_graph::workspace::WorkspaceKind::Managed { ref_info } => {
+            format!("Managed({})", ref_info.ref_name.as_bstr())
+        }
+        but_graph::workspace::WorkspaceKind::ManagedMissingWorkspaceCommit { ref_info } => {
+            format!("ManagedMissing({})", ref_info.ref_name.as_bstr())
+        }
+        but_graph::workspace::WorkspaceKind::AdHoc => "AdHoc".to_string(),
+    };
+    writeln!(
+        out,
+        "kind={kind} lower_bound={:?} target_ref={:?} target_commit={:?} metadata={}",
+        ws.lower_bound,
+        ws.target_ref
+            .as_ref()
+            .map(|t| (t.ref_name.as_bstr().to_string(), t.commits_ahead)),
+        ws.target_commit.as_ref().map(|t| t.commit_id),
+        ws.metadata.is_some(),
+    )
+    .ok();
     for stack in &ws.stacks {
         writeln!(out, "stack {:?}", stack.id).ok();
         for segment in &stack.segments {
             writeln!(
                 out,
-                "  {} base={:?} commits=[{}]",
+                "  {} base={:?} remote={:?} projected_name={} entrypoint={} metadata={}",
                 segment
                     .ref_name()
                     .map_or_else(|| "<anon>".to_string(), |n| n.as_bstr().to_string()),
                 segment.base,
                 segment
-                    .commits
-                    .iter()
-                    .map(|c| c.id.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                    .remote_tracking_ref_name
+                    .as_ref()
+                    .map(|n| n.as_bstr().to_string()),
+                segment.name_projected_from_outside,
+                segment.is_entrypoint,
+                segment.metadata.is_some(),
             )
             .ok();
+            for commit in &segment.commits {
+                commit_line(&mut out, "    ", commit);
+            }
+            for commit in &segment.commits_on_remote {
+                commit_line(&mut out, "    remote ", commit);
+            }
+            for commit in segment.commits_outside.iter().flatten() {
+                commit_line(&mut out, "    outside ", commit);
+            }
         }
     }
     out

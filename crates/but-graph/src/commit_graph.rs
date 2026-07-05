@@ -204,6 +204,10 @@ impl CommitGraph {
         cg.set_connected(o.connected);
         cg.hard_limit_hit = o.hard_limit_hit;
         cg.traversal_tips = o.tips;
+        // Goal bits stop mattering the moment the traversal ends — and their numbering depends
+        // on tip processing order, so graphs from different builds could never compare equal
+        // while carrying them.
+        cg.strip_goal_flags();
         cg
     }
 
@@ -337,6 +341,50 @@ impl CommitGraph {
         }
     }
 
+    /// Set [`CommitFlags::InWorkspace`](crate::CommitFlags::InWorkspace) on exactly the
+    /// ancestors of `ws_commit` (`None` clears the flag everywhere) — the walk's rule, where
+    /// only the workspace tip seeds the flag and it propagates to everything reachable.
+    pub(crate) fn recompute_in_workspace(&mut self, ws_commit: Option<gix::ObjectId>) {
+        let in_workspace = ws_commit
+            .filter(|tip| self.by_id.contains_key(tip))
+            .map(|tip| self.ancestor_set(tip))
+            .unwrap_or_default();
+        for (idx, node) in self.nodes.iter_mut().enumerate() {
+            if self.tombstoned[idx] {
+                continue;
+            }
+            node.commit.flags.set(
+                crate::CommitFlags::InWorkspace,
+                in_workspace.contains(&node.commit.id),
+            );
+        }
+    }
+
+    /// Set [`CommitFlags::NotInRemote`](crate::CommitFlags::NotInRemote) on exactly the
+    /// ancestors of `local_tips` (the walk's rule: every LOCAL branch tip seeds the flag,
+    /// remote tips don't) — clearing it elsewhere, e.g. on a commit the editor dropped from
+    /// local history that a remote ref still holds.
+    pub(crate) fn recompute_not_in_remote(
+        &mut self,
+        local_tips: impl IntoIterator<Item = gix::ObjectId>,
+    ) {
+        let mut not_in_remote: HashSet<gix::ObjectId> = HashSet::new();
+        for tip in local_tips {
+            if self.by_id.contains_key(&tip) && !not_in_remote.contains(&tip) {
+                not_in_remote.extend(self.ancestor_set(tip));
+            }
+        }
+        for (idx, node) in self.nodes.iter_mut().enumerate() {
+            if self.tombstoned[idx] {
+                continue;
+            }
+            node.commit.flags.set(
+                crate::CommitFlags::NotInRemote,
+                not_in_remote.contains(&node.commit.id),
+            );
+        }
+    }
+
     /// Bring a TOMBSTONED node holding `id` back to life — the write-through seam's anchor
     /// revival: a stored/extra target the editor dropped from workspace history is still
     /// external context on disk, and the walk always seeds it as an integrated tip.
@@ -423,6 +471,21 @@ impl CommitGraph {
             }
         }
         parents
+    }
+
+    /// The RAW recorded parent ids of `idx` — the payload array, cut slots included. Unlike
+    /// [`Self::all_parent_ids`] this does NOT substitute through tombstones, so a slot whose
+    /// target was editor-dropped still shows the dropped commit's id.
+    pub(crate) fn raw_parent_ids(&self, idx: CommitIdx) -> &[gix::ObjectId] {
+        &self.nodes[idx].commit.parent_ids
+    }
+
+    /// `true` if any CONNECTED parent slot of `idx` targets a tombstone — traversal would
+    /// substitute through it, so the raw recorded parents disagree with what a walk sees.
+    pub(crate) fn has_tombstoned_parent(&self, idx: CommitIdx) -> bool {
+        self.parent_slots[idx]
+            .iter()
+            .any(|slot| slot.connected && slot.target.is_some_and(|t| self.tombstoned[t]))
     }
 
     /// All ancestors of `tip` (inclusive), following CONNECTED parent edges — history the
@@ -631,6 +694,71 @@ impl CommitGraph {
         for &p in &parents {
             self.children[p].push(idx);
         }
+    }
+
+    /// Clear the walk's GOAL bits (the bits beyond [`CommitFlags::all()`](crate::CommitFlags))
+    /// from every node. Goal numbering is traversal-order ephemera — a node that survived a
+    /// rewrite carries whatever bits the ORIGINAL walk assigned, which a fresh walk would
+    /// number differently — and nothing after the walk reads goals.
+    pub(crate) fn strip_goal_flags(&mut self) {
+        for node in &mut self.nodes {
+            node.commit.flags &= crate::CommitFlags::all();
+        }
+    }
+
+    /// Drop tombstoned nodes and reindex, leaving a graph indistinguishable from one built
+    /// without them — what the write-through seam hands to projection, so a carried graph
+    /// never leaks editor tombstones to the next consumer. The caller must first ensure no
+    /// live slot targets a tombstone (the seam's odb reconciliation guarantees it); such a
+    /// slot would degrade to "parent outside the graph" here.
+    pub fn compact(&mut self) {
+        if !self.tombstoned.iter().any(|&t| t) {
+            return;
+        }
+        let mut remap: Vec<Option<CommitIdx>> = vec![None; self.nodes.len()];
+        let mut next = 0;
+        for (idx, remapped) in remap.iter_mut().enumerate() {
+            if !self.tombstoned[idx] {
+                *remapped = Some(next);
+                next += 1;
+            }
+        }
+        let mut nodes = Vec::with_capacity(next);
+        let mut parent_slots = Vec::with_capacity(next);
+        for idx in 0..self.nodes.len() {
+            if remap[idx].is_none() {
+                continue;
+            }
+            nodes.push(self.nodes[idx].clone());
+            parent_slots.push(
+                self.parent_slots[idx]
+                    .iter()
+                    .map(|slot| ParentSlot {
+                        target: slot.target.and_then(|t| remap[t]),
+                        connected: slot.connected,
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        let by_id: HashMap<_, _> = nodes
+            .iter()
+            .enumerate()
+            .map(|(idx, n): (_, &CommitNode)| (n.commit.id, idx))
+            .collect();
+        let mut children = vec![Vec::new(); nodes.len()];
+        for (idx, slots) in parent_slots.iter().enumerate() {
+            for slot in slots {
+                if let Some(pidx) = slot.target {
+                    children[pidx].push(idx);
+                }
+            }
+        }
+        self.managed_ws_commits.retain(|id| by_id.contains_key(id));
+        self.nodes = nodes;
+        self.by_id = by_id;
+        self.parent_slots = parent_slots;
+        self.children = children;
+        self.tombstoned = vec![false; next];
     }
 
     /// Arena length, tombstones included.
