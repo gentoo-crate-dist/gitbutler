@@ -113,11 +113,11 @@ fn derive_ref_position_from_edges(
     let mut approach = Vec::new();
     let mut ambiguous = false;
     for _ in 0..10_000 {
-        let incoming: Vec<_> = graph.edges_directed(cursor, Direction::Incoming).collect();
+        let incoming = graph.incoming_legs(cursor);
         let picks: Vec<_> = incoming
             .iter()
-            .filter(|e| graph.is_pick(e.source()))
-            .map(|e| (e.source(), e.weight().order))
+            .copied()
+            .filter(|&(child, _)| graph.is_pick(child))
             .collect();
         if !picks.is_empty() {
             // Direct pick edges are the entry points, even with refs stacked above (those
@@ -126,12 +126,11 @@ fn derive_ref_position_from_edges(
             // anchor, not to one leg.
             ambiguous = incoming.len() > 1;
             approach = picks;
-            approach.sort();
             break;
         }
-        let mut others = incoming.iter().filter(|e| !graph.is_pick(e.source()));
+        let mut others = incoming.iter().filter(|&&(child, _)| !graph.is_pick(child));
         match (others.next(), others.next()) {
-            (Some(edge), None) => cursor = edge.source(),
+            (Some(&(child, _)), None) => cursor = child,
             _ => break,
         }
     }
@@ -482,13 +481,11 @@ pub(crate) fn legs_into_pick(
     graph: &StepGraph,
     pick: StepGraphIndex,
 ) -> Vec<(StepGraphIndex, usize)> {
-    let mut legs: Vec<_> = graph
-        .edges_directed(pick, Direction::Incoming)
-        .filter(|e| graph.is_pick(e.source()))
-        .map(|e| (e.source(), e.weight().order))
-        .collect();
-    legs.sort();
-    legs
+    graph
+        .incoming_legs(pick)
+        .into_iter()
+        .filter(|&(child, _)| graph.is_pick(child))
+        .collect()
 }
 
 /// Resolve `node` to the current pick it stands for: a pick resolves to itself, a tombstone

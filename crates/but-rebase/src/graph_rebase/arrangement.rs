@@ -24,7 +24,7 @@ use std::collections::HashMap;
 
 use crate::graph_rebase::positions::{self, legs_into_pick};
 use crate::graph_rebase::step_graph::{LaneCarry, RefPosition};
-use crate::graph_rebase::{Direction, StepGraph, StepGraphIndex};
+use crate::graph_rebase::{StepGraph, StepGraphIndex};
 
 /// A position in a commit's reference stack, named by intent.
 #[derive(Debug, Clone, Copy)]
@@ -215,19 +215,12 @@ pub(crate) fn move_ref(graph: &mut StepGraph, node: StepGraphIndex, slot: StackS
     let old_anchor_pick = positions::resolve_to_pick(graph, moving.anchor);
     let new_anchor_pick = positions::resolve_to_pick(graph, anchor);
     if sole_carrier && let (Some(old_pick), Some(new_pick)) = (old_anchor_pick, new_anchor_pick) {
-        for (leg, leg_slot) in &moving_approach {
-            if old_pick != new_pick {
-                let moved: Vec<_> = graph
-                    .edges_directed(*leg, Direction::Outgoing)
-                    .filter(|e| e.target() == old_pick && e.weight().order == *leg_slot)
-                    .map(|e| (e.id(), e.weight().clone()))
-                    .collect();
-                for (id, weight) in moved {
-                    graph.move_edge(id, new_pick, weight);
-                }
+        for &(leg, leg_slot) in &moving_approach {
+            if old_pick != new_pick && graph.parents(leg).get(leg_slot) == Some(&old_pick) {
+                graph.replace_parent(leg, leg_slot, new_pick);
             }
-            if !approach.contains(&(*leg, *leg_slot)) {
-                approach.push((*leg, *leg_slot));
+            if !approach.contains(&(leg, leg_slot)) {
+                approach.push((leg, leg_slot));
             }
         }
         approach.sort();
@@ -305,14 +298,9 @@ pub(crate) fn repoint_ref(graph: &mut StepGraph, node: StepGraphIndex, new_ancho
             // Snapshot the reference's legs before moving their edges (the derived approach
             // tracks live edges), so it can be re-placed against `new_anchor`'s final legs.
             let approach = positions::ref_approach(graph, node);
-            for (leg, slot) in &approach {
-                let moved: Vec<_> = graph
-                    .edges_directed(*leg, Direction::Outgoing)
-                    .filter(|e| e.target() == old_anchor && e.weight().order == *slot)
-                    .map(|e| (e.id(), e.weight().clone()))
-                    .collect();
-                for (id, weight) in moved {
-                    graph.move_edge(id, new_anchor, weight);
+            for &(leg, slot) in &approach {
+                if graph.parents(leg).get(slot) == Some(&old_anchor) {
+                    graph.replace_parent(leg, slot, new_anchor);
                 }
             }
             // Its old below stays behind; at the destination the reference sits on whatever
@@ -378,25 +366,12 @@ pub(crate) fn unhook_ref(graph: &mut StepGraph, node: StepGraphIndex, drop_legs:
         graph.set_below(mate, unhooked.below);
     }
     if drop_legs && let Some(anchor) = positions::resolve_to_pick(graph, unhooked.anchor) {
-        let removed: Vec<_> = positions::ref_approach(graph, node)
-            .into_iter()
-            .flat_map(|(leg, slot)| {
-                graph
-                    .edges_directed(leg, Direction::Outgoing)
-                    .filter(|e| e.target() == anchor && e.weight().order == slot)
-                    .map(|e| (leg, e.id()))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        for (leg, id) in removed {
-            // Earlier removals on the same leg shift the pending edges; re-derive the
-            // current slot by edge id so the removal names the leg as the store does now.
-            graph.normalize_parent_slots(leg);
-            if let Some(slot) = graph
-                .edges_directed(leg, Direction::Outgoing)
-                .find(|e| e.id() == id)
-                .map(|e| e.weight().order)
-            {
+        let mut legs = positions::ref_approach(graph, node);
+        legs.sort_unstable();
+        // Descending slots per leg: a removal shifts only the slots above it, so every
+        // pending (leg, slot) name below stays exact.
+        for (leg, slot) in legs.into_iter().rev() {
+            if graph.parents(leg).get(slot) == Some(&anchor) {
                 graph.remove_parent(leg, slot);
             }
         }
