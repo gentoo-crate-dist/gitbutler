@@ -873,62 +873,22 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         new_parent_nodes: impl IntoIterator<Item = StepGraphIndex>,
         parent_reparenting_order: ParentReparentingOrder,
     ) -> Vec<usize> {
-        let mut existing_parent_edges = self
-            .graph
-            .edges_directed(child_node, Direction::Outgoing)
-            .map(|edge| (edge.id(), edge.weight().order, edge.target()))
-            .collect::<Vec<_>>();
-        existing_parent_edges.sort_by_key(|(_, order, _)| *order);
-
-        for (edge_id, _, _) in &existing_parent_edges {
-            self.graph.remove_edge(*edge_id);
-        }
-
-        let new_parent_nodes = new_parent_nodes.into_iter().collect::<Vec<_>>();
-        let mut new_orders = Vec::with_capacity(new_parent_nodes.len());
-        let mut renumbered = Vec::new();
         match parent_reparenting_order {
-            ParentReparentingOrder::Prepend => {
-                for (order, parent_node) in new_parent_nodes.iter().enumerate() {
-                    self.graph
-                        .add_edge(child_node, *parent_node, Edge { order });
-                    new_orders.push(order);
-                }
-
-                // Insertion-location parents define the first-parent lane. Existing parents stay
-                // attached after them as merge-side parents.
-                let shifted_by = new_parent_nodes.len();
-                for (offset, (_, old_order, parent_node)) in
-                    existing_parent_edges.into_iter().enumerate()
-                {
-                    let order = shifted_by + offset;
-                    self.graph.add_edge(child_node, parent_node, Edge { order });
-                    renumbered.push((old_order, order));
-                }
-            }
-            ParentReparentingOrder::Append => {
-                let shifted_by = existing_parent_edges.len();
-                for (order, (_, old_order, parent_node)) in
-                    existing_parent_edges.into_iter().enumerate()
-                {
-                    self.graph.add_edge(child_node, parent_node, Edge { order });
-                    renumbered.push((old_order, order));
-                }
-
-                for (offset, parent_node) in new_parent_nodes.into_iter().enumerate() {
-                    let order = shifted_by + offset;
-                    self.graph.add_edge(child_node, parent_node, Edge { order });
-                    new_orders.push(order);
-                }
-            }
+            // Insertion-location parents define the first-parent lane. Existing parents stay
+            // attached after them as merge-side parents.
+            ParentReparentingOrder::Prepend => new_parent_nodes
+                .into_iter()
+                .enumerate()
+                .map(|(slot, parent_node)| {
+                    self.graph.insert_parent(child_node, slot, parent_node);
+                    slot
+                })
+                .collect(),
+            ParentReparentingOrder::Append => new_parent_nodes
+                .into_iter()
+                .map(|parent_node| self.graph.push_parent(child_node, parent_node))
+                .collect(),
         }
-        let renames: Vec<_> = renumbered
-            .iter()
-            .filter(|(old, new)| old != new)
-            .map(|&(old, new)| ((child_node, old), (child_node, new)))
-            .collect();
-        self.graph.rename_legs(&renames);
-        new_orders
     }
 
     /// Insert a segment relative to a selector.
@@ -1310,20 +1270,11 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         match (side, target_anchor) {
             (InsertSide::Above, None) if !inserting_reference => {
                 // Above a pick: the interposed node slides under the pick's chains — its
-                // children rewire to the new node and every ref anchored on it moves up
-                // (weights are preserved, so stored approach legs stay valid).
-                let edges = self
-                    .graph
-                    .edges_directed(target.id, Direction::Incoming)
-                    .map(|e| (e.id(), e.weight().to_owned(), e.source()))
-                    .collect::<Vec<_>>();
-
+                // children rewire to the new node with slots preserved (so stored approach
+                // legs stay valid) and every ref anchored on it moves up.
                 let new_idx = self.graph.add_node(step);
-                self.graph.add_edge(new_idx, target.id, Edge { order: 0 });
-
-                for (edge_id, edge_weight, _edge_source) in edges {
-                    self.graph.move_edge(edge_id, new_idx, edge_weight);
-                }
+                self.graph.redirect_children(target.id, new_idx);
+                self.graph.push_parent(new_idx, target.id);
                 positions::reanchor_refs_at(&mut self.graph, target.id, new_idx, false);
 
                 Ok(self.new_selector(new_idx))
@@ -1372,23 +1323,11 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 Ok(self.new_selector(new_idx))
             }
             (InsertSide::Below, None) if !inserting_reference => {
-                // Below a pick: parents rewire to the new node with preserved weights, so
-                // chains carried by those legs follow approach rewrites.
-                let edges = self
-                    .graph
-                    .edges_directed(target.id, Direction::Outgoing)
-                    .map(|e| (e.id(), e.weight().to_owned(), e.target()))
-                    .collect::<Vec<_>>();
-
+                // Below a pick: the pick's whole parent array moves onto the new node with
+                // slots preserved, so chains carried by those legs follow the rename.
                 let new_idx = self.graph.add_node(step);
-                self.graph.add_edge(target.id, new_idx, Edge { order: 0 });
-
-                for (edge_id, edge_weight, edge_target) in edges {
-                    self.graph.remove_edge(edge_id);
-                    let order = edge_weight.order;
-                    self.graph.add_edge(new_idx, edge_target, edge_weight);
-                    self.graph.rename_leg((target.id, order), (new_idx, order));
-                }
+                self.graph.transplant_parents(target.id, new_idx);
+                self.graph.push_parent(target.id, new_idx);
 
                 Ok(self.new_selector(new_idx))
             }

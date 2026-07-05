@@ -638,6 +638,144 @@ impl StepGraph {
         }
     }
 
+    // --- Slot-based parent primitives (stage A of the parent-array swap) ---
+    //
+    // A node's outgoing edges, read and mutated as a DENSE ordered array of parent slots.
+    // Every mutator first normalizes the child (slots renumbered to 0..n with statements
+    // renamed along; statements naming a nonexistent slot purged), so after any primitive
+    // touch the slot names ARE the array positions. A removed slot's statements are dropped
+    // — revival is an explicit op-level re-statement, never a store-level coincidence.
+
+    /// The parent-side edge ids of `node` in slot order: ascending stored order, ties
+    /// newest-first (the order every sorted consumer reads).
+    fn parent_edge_ids(&self, node: StepGraphIndex) -> Vec<StepEdgeIndex> {
+        let mut ids: Vec<StepEdgeIndex> = self
+            .adjacency(node, Direction::Outgoing)
+            .iter()
+            .rev()
+            .copied()
+            .collect();
+        ids.sort_by_key(|&id| self.edge_ref(id).weight.order);
+        ids
+    }
+
+    /// The parents of `node` in slot order.
+    pub(crate) fn parents(&self, node: StepGraphIndex) -> Vec<StepGraphIndex> {
+        self.parent_edge_ids(node)
+            .into_iter()
+            .map(|id| self.edge_ref(id).target)
+            .collect()
+    }
+
+    /// How many parent slots `node` has.
+    pub(crate) fn parent_count(&self, node: StepGraphIndex) -> usize {
+        self.adjacency(node, Direction::Outgoing).len()
+    }
+
+    /// Renumber `child`'s parent slots to dense `0..n`, renaming live statements along and
+    /// purging statements that name a slot `child` does not hold. Returns the edge ids in
+    /// slot order. Duplicate stored orders make slot names ambiguous and are a bug.
+    fn normalize_parent_slots(&mut self, child: StepGraphIndex) -> Vec<StepEdgeIndex> {
+        let ids = self.parent_edge_ids(child);
+        let live: HashSet<usize> = ids
+            .iter()
+            .map(|&id| self.edge_ref(id).weight.order)
+            .collect();
+        debug_assert_eq!(
+            live.len(),
+            ids.len(),
+            "duplicate parent orders at {child} make slot names ambiguous"
+        );
+        self.retain_legs(|&(source, slot)| source != child || live.contains(&slot));
+        let mut renames = Vec::new();
+        for (slot, &id) in ids.iter().enumerate() {
+            let record = self.edges[id]
+                .as_mut()
+                .expect("adjacency lists only hold live edge ids");
+            if record.weight.order != slot {
+                renames.push(((child, record.weight.order), (child, slot)));
+                record.weight.order = slot;
+            }
+        }
+        self.rename_legs(&renames);
+        ids
+    }
+
+    /// Append `parent` as `child`'s last parent slot; returns the slot.
+    pub(crate) fn push_parent(&mut self, child: StepGraphIndex, parent: StepGraphIndex) -> usize {
+        self.normalize_parent_slots(child);
+        let slot = self.parent_count(child);
+        self.add_edge(child, parent, Edge { order: slot });
+        slot
+    }
+
+    /// Insert `parent` at `slot` of `child` (clamped to the array end); later slots shift up
+    /// with their statements.
+    pub(crate) fn insert_parent(
+        &mut self,
+        child: StepGraphIndex,
+        slot: usize,
+        parent: StepGraphIndex,
+    ) {
+        let ids = self.normalize_parent_slots(child);
+        let slot = slot.min(ids.len());
+        let mut renames = Vec::new();
+        for &id in &ids[slot..] {
+            let record = self.edges[id]
+                .as_mut()
+                .expect("adjacency lists only hold live edge ids");
+            let old = record.weight.order;
+            record.weight.order = old + 1;
+            renames.push(((child, old), (child, old + 1)));
+        }
+        self.rename_legs(&renames);
+        self.add_edge(child, parent, Edge { order: slot });
+    }
+
+    /// Move `from`'s whole parent array onto `to` (which must have none); statements follow
+    /// slot-for-slot.
+    pub(crate) fn transplant_parents(&mut self, from: StepGraphIndex, to: StepGraphIndex) {
+        debug_assert_eq!(
+            self.parent_count(to),
+            0,
+            "transplant target {to} already has parents"
+        );
+        let ids = self.normalize_parent_slots(from);
+        let mut renames = Vec::new();
+        for (slot, id) in ids.into_iter().enumerate() {
+            let target = self.edge_ref(id).target;
+            self.remove_edge(id);
+            self.add_edge(to, target, Edge { order: slot });
+            renames.push(((from, slot), (to, slot)));
+        }
+        self.rename_legs(&renames);
+    }
+
+    /// Re-target every edge into `from` onto `to`, slots preserved — statement names are
+    /// `(source, slot)`, so they stay valid untouched.
+    pub(crate) fn redirect_children(&mut self, from: StepGraphIndex, to: StepGraphIndex) {
+        let ids: Vec<StepEdgeIndex> = self.adjacency(from, Direction::Incoming).to_vec();
+        for id in ids {
+            let weight = self.edge_ref(id).weight.clone();
+            self.move_edge(id, to, weight);
+        }
+    }
+
+    /// Drop every lane statement `keep` rejects, keeping `Count` carries consistent.
+    fn retain_legs(&mut self, keep: impl Fn(&Leg) -> bool) {
+        for lanes in self.lanes.values_mut() {
+            for lane in lanes.iter_mut() {
+                let before = lane.legs.len();
+                lane.legs.retain(&keep);
+                if lane.legs.len() != before
+                    && let LaneCarry::Count(_) = lane.carry
+                {
+                    lane.carry = LaneCarry::Count(lane.legs.len());
+                }
+            }
+        }
+    }
+
     /// All node-arena ids (picks and tombstones), ascending. References are NOT included —
     /// see [`Self::references`] and [`Self::ref_indices`].
     pub(crate) fn node_indices(&self) -> impl Iterator<Item = StepGraphIndex> + '_ {

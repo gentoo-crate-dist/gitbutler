@@ -93,11 +93,7 @@ fn derive_ref_position_from_edges(
     let mut anchor = None;
     let mut below = None;
     for _ in 0..10_000 {
-        let Some(next) = graph
-            .edges_directed(cursor, Direction::Outgoing)
-            .next()
-            .map(|e| e.target())
-        else {
+        let Some(next) = graph.parents(cursor).first().copied() else {
             break;
         };
         if graph.is_pick(next) {
@@ -232,8 +228,44 @@ fn order_census_to_file(graph: &StepGraph) {
         let dense = orders.iter().copied().eq(0..orders.len());
         if dup {
             let _ = writeln!(file, "DUP node={node} orders={orders:?}");
+            assert!(
+                std::env::var_os("BUT_ORDER_DUP_PANIC").is_none(),
+                "duplicate parent orders at node {node}: {orders:?}"
+            );
         } else if !dense {
             let _ = writeln!(file, "SPARSE node={node} orders={orders:?}");
+        }
+    }
+    // Stale-statement census: lane legs naming a non-live leg of their (resolved) anchor.
+    // Statements are read filtered against live legs, so staleness is legal mid-op — this
+    // measures whether any survives to a checkpoint, which decides if the slot primitives
+    // may renumber statements as live-exact data.
+    for (key, lanes) in graph.lane_table() {
+        let live = match resolve_to_pick(graph, *key) {
+            Some(pick) => legs_into_pick(graph, pick),
+            None => Vec::new(),
+        };
+        for lane in lanes {
+            for leg in &lane.legs {
+                if !live.contains(leg) {
+                    assert!(
+                        std::env::var_os("BUT_ORDER_STALE_PANIC").is_none(),
+                        "stale lane statement at rest: key={key} leg=({},{})",
+                        leg.0,
+                        leg.1
+                    );
+                    let _ = writeln!(
+                        file,
+                        "STALE key={key} leg=({},{}) members={:?}",
+                        leg.0,
+                        leg.1,
+                        lane.members
+                            .iter()
+                            .map(|m| m.to_string())
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
         }
     }
     let _ = writeln!(file, "CHECK n={checked}");
@@ -477,10 +509,7 @@ pub(crate) fn resolve_to_pick(graph: &StepGraph, node: StepGraphIndex) -> Option
             .filter(|_| graph.is_reference(cursor))
         {
             Some(stored) => stored.anchor,
-            None => graph
-                .edges_directed(cursor, Direction::Outgoing)
-                .next()
-                .map(|e| e.target())?,
+            None => graph.parents(cursor).first().copied()?,
         };
     }
     None
