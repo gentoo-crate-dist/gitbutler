@@ -4,11 +4,11 @@
 //! # Why
 //!
 //! Today the pipeline is `gix traversal → SegmentGraph (segments own commit ranges) → projection`,
-//! and but-rebase builds its `StepGraph` from that same segment graph. The segment layer turned out
+//! and but-rebase builds its editor commit graph from that same segment graph. The segment layer turned out
 //! to be an *artifact of incremental construction*, not something either consumer fundamentally
 //! needs:
 //!
-//! * **StepGraph** is already commit/ref-granular — its nodes are `Pick(commit)` / `Reference(ref)`
+//! * **The rebase editor graph** is already commit/ref-granular — its nodes are `Pick(commit)` / `Reference(ref)`
 //!   and its edges carry only the parent-array `order`. It re-derives parent order from
 //!   `commit.parent_ids` and even *corrects* but-graph when they disagree. It needs: commit id,
 //!   parent ids (first-parent at `[0]`), the refs on each commit, an entrypoint, and parent-walk
@@ -108,7 +108,7 @@ pub struct CommitGraph {
 impl CommitGraph {
     /// Build from a set of commits (as produced by the gix traversal). Commits whose parents are
     /// outside the set are simply roots of this subgraph (a partial graph), mirroring how the
-    /// StepGraph handles missing parents via `preserved_parents`.
+    /// rebase editor handles missing parents via `preserved_parents`.
     pub(crate) fn from_commits(
         commits: impl IntoIterator<Item = Commit>,
         entrypoint: Option<gix::ObjectId>,
@@ -314,7 +314,7 @@ impl CommitGraph {
         }
     }
 
-    /// Overwrite the node's flags — the write-through seam flags re-added anchor regions
+    /// Overwrite the node's flags — the write-through seam flags re-added tip regions
     /// Integrated, the walk's convention for target-seeded tips.
     pub(crate) fn set_flags(&mut self, idx: CommitIdx, flags: crate::CommitFlags) {
         self.nodes[idx].commit.flags = flags;
@@ -385,7 +385,7 @@ impl CommitGraph {
         }
     }
 
-    /// Bring a TOMBSTONED node holding `id` back to life — the write-through seam's anchor
+    /// Bring a TOMBSTONED node holding `id` back to life — the write-through seam's tip
     /// revival: a stored/extra target the editor dropped from workspace history is still
     /// external context on disk, and the walk always seeds it as an integrated tip.
     ///

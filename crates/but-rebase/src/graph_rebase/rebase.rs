@@ -13,7 +13,7 @@ use gix::refs::{
 };
 
 use crate::graph_rebase::{
-    Editor, Step, StepGraph, StepGraphIndex, SuccessfulRebase,
+    CommitGraph, CommitGraphIndex, Editor, Step, SuccessfulRebase,
     cherry_pick::{CherryPickOutcome, cherry_pick},
     util::collect_ordered_parents,
 };
@@ -104,9 +104,9 @@ impl<'ws, 'graph, M: RefMetadata> Editor<'ws, 'graph, M> {
             }
         }
 
-        // References need no rewrite at all — their position's anchor node now carries the
+        // References need no rewrite at all — their position's `on` node now carries the
         // rebased id. All that remains is emitting the ref transaction: every live, mutable,
-        // positioned reference moves to its anchor's new commit.
+        // positioned reference moves to its pick's new commit.
         for step_idx in graph.ref_indices() {
             let record = graph
                 .reference_record(step_idx)
@@ -122,7 +122,7 @@ impl<'ws, 'graph, M: RefMetadata> Editor<'ws, 'graph, M> {
                     .context("References should resolve to a commit")?;
             let to_reference = match graph.commit_id(first_parent_idx) {
                 Some(id) => id,
-                None => bail!("A reference's anchor is not a pick"),
+                None => bail!("A reference's position does not resolve to a pick"),
             };
 
             let reference = self.repo.try_find_reference(&refname)?;
@@ -207,17 +207,20 @@ impl<'ws, 'graph, M: RefMetadata> Editor<'ws, 'graph, M> {
 ///
 /// This second traversal ensures that all the parents of any given node have
 /// been seen, before traversing it.
-fn order_steps_picking(graph: &StepGraph, heads: &[StepGraphIndex]) -> VecDeque<StepGraphIndex> {
+fn order_steps_picking(
+    graph: &CommitGraph,
+    heads: &[CommitGraphIndex],
+) -> VecDeque<CommitGraphIndex> {
     // References take no part in the pick order (no edges) and are replayed separately;
-    // everything else — picks AND tombstones, even one carrying a leaked anchor — must be
-    // traversed, or its subtree is orphaned. Filter by the STEP, not by anchor presence
-    // (a non-reference with a stray anchor must not be skipped).
-    let mut heads: Vec<StepGraphIndex> = heads
+    // everything else — picks AND tombstones, even one carrying a leaked position — must be
+    // traversed, or its subtree is orphaned. Filter by the STEP, not by position presence
+    // (a non-reference with a stray position must not be skipped).
+    let mut heads: Vec<CommitGraphIndex> = heads
         .iter()
         .copied()
         .filter(|h| !graph.is_reference(*h))
         .collect();
-    let mut seen = heads.iter().cloned().collect::<HashSet<StepGraphIndex>>();
+    let mut seen = heads.iter().cloned().collect::<HashSet<CommitGraphIndex>>();
     // Reachable nodes with no outgoing nodes.
     let mut bases = VecDeque::new();
 
@@ -308,12 +311,12 @@ mod test {
         use anyhow::Result;
 
         use crate::graph_rebase::{
-            Step, StepGraph, rebase::order_steps_picking, testing::render_ascii_graph,
+            CommitGraph, Step, rebase::order_steps_picking, testing::render_ascii_graph,
         };
 
         #[test]
         fn basic_scenario() -> Result<()> {
-            let mut graph = StepGraph::default();
+            let mut graph = CommitGraph::default();
             let a = graph.add_node(Step::new_pick(gix::ObjectId::from_str(
                 "1000000000000000000000000000000000000000",
             )?));
@@ -345,7 +348,7 @@ mod test {
 
         #[test]
         fn complex_scenario() -> Result<()> {
-            let mut graph = StepGraph::default();
+            let mut graph = CommitGraph::default();
             let a = graph.add_node(Step::new_pick(gix::ObjectId::from_str(
                 "1000000000000000000000000000000000000000",
             )?));
@@ -412,7 +415,7 @@ mod test {
 
         #[test]
         fn merge_scenario() -> Result<()> {
-            let mut graph = StepGraph::default();
+            let mut graph = CommitGraph::default();
             let a = graph.add_node(Step::new_pick(gix::ObjectId::from_str(
                 "1000000000000000000000000000000000000000",
             )?));
@@ -454,7 +457,7 @@ mod test {
 
         #[test]
         fn merge_flipped_scenario() -> Result<()> {
-            let mut graph = StepGraph::default();
+            let mut graph = CommitGraph::default();
             let a = graph.add_node(Step::new_pick(gix::ObjectId::from_str(
                 "1000000000000000000000000000000000000000",
             )?));

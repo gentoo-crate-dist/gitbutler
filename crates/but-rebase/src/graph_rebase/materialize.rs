@@ -139,7 +139,7 @@ impl<'ws, 'graph, M: RefMetadata> SuccessfulRebase<'ws, 'graph, M> {
 /// Falls back to a rewalk when the arena has nothing to project: HEAD is unborn (e.g. its
 /// referent was deleted without a repoint) or points outside the editor's graph.
 fn refresh_workspace_from_arena<M: RefMetadata>(
-    graph: &crate::graph_rebase::StepGraph,
+    graph: &crate::graph_rebase::CommitGraph,
     workspace: &mut but_graph::Workspace,
     repo: &gix::Repository,
     meta: &M,

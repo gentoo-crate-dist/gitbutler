@@ -1,17 +1,17 @@
-//! Utilities around the step graph for internal use.
+//! Utilities around the commit graph for internal use.
 
 use std::collections::HashSet;
 
-use crate::graph_rebase::{StepGraph, StepGraphIndex};
+use crate::graph_rebase::{CommitGraph, CommitGraphIndex};
 
 /// Find the parents of a given node that are commit - in correct parent
 /// ordering.
 ///
 /// We do this via a pruned depth first search.
 pub(crate) fn collect_ordered_parents(
-    graph: &StepGraph,
-    target: StepGraphIndex,
-) -> Vec<StepGraphIndex> {
+    graph: &CommitGraph,
+    target: CommitGraphIndex,
+) -> Vec<CommitGraphIndex> {
     ordered_commit_parents(graph, target)
 }
 
@@ -19,21 +19,21 @@ pub(crate) fn collect_ordered_parents(
 /// non-commit steps.
 ///
 /// A parent slot that carries a reference chain (the slot is a stored approach entry of a chain
-/// anchored at its pick) yields to any plain slot resolving to the same pick, and only the
+/// positioned at its pick) yields to any plain slot resolving to the same pick, and only the
 /// first of several carrying slots survives — the same collapse the node-era search produced
 /// when a ref path and a direct path reached one pick. Plain duplicate slots are all kept
 /// (dup-parents workspace commits).
-fn ordered_commit_parents(graph: &StepGraph, target: StepGraphIndex) -> Vec<StepGraphIndex> {
-    let carries_chain = |slot: usize, parent: StepGraphIndex| {
+fn ordered_commit_parents(graph: &CommitGraph, target: CommitGraphIndex) -> Vec<CommitGraphIndex> {
+    let carries_chain = |slot: usize, parent: CommitGraphIndex| {
         graph.is_pick(parent)
             && graph.positioned_refs().any(|(node, stored)| {
                 crate::graph_rebase::positions::ref_approach(graph, node).contains(&(target, slot))
-                    && crate::graph_rebase::positions::resolve_to_pick(graph, stored.anchor)
+                    && crate::graph_rebase::positions::resolve_to_pick(graph, stored.on)
                         == Some(parent)
             })
     };
     let slot_parents = graph.parents(target);
-    let plain_targets: HashSet<StepGraphIndex> = slot_parents
+    let plain_targets: HashSet<CommitGraphIndex> = slot_parents
         .iter()
         .enumerate()
         .filter(|&(slot, &parent)| graph.is_pick(parent) && !carries_chain(slot, parent))
@@ -41,7 +41,7 @@ fn ordered_commit_parents(graph: &StepGraph, target: StepGraphIndex) -> Vec<Step
         .collect();
     let mut emitted_carrying = HashSet::new();
 
-    let mut potential: Vec<(StepGraphIndex, bool)> = slot_parents
+    let mut potential: Vec<(CommitGraphIndex, bool)> = slot_parents
         .iter()
         .enumerate()
         .rev()
@@ -50,7 +50,7 @@ fn ordered_commit_parents(graph: &StepGraph, target: StepGraphIndex) -> Vec<Step
     let mut seen = potential
         .iter()
         .map(|(t, _)| *t)
-        .collect::<HashSet<StepGraphIndex>>();
+        .collect::<HashSet<CommitGraphIndex>>();
 
     let mut parents = vec![];
 
@@ -81,11 +81,11 @@ mod test {
 
         use anyhow::Result;
 
-        use crate::graph_rebase::{Step, StepGraph, util::collect_ordered_parents};
+        use crate::graph_rebase::{CommitGraph, Step, util::collect_ordered_parents};
 
         #[test]
         fn basic_scenario() -> Result<()> {
-            let mut graph = StepGraph::default();
+            let mut graph = CommitGraph::default();
             let a_id = gix::ObjectId::from_str("1000000000000000000000000000000000000000")?;
             let a = graph.add_node(Step::new_pick(a_id));
             // First parent

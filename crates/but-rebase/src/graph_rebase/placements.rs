@@ -15,7 +15,7 @@ pub(crate) struct PlacedRef {
     /// Whether the rebase may move this reference.
     pub mutable: bool,
     /// The commit the reference sits on; `None` for unborn refs (no stored position).
-    pub anchor: Option<gix::ObjectId>,
+    pub on: Option<gix::ObjectId>,
     /// The name of the reference directly underneath in the physical stack.
     pub below: Option<gix::refs::FullName>,
     /// The stored convergence signal (see `RefPosition::ambiguous`).
@@ -42,7 +42,7 @@ pub(crate) struct RefPlacements {
     pub ws_parents: Option<Vec<gix::ObjectId>>,
 }
 
-/// Derive the ledger STRAIGHT from the segment graph — no step-graph intermediate. This
+/// Derive the ledger STRAIGHT from the segment graph — no commit-graph intermediate. This
 /// mirrors the segment walk's semantics exactly, on a throwaway IR: per-segment runs
 /// (segment ref, then per commit its refs then the commit), rank-ordered inter-segment
 /// edges, the parent fixup (a commit whose chain-flattened parents disagree with its raw
@@ -225,7 +225,7 @@ pub(crate) fn derive(
             .collect();
     }
 
-    // Positions from the (post-fixup, pre-strip) topology: descend first-edges for anchor and
+    // Positions from the (post-fixup, pre-strip) topology: descend first-edges for `on` and
     // below, ascend for the approach legs and the convergence signal.
     let mut incoming: Vec<Vec<(usize, usize)>> = vec![Vec::new(); nodes.len()];
     for (child, slots) in parents.iter().enumerate() {
@@ -243,7 +243,7 @@ pub(crate) fn derive(
         })
         .collect();
     struct DerivedPosition {
-        anchor: usize,
+        on: usize,
         below: Option<usize>,
         ambiguous: bool,
         approach: Vec<(usize, usize)>,
@@ -251,14 +251,14 @@ pub(crate) fn derive(
     let mut positions = HashMap::<usize, DerivedPosition>::new();
     for &(ref_node, _) in &ref_nodes {
         let mut cursor = ref_node;
-        let mut anchor = None;
+        let mut on = None;
         let mut below = None;
         for _ in 0..10_000 {
             let Some(&next) = parents[cursor].first() else {
                 break;
             };
             if is_commit(next) {
-                anchor = Some(next);
+                on = Some(next);
                 break;
             }
             if matches!(nodes[next], IrStep::Ref(_)) && below.is_none() {
@@ -266,7 +266,7 @@ pub(crate) fn derive(
             }
             cursor = next;
         }
-        let Some(anchor) = anchor else {
+        let Some(on) = on else {
             continue; // unborn: no stored position
         };
         let mut cursor = ref_node;
@@ -293,7 +293,7 @@ pub(crate) fn derive(
         positions.insert(
             ref_node,
             DerivedPosition {
-                anchor,
+                on,
                 below,
                 ambiguous,
                 approach,
@@ -340,20 +340,20 @@ pub(crate) fn derive(
         }
     }
 
-    // Emit, in ref-table order (= the step-graph ref arena order).
+    // Emit, in ref-table order (= the commit-graph ref arena order).
     let node_of_ref: HashMap<usize, usize> = ref_nodes.iter().map(|&(n, r)| (r, n)).collect();
     let mut refs = Vec::with_capacity(ref_table.len());
     for (r, (name, mutable)) in ref_table.iter().enumerate() {
         let ref_node = node_of_ref[&r];
-        let mut anchor = None;
+        let mut on = None;
         let mut below = None;
         let mut ambiguous = false;
         let mut approach = Vec::new();
         if let Some(position) = positions.get(&ref_node) {
-            let IrStep::Commit(c) = nodes[position.anchor] else {
-                unreachable!("anchors are commits");
+            let IrStep::Commit(c) = nodes[position.on] else {
+                unreachable!("positions sit on commits");
             };
-            anchor = Some(commit_table[c].0);
+            on = Some(commit_table[c].0);
             below = position.below.map(|b| {
                 let IrStep::Ref(br) = nodes[b] else {
                     unreachable!("below entries are refs");
@@ -372,7 +372,7 @@ pub(crate) fn derive(
         refs.push(PlacedRef {
             name: name.clone(),
             mutable: *mutable,
-            anchor,
+            on,
             below,
             ambiguous,
             approach,

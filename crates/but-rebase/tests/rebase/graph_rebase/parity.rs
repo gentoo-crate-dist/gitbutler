@@ -164,8 +164,8 @@ fn insert_pick_below_commit() -> Result<()> {
 /// A mid-stack commit disconnected and tombstoned (commit deletion).
 ///
 /// When a commit is deleted, its co-located branch ref and the ref on the surviving parent
-/// re-anchor onto that parent, fed by the leg the reconnect bridges in. The disconnect empties
-/// their vias as it rewires; the full-child re-anchor restores the chain top's via to the
+/// re-point onto that parent, fed by the leg the reconnect bridges in. The disconnect empties
+/// their vias as it rewires; the full-child re-point restores the chain top's via to the
 /// bridge (`legs_into_pick`, correct in the merge case too) before the moved refs inherit it.
 /// The residual difference — the two collapsed branches' relative order — is normalized away by
 /// [`assert_parity`], since co-located sibling order is a no-clean-spec arbitration.
@@ -320,7 +320,7 @@ fn delete_whole_lane_in_merge() -> Result<()> {
 }
 
 /// A lane-tip commit (carrying the co-located `stack-a` ref) deleted in the dup-parent merge
-/// fixture — the co-located ref re-anchors onto the lane's surviving parent, and the merge's
+/// fixture — the co-located ref re-points onto the lane's surviving parent, and the merge's
 /// per-ref legs must be preserved (a blanket `legs_into_pick` restore would collide here).
 #[test]
 fn delete_lane_tip_in_merge() -> Result<()> {
@@ -347,7 +347,7 @@ fn delete_lane_tip_in_merge() -> Result<()> {
 }
 
 /// A new reference created BELOW a mid-stack commit — the uncovered arm of the
-/// insert(reference, side) matrix (branch creation anchored under the selected commit).
+/// insert(reference, side) matrix (branch creation positioned under the selected commit).
 #[test]
 fn insert_reference_below_commit() -> Result<()> {
     editor!("workspace-signed", repo, _tmp, meta, ws);
