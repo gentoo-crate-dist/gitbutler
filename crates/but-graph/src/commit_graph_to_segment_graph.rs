@@ -156,6 +156,10 @@ pub fn workspace_from_commit_graph<T: but_core::RefMetadata>(
     }
     cg.recompute_not_in_remote(not_in_remote_tips);
     cg.recompute_generations();
+    // Editor tombstones are seam-internal: reconciliation left no live edge into them, so
+    // compaction yields the same graph a fresh walk would — which matters now that the
+    // projection's carried graph becomes THE workspace graph downstream consumers reuse.
+    cg.compact();
     let ref_prefixes = || {
         ["refs/heads/", "refs/remotes/"]
             .into_iter()

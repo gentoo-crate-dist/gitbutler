@@ -204,6 +204,10 @@ impl CommitGraph {
         cg.set_connected(o.connected);
         cg.hard_limit_hit = o.hard_limit_hit;
         cg.traversal_tips = o.tips;
+        // Goal bits stop mattering the moment the traversal ends — and their numbering depends
+        // on tip processing order, so graphs from different builds could never compare equal
+        // while carrying them.
+        cg.strip_goal_flags();
         cg
     }
 
@@ -690,6 +694,71 @@ impl CommitGraph {
         for &p in &parents {
             self.children[p].push(idx);
         }
+    }
+
+    /// Clear the walk's GOAL bits (the bits beyond [`CommitFlags::all()`](crate::CommitFlags))
+    /// from every node. Goal numbering is traversal-order ephemera — a node that survived a
+    /// rewrite carries whatever bits the ORIGINAL walk assigned, which a fresh walk would
+    /// number differently — and nothing after the walk reads goals.
+    pub(crate) fn strip_goal_flags(&mut self) {
+        for node in &mut self.nodes {
+            node.commit.flags &= crate::CommitFlags::all();
+        }
+    }
+
+    /// Drop tombstoned nodes and reindex, leaving a graph indistinguishable from one built
+    /// without them — what the write-through seam hands to projection, so a carried graph
+    /// never leaks editor tombstones to the next consumer. The caller must first ensure no
+    /// live slot targets a tombstone (the seam's odb reconciliation guarantees it); such a
+    /// slot would degrade to "parent outside the graph" here.
+    pub fn compact(&mut self) {
+        if !self.tombstoned.iter().any(|&t| t) {
+            return;
+        }
+        let mut remap: Vec<Option<CommitIdx>> = vec![None; self.nodes.len()];
+        let mut next = 0;
+        for (idx, remapped) in remap.iter_mut().enumerate() {
+            if !self.tombstoned[idx] {
+                *remapped = Some(next);
+                next += 1;
+            }
+        }
+        let mut nodes = Vec::with_capacity(next);
+        let mut parent_slots = Vec::with_capacity(next);
+        for idx in 0..self.nodes.len() {
+            if remap[idx].is_none() {
+                continue;
+            }
+            nodes.push(self.nodes[idx].clone());
+            parent_slots.push(
+                self.parent_slots[idx]
+                    .iter()
+                    .map(|slot| ParentSlot {
+                        target: slot.target.and_then(|t| remap[t]),
+                        connected: slot.connected,
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        let by_id: HashMap<_, _> = nodes
+            .iter()
+            .enumerate()
+            .map(|(idx, n): (_, &CommitNode)| (n.commit.id, idx))
+            .collect();
+        let mut children = vec![Vec::new(); nodes.len()];
+        for (idx, slots) in parent_slots.iter().enumerate() {
+            for slot in slots {
+                if let Some(pidx) = slot.target {
+                    children[pidx].push(idx);
+                }
+            }
+        }
+        self.managed_ws_commits.retain(|id| by_id.contains_key(id));
+        self.nodes = nodes;
+        self.by_id = by_id;
+        self.parent_slots = parent_slots;
+        self.children = children;
+        self.tombstoned = vec![false; next];
     }
 
     /// Arena length, tombstones included.

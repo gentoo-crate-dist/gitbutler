@@ -85,10 +85,7 @@ impl<'ws, 'graph, M: RefMetadata> SuccessfulRebase<'ws, 'graph, M> {
         }
         repo.edit_references(ref_edits)?;
 
-        let project_meta = self.workspace.graph.project_meta.clone();
-        self.workspace
-            .refresh_from_head(&repo, &*self.meta, project_meta)?;
-        assert_write_through_parity(&self.graph, self.workspace, &repo, &*self.meta)?;
+        refresh_workspace_from_arena(&self.graph, self.workspace, &repo, &*self.meta)?;
 
         Ok(MaterializeOutcome {
             graph: self.graph,
@@ -121,10 +118,7 @@ impl<'ws, 'graph, M: RefMetadata> SuccessfulRebase<'ws, 'graph, M> {
 
         repo.edit_references(self.ref_edits.clone())?;
 
-        let project_meta = self.workspace.graph.project_meta.clone();
-        self.workspace
-            .refresh_from_head(&repo, &*self.meta, project_meta)?;
-        assert_write_through_parity(&self.graph, self.workspace, &repo, &*self.meta)?;
+        refresh_workspace_from_arena(&self.graph, self.workspace, &repo, &*self.meta)?;
 
         Ok(MaterializeOutcome {
             graph: self.graph,
@@ -135,40 +129,45 @@ impl<'ws, 'graph, M: RefMetadata> SuccessfulRebase<'ws, 'graph, M> {
     }
 }
 
-/// THE WRITE-THROUGH ORACLE (`BUT_REBASE_WRITE_THROUGH=assert`): projecting the editor's
-/// MUTATED arena must equal the rewalk's projection — the dissolve's parity obligation
-/// (mutate-then-project == rewalk-then-project). Compared on a field-exact fingerprint of
-/// everything the projection derives except graph indices, which differ between
-/// independently built graphs.
-fn assert_write_through_parity<M: RefMetadata>(
+/// THE FLIP (dissolve stage D4d-b): the editor's mutated arena IS the next workspace —
+/// materialization projects it directly instead of rewalking the repository. The rewalk
+/// survives as an env-gated verifier (`BUT_REBASE_WRITE_THROUGH=assert`): the dissolve's
+/// parity obligation, mutate-then-project == rewalk-then-project, compared on a field-exact
+/// fingerprint of everything the projection derives except graph indices (independently
+/// built graphs number segments differently).
+///
+/// Falls back to a rewalk when the arena has nothing to project: HEAD is unborn (e.g. its
+/// referent was deleted without a repoint) or points outside the editor's graph.
+fn refresh_workspace_from_arena<M: RefMetadata>(
     graph: &crate::graph_rebase::StepGraph,
-    rewalked: &but_graph::Workspace,
+    workspace: &mut but_graph::Workspace,
     repo: &gix::Repository,
     meta: &M,
 ) -> anyhow::Result<()> {
-    if std::env::var_os("BUT_REBASE_WRITE_THROUGH").is_none_or(|v| v != "assert") {
-        return Ok(());
-    }
+    let project_meta = workspace.graph.project_meta.clone();
+    let options = workspace.graph.options.clone();
     let Some(mutated) = but_graph::workspace_from_commit_graph(
         graph.arena().clone(),
         repo,
         meta,
-        rewalked.graph.project_meta.clone(),
-        rewalked.graph.options.clone(),
+        project_meta.clone(),
+        options.clone(),
     )?
     else {
-        // Nothing the seam can project: HEAD is unborn (e.g. its referent was deleted
-        // without a repoint) or points outside the editor's graph.
-        return Ok(());
+        return workspace.refresh_from_head(repo, meta, project_meta);
     };
-    let (mutated_fp, rewalked_fp) = (
-        projection_fingerprint(&mutated),
-        projection_fingerprint(rewalked),
-    );
-    if mutated_fp != rewalked_fp {
-        bail!(
-            "WRITE-THROUGH DIVERGENCE\n--- mutate-then-project\n{mutated_fp}\n--- rewalk-then-project\n{rewalked_fp}"
+    *workspace = mutated;
+    if std::env::var_os("BUT_REBASE_WRITE_THROUGH").is_some_and(|v| v == "assert") {
+        let rewalked = but_graph::Workspace::from_head(repo, meta, project_meta, options)?;
+        let (mutated_fp, rewalked_fp) = (
+            projection_fingerprint(workspace),
+            projection_fingerprint(&rewalked),
         );
+        if mutated_fp != rewalked_fp {
+            bail!(
+                "WRITE-THROUGH DIVERGENCE\n--- mutate-then-project\n{mutated_fp}\n--- rewalk-then-project\n{rewalked_fp}"
+            );
+        }
     }
     Ok(())
 }
