@@ -191,6 +191,7 @@ pub(crate) fn debug_assert_positions_total(graph: &StepGraph) {
         return;
     }
     crate::graph_rebase::arrangement::census_to_file(graph);
+    rank_gap_census(graph);
     type OrderedPositionKey = (Option<StepGraphIndex>, Vec<(StepGraphIndex, usize)>, usize);
     let mut seen: std::collections::HashMap<OrderedPositionKey, StepGraphIndex> =
         Default::default();
@@ -212,6 +213,50 @@ pub(crate) fn debug_assert_positions_total(graph: &StepGraph) {
                 "reference nodes {previous} and {node} collide at position {pos:?}"
             );
         }
+    }
+}
+
+/// TEMP (Stage B measurement): env-gated census of RANK GAPS — a positioned reference at
+/// rank > 0 with NO member at rank − 1 on the same anchor. Gaps are representable by stored
+/// ranks but not by a below-adjacency store; `BUT_RANK_CENSUS=<file>` appends one note each.
+fn rank_gap_census(graph: &StepGraph) {
+    static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let Some(path) = PATH.get_or_init(|| std::env::var("BUT_RANK_CENSUS").ok()) else {
+        return;
+    };
+    for (node, stored) in graph.anchored_refs() {
+        if stored.rank == 0 {
+            continue;
+        }
+        let anchor = resolve_to_pick(graph, stored.anchor);
+        let has_below = graph.anchored_refs().any(|(mate, other)| {
+            mate != node
+                && other.rank + 1 == stored.rank
+                && resolve_to_pick(graph, other.anchor) == anchor
+        });
+        if has_below {
+            continue;
+        }
+        use std::io::Write as _;
+        let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path.as_str())
+        else {
+            return;
+        };
+        let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+        let frames: Vec<&str> = backtrace
+            .lines()
+            .filter(|line| line.contains("graph_rebase") || line.contains("but_workspace"))
+            .take(8)
+            .map(str::trim)
+            .collect();
+        let _ = writeln!(
+            file,
+            "RANK-GAP node {node} rank {} anchor {anchor:?} at {frames:?}",
+            stored.rank
+        );
     }
 }
 
