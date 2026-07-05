@@ -6,7 +6,7 @@ use crate::graph_rebase::Direction;
 use anyhow::Result;
 use but_core::RefMetadata;
 
-use crate::graph_rebase::{Editor, Selector, Step, StepGraph, StepGraphIndex, ToSelector};
+use crate::graph_rebase::{Editor, Selector, StepGraph, StepGraphIndex, ToSelector};
 
 /// How far `a` is ahead of and behind `b`, counted in commits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,9 +19,7 @@ pub struct AheadBehind {
 
 /// Count the `Pick` steps (i.e. commits) among `steps`.
 fn count_picks(graph: &StepGraph, steps: impl Iterator<Item = StepGraphIndex>) -> usize {
-    steps
-        .filter(|ix| matches!(graph[*ix], Step::Pick(_)))
-        .count()
+    steps.filter(|ix| graph.is_pick(*ix)).count()
 }
 
 struct Traversal<'graph> {

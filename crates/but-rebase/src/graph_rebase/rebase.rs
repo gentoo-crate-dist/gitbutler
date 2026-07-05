@@ -151,22 +151,26 @@ impl<'ws, 'graph, M: RefMetadata> Editor<'ws, 'graph, M> {
             }
         }
 
-        // Positioned references have no edges, so they take no part in the pick order; their
-        // only dependency — the anchor's mapping — is satisfied now that every pick is
-        // processed. They replay at the very end, in stable node order. Anchor-less refs
-        // (unborn or hand-built) are dropped, as before.
-        let anchored_ref_nodes: Vec<StepGraphIndex> = self
-            .graph
-            .anchored_refs()
-            .filter(|(node, _)| self.graph.is_reference(*node))
-            .map(|(node, _)| node)
-            .collect();
-        for step_idx in anchored_ref_nodes {
-            let (refname, mutable) = self
+        // References have no edges, so they take no part in the pick order; their only
+        // dependency — the anchor's mapping — is satisfied now that every pick is processed.
+        // They replay at the very end, in stable id order. DEAD references carry over as dead
+        // records (name and position retained, for stale-selector normalization and retention
+        // reads); live anchor-less refs (unborn or hand-built) are dropped, as before.
+        for step_idx in self.graph.ref_indices() {
+            let record = self
                 .graph
-                .reference(step_idx)
-                .expect("filtered to live references");
-            let refname = refname.to_owned();
+                .reference_record(step_idx)
+                .expect("ref_indices only yields references");
+            if !record.live {
+                let new_idx = output_graph.add_reference(record.refname.clone(), record.mutable);
+                output_graph.tombstone_reference(new_idx);
+                graph_mapping.insert(step_idx, new_idx);
+                continue;
+            }
+            if record.position.is_none() {
+                continue;
+            }
+            let (refname, mutable) = (record.refname.clone(), record.mutable);
             // Immutable references are kept in the graph for traversal
             // but never moved, created, or deleted.
             if mutable {

@@ -63,7 +63,7 @@ impl<M: RefMetadata> TestingDot for SuccessfulRebase<'_, '_, M> {
 impl TestingDot for StepGraph {
     fn steps_dot(&self) -> String {
         let mut out = String::from("digraph {\n");
-        for idx in self.node_indices() {
+        for idx in self.node_indices().chain(self.ref_indices()) {
             let label = match self.step_view(idx) {
                 Step::Pick(Pick { id, .. }) => format!("pick: {id}"),
                 Step::Reference { refname, .. } => {
@@ -158,11 +158,12 @@ fn find_heads(graph: &StepGraph) -> Vec<StepGraphIndex> {
         has_incoming.insert(edge.target());
     }
     let chains = chains(graph);
-    // Heads in NODE order (creation order), like the edge-walking predecessor: a pick or
-    // tombstone with no incoming edges, or the top of a root reference chain — which occupies
-    // exactly the node position its edge-era chain top had.
+    // Node-arena entries first, then references (the render sorts heads deterministically, so
+    // seed order does not reach snapshots): a pick or tombstone with no incoming edges, or
+    // the top of a root reference chain.
     graph
         .node_indices()
+        .chain(graph.ref_indices())
         .filter(|idx| match graph.anchor_of(*idx) {
             Some(stored) => {
                 let approach = positions::ref_approach(graph, *idx);
@@ -378,7 +379,7 @@ pub(crate) fn render_ascii_graph<F>(graph: &StepGraph, get_title: F) -> String
 where
     F: FnMut(gix::ObjectId) -> Option<String>,
 {
-    let nodes: HashSet<StepGraphIndex> = graph.node_indices().collect();
+    let nodes: HashSet<StepGraphIndex> = graph.node_indices().chain(graph.ref_indices()).collect();
     let heads = find_heads(graph);
     render_step_graph(graph, &nodes, &heads, get_title)
 }
@@ -463,8 +464,11 @@ mod tests {
         Step::Pick(Pick::new_pick(gix::ObjectId::from_str(hex).unwrap()))
     }
 
-    fn make_ref(name: &str) -> Step {
-        Step::new_reference(gix::refs::FullName::try_from(format!("refs/heads/{name}")).unwrap())
+    fn add_ref(graph: &mut StepGraph, name: &str) -> StepGraphIndex {
+        graph.add_reference(
+            gix::refs::FullName::try_from(format!("refs/heads/{name}")).unwrap(),
+            true,
+        )
     }
 
     /// Helper to build a graph and add edges with order
@@ -476,7 +480,7 @@ mod tests {
     fn linear_graph() {
         // Simple linear: A -> B -> C -> D
         let mut graph = StepGraph::new();
-        let a = graph.add_node(make_ref("main"));
+        let a = add_ref(&mut graph, "main");
         let b = graph.add_node(make_pick("1111111111111111111111111111111111111111"));
         let c = graph.add_node(make_pick("2222222222222222222222222222222222222222"));
         let d = graph.add_node(make_pick("3333333333333333333333333333333333333333"));
@@ -506,7 +510,7 @@ mod tests {
         //  \ /
         //   C
         let mut graph = StepGraph::new();
-        let m = graph.add_node(make_ref("main"));
+        let m = add_ref(&mut graph, "main");
         let a = graph.add_node(make_pick("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
         let c = graph.add_node(make_pick("cccccccccccccccccccccccccccccccccccccccc"));
@@ -538,7 +542,7 @@ mod tests {
         //   \ | /
         //     D
         let mut graph = StepGraph::new();
-        let m = graph.add_node(make_ref("main"));
+        let m = add_ref(&mut graph, "main");
         let a = graph.add_node(make_pick("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
         let c = graph.add_node(make_pick("cccccccccccccccccccccccccccccccccccccccc"));
@@ -577,7 +581,7 @@ mod tests {
         //   \ | /   |
         //     C-----+
         let mut graph = StepGraph::new();
-        let m = graph.add_node(make_ref("main"));
+        let m = add_ref(&mut graph, "main");
         let f = graph.add_node(make_pick("ffffffffffffffffffffffffffffffffffffffff")); // fork point
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
         let x = graph.add_node(make_pick("1111111111111111111111111111111111111111"));
@@ -623,7 +627,7 @@ mod tests {
     fn four_way_merge() {
         // Four-way merge
         let mut graph = StepGraph::new();
-        let m = graph.add_node(make_ref("main"));
+        let m = add_ref(&mut graph, "main");
         let a = graph.add_node(make_pick("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
         let c = graph.add_node(make_pick("cccccccccccccccccccccccccccccccccccccccc"));
@@ -668,7 +672,7 @@ mod tests {
         //  \ /
         //   C
         let mut graph = StepGraph::new();
-        let m = graph.add_node(make_ref("main"));
+        let m = add_ref(&mut graph, "main");
         let a1 = graph.add_node(make_pick("a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"));
         let a2 = graph.add_node(make_pick("a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2"));
         let a3 = graph.add_node(make_pick("a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"));
@@ -706,7 +710,7 @@ mod tests {
         //    \ /    |
         //     F-----+
         let mut graph = StepGraph::new();
-        let a = graph.add_node(make_ref("main"));
+        let a = add_ref(&mut graph, "main");
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
         let c = graph.add_node(make_pick("cccccccccccccccccccccccccccccccccccccccc"));
         let d = graph.add_node(make_pick("dddddddddddddddddddddddddddddddddddddddd"));
@@ -753,7 +757,7 @@ mod tests {
         //      \|/    |
         //       D-----+
         let mut graph = StepGraph::new();
-        let m = graph.add_node(make_ref("main"));
+        let m = add_ref(&mut graph, "main");
         let f = graph.add_node(make_pick("ffffffffffffffffffffffffffffffffffffffff"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
         let c = graph.add_node(make_pick("cccccccccccccccccccccccccccccccccccccccc"));
@@ -813,7 +817,7 @@ mod tests {
         //    \ /
         //     base
         let mut graph = StepGraph::new();
-        let m = graph.add_node(make_ref("main"));
+        let m = add_ref(&mut graph, "main");
         let a = graph.add_node(make_pick("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
         let c = graph.add_node(make_pick("cccccccccccccccccccccccccccccccccccccccc"));
@@ -878,7 +882,7 @@ mod tests {
         //    \   /
         //      F        <- E and G merge at F
         let mut graph = StepGraph::new();
-        let m = graph.add_node(make_ref("main"));
+        let m = add_ref(&mut graph, "main");
         let a = graph.add_node(make_pick("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
         let c = graph.add_node(make_pick("cccccccccccccccccccccccccccccccccccccccc"));
@@ -940,7 +944,7 @@ mod tests {
         //   \|/
         //    base
         let mut graph = StepGraph::new();
-        let m = graph.add_node(make_ref("main"));
+        let m = add_ref(&mut graph, "main");
         let a = graph.add_node(make_pick("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
         let c = graph.add_node(make_pick("cccccccccccccccccccccccccccccccccccccccc"));
@@ -996,7 +1000,7 @@ mod tests {
         // `main` (a child of `a`) and `base` (a parent of `b`) are outside the
         // set, so neither is drawn and `b` renders as a root.
         let mut graph = StepGraph::new();
-        let main = graph.add_node(make_ref("main"));
+        let main = add_ref(&mut graph, "main");
         let a = graph.add_node(make_pick("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
         let base = graph.add_node(make_pick("0000000000000000000000000000000000000000"));

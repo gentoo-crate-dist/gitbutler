@@ -100,7 +100,7 @@ fn derive_ref_position_from_edges(
         else {
             break;
         };
-        if matches!(graph[next], Step::Pick(_)) {
+        if graph.is_pick(next) {
             anchor = Some(next);
             break;
         }
@@ -120,7 +120,7 @@ fn derive_ref_position_from_edges(
         let incoming: Vec<_> = graph.edges_directed(cursor, Direction::Incoming).collect();
         let picks: Vec<_> = incoming
             .iter()
-            .filter(|e| matches!(graph[e.source()], Step::Pick(_)))
+            .filter(|e| graph.is_pick(e.source()))
             .map(|e| (e.source(), e.weight().order))
             .collect();
         if !picks.is_empty() {
@@ -133,9 +133,7 @@ fn derive_ref_position_from_edges(
             approach.sort();
             break;
         }
-        let mut others = incoming
-            .iter()
-            .filter(|e| !matches!(graph[e.source()], Step::Pick(_)));
+        let mut others = incoming.iter().filter(|e| !graph.is_pick(e.source()));
         match (others.next(), others.next()) {
             (Some(edge), None) => cursor = edge.source(),
             _ => break,
@@ -180,10 +178,7 @@ pub(crate) fn debug_assert_positions_total(graph: &StepGraph) {
     type OrderedPositionKey = (Option<StepGraphIndex>, Vec<(StepGraphIndex, usize)>, usize);
     let mut seen: std::collections::HashMap<OrderedPositionKey, StepGraphIndex> =
         Default::default();
-    for node in graph.node_indices() {
-        if !graph.is_reference(node) {
-            continue;
-        }
+    for node in graph.references().map(|(node, _, _)| node) {
         // A reference without a stored anchor is only legitimate when the graph holds no
         // pick below it at creation (unborn); it resolves to nothing.
         let Some(stored) = graph.anchor_of(node) else {
@@ -212,7 +207,7 @@ pub(crate) fn debug_assert_positions_total(graph: &StepGraph) {
 fn debug_assert_below_wellformed(graph: &StepGraph) {
     let name = |node: StepGraphIndex| match graph.reference(node) {
         Some((refname, _)) => refname.to_string(),
-        None => format!("{:?}", graph[node]),
+        None => format!("{:?}", graph.step_view(node)),
     };
     if std::env::var_os("BUT_BELOW_DUMP").is_some() {
         for (node, stored) in graph.anchored_refs() {
@@ -419,7 +414,7 @@ pub(crate) fn legs_into_pick(
 ) -> Vec<(StepGraphIndex, usize)> {
     let mut legs: Vec<_> = graph
         .edges_directed(pick, Direction::Incoming)
-        .filter(|e| matches!(graph[e.source()], Step::Pick(_)))
+        .filter(|e| graph.is_pick(e.source()))
         .map(|e| (e.source(), e.weight().order))
         .collect();
     legs.sort();
@@ -433,7 +428,7 @@ pub(crate) fn legs_into_pick(
 pub(crate) fn resolve_to_pick(graph: &StepGraph, node: StepGraphIndex) -> Option<StepGraphIndex> {
     let mut cursor = node;
     for _ in 0..10_000 {
-        if matches!(graph[cursor], Step::Pick(_)) {
+        if graph.is_pick(cursor) {
             return Some(cursor);
         }
         // A reference resolves via its stored anchor (or its chain edge during the creation
@@ -460,11 +455,9 @@ pub(crate) fn resolve_to_pick(graph: &StepGraph, node: StepGraphIndex) -> Option
 pub(crate) fn initialize_anchors_and_strip_ref_edges(graph: &mut StepGraph) {
     // Derive every reference's intended position (anchor, approach, ambiguous, below) from the
     // chain topology while it still exists. `unborn` chains (no pick below) keep no stored anchor.
+    let ref_nodes: Vec<_> = graph.references().map(|(node, _, _)| node).collect();
     let mut positions = Vec::new();
-    for node in graph.node_indices() {
-        if !graph.is_reference(node) {
-            continue;
-        }
+    for node in ref_nodes {
         let Some((pos, approach)) = derive_ref_position_from_edges(graph, node) else {
             continue;
         };
