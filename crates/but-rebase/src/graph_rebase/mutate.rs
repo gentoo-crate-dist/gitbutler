@@ -749,18 +749,12 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     .collect();
                 moves.push((edge_weight.order, insert_pos));
                 for (old, _) in &moves {
-                    positions::rewrite_approach_leg(
-                        &mut self.graph,
-                        (edge_source, *old),
-                        (edge_source, TEMP + *old),
-                    );
+                    self.graph
+                        .rename_leg((edge_source, *old), (edge_source, TEMP + *old));
                 }
                 for (old, new) in &moves {
-                    positions::rewrite_approach_leg(
-                        &mut self.graph,
-                        (edge_source, TEMP + *old),
-                        (edge_source, *new),
-                    );
+                    self.graph
+                        .rename_leg((edge_source, TEMP + *old), (edge_source, *new));
                 }
             } else {
                 // Reconnect the child node to all the disconnected parents.
@@ -914,18 +908,12 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         // Two-phase approach rewrite so shifting slots can't collide mid-flight.
         const TEMP: usize = usize::MAX / 2;
         for (old, _) in renumbered.iter().filter(|(old, new)| old != new) {
-            positions::rewrite_approach_leg(
-                &mut self.graph,
-                (child_node, *old),
-                (child_node, TEMP + *old),
-            );
+            self.graph
+                .rename_leg((child_node, *old), (child_node, TEMP + *old));
         }
         for (old, new) in renumbered.iter().filter(|(old, new)| old != new) {
-            positions::rewrite_approach_leg(
-                &mut self.graph,
-                (child_node, TEMP + *old),
-                (child_node, *new),
-            );
+            self.graph
+                .rename_leg((child_node, TEMP + *old), (child_node, *new));
         }
         new_orders
     }
@@ -1061,11 +1049,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                             let new_order = new_weight.order;
                             self.graph.move_edge(edge_id, child_pick, new_weight);
                             if new_order != weight.order {
-                                positions::rewrite_approach_leg(
-                                    &mut self.graph,
-                                    (source, weight.order),
-                                    (source, new_order),
-                                );
+                                self.graph
+                                    .rename_leg((source, weight.order), (source, new_order));
                             }
                         }
                     }
@@ -1110,8 +1095,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                         let new_order = new_weight.order;
                         self.graph.move_edge(edge_id, child.id, new_weight);
                         if new_order != edge_weight.order {
-                            positions::rewrite_approach_leg(
-                                &mut self.graph,
+                            self.graph.rename_leg(
                                 (edge_source, edge_weight.order),
                                 (edge_source, new_order),
                             );
@@ -1243,11 +1227,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     // Chains those legs carried are now approached through the segment's
                     // parent-most pick.
                     for (old_order, new_order) in moved_leg_orders.iter().zip(new_orders) {
-                        positions::rewrite_approach_leg(
-                            &mut self.graph,
-                            (target.id, *old_order),
-                            (parent.id, new_order),
-                        );
+                        self.graph
+                            .rename_leg((target.id, *old_order), (parent.id, new_order));
                     }
                 }
             }
@@ -1393,11 +1374,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     self.graph.remove_edge(edge_id);
                     let order = edge_weight.order;
                     self.graph.add_edge(new_idx, edge_target, edge_weight);
-                    positions::rewrite_approach_leg(
-                        &mut self.graph,
-                        (target.id, order),
-                        (new_idx, order),
-                    );
+                    self.graph.rename_leg((target.id, order), (new_idx, order));
                 }
 
                 Ok(self.new_selector(new_idx))
