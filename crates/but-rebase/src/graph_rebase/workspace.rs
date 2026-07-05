@@ -567,7 +567,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         let (remote_ref, remote_selector) = self.remote_for_reference(refname);
         let Some(remote_selector) = remote_selector else {
             // Either no tracking branch exists, or the remote exists but its
-            // history is outside the workspace view and so can't be compared via
+            // history is outside the workspace view and so can't be compared approach
             // the editor (rare under real traversals).
             return Ok((remote_ref, PushStatus::CompletelyUnpushed));
         };
@@ -627,12 +627,12 @@ fn push_status_from_ahead_behind(ahead_behind: AheadBehind) -> PushStatus {
 /// references.
 fn combined_push_status<K: Copy + Eq + std::hash::Hash>(
     reference: K,
-    own: PushStatus,
+    own_status: PushStatus,
     parents_by_node: &HashMap<K, Vec<K>>,
     status_by_ref: &HashMap<K, PushStatus>,
 ) -> PushStatus {
     // An integrated reference isn't pushed at all, so parents can't change that.
-    if matches!(own, PushStatus::Integrated) {
+    if matches!(own_status, PushStatus::Integrated) {
         return PushStatus::Integrated;
     }
     let mut tips = vec![reference];
@@ -648,7 +648,7 @@ fn combined_push_status<K: Copy + Eq + std::hash::Hash>(
             tips.push(*parent);
         }
     }
-    own
+    own_status
 }
 
 /// All steps in `start ^limit`, or everything reachable from `start` when there
@@ -671,7 +671,7 @@ fn all_until_optional_limit(
 /// positions, not topology), so a shared ref node can no longer glue two distinct stacks
 /// together — the limitation formerly documented on [`GraphWorkspace::stacks`]. After the
 /// pick-flood, each reference joins the stack its position belongs to: the stack of its
-/// approaching child (`via`), else the stack of its anchor pick, and a chain hanging directly
+/// approaching child (`approach`), else the stack of its anchor pick, and a chain hanging directly
 /// off the workspace commit keeps its own (possibly pick-less) lane — the empty-branch case.
 fn divide_workspace_into_stacks(
     graph: &StepGraph,
@@ -729,7 +729,7 @@ fn divide_workspace_into_stacks(
         deduplicated.push(out);
     }
 
-    // Each positioned reference joins the stack its position belongs to: the via child's
+    // Each positioned reference joins the stack its position belongs to: the approach child's
     // stack (with a chain hanging straight off the workspace commit falling back to its
     // anchor's stack — the workspace commit itself is in none), else the anchor pick's stack.
     // References belonging to neither (e.g. the target's own ref above the excluded target
@@ -747,7 +747,7 @@ fn divide_workspace_into_stacks(
         let anchor_in_region = pos
             .anchor
             .is_some_and(|a| head_not_target.nodes.contains(&a));
-        let home = match pos.via.as_slice() {
+        let home = match pos.approach.as_slice() {
             // A root chain: no flood ever descended into it — no lane.
             [] => None,
             // A single approach follows its leg's lane, even onto an excluded anchor (a lane
@@ -822,10 +822,10 @@ fn attach_flooded_refs(
             // A chain any in-region leg approaches was flooded through before the walk
             // stopped at a boundary — membership is broader than lane assignment, which
             // stays arity- and ambiguity-aware in `divide_workspace_into_stacks`. Co-located
-            // chain members all share the same via (`legs_into_pick`), so a lower member is
-            // attached with the whole chain, while a root ref stacked above (its own via
+            // chain members all share the same approach (`legs_into_pick`), so a lower member is
+            // attached with the whole chain, while a root ref stacked above (its own approach
             // empty, e.g. a remote ref over the tip) stays out.
-            let followed = positions::ref_via(graph, node)
+            let followed = positions::ref_approach(graph, node)
                 .iter()
                 .any(|(child, _)| nodes.contains(child));
             followed.then_some(node)
@@ -835,10 +835,10 @@ fn attach_flooded_refs(
         && let Some(entry_stored) = graph.anchor_of(entry)
     {
         additions.push(entry);
-        let entry_via = positions::ref_via(graph, entry);
+        let entry_approach = positions::ref_approach(graph, entry);
         additions.extend(graph.anchored_refs().filter_map(|(node, stored)| {
             (stored.anchor == entry_stored.anchor
-                && positions::ref_via(graph, node) == entry_via
+                && positions::ref_approach(graph, node) == entry_approach
                 && stored.rank < entry_stored.rank)
                 .then_some(node)
         }));
