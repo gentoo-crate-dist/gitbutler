@@ -167,10 +167,8 @@ pub(crate) struct LaneRec {
 
 /// The rebase step graph: an arena of [`Step`]s where PICKS carry ordered parent arrays, plus
 /// a table of [`RefRecord`]s where REFERENCES carry explicit positions — parent arrays are
-/// the truth for commits, positions the truth for refs, with no overlap. During CREATION a
-/// reference temporarily bears a parent array of its own until
-/// `positions::initialize_positions_and_strip_ref_edges` converts it to a position; from then
-/// on references are edgeless.
+/// the truth for commits, positions the truth for refs, with no overlap. References are
+/// edgeless: native creation authors their positions straight from the placement ledger.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct StepGraph {
     /// THE commit payload: the arena stores commit ids, `None` is a tombstone. Rewriting a
@@ -181,8 +179,6 @@ pub(crate) struct StepGraph {
     /// THE ordered parent arrays, parallel to `ids` — slot position is the parent order.
     node_parents: Vec<Vec<StepGraphIndex>>,
     refs: Vec<RefRecord>,
-    /// Creation-phase parent arrays for references; empty after the finalize strip.
-    ref_parents: Vec<Vec<StepGraphIndex>>,
     /// THE approach store: lane membership per STORED (unresolved) anchor value. Which legs
     /// descend into a reference's position lives here and only here — authored by
     /// [`Self::set_position`]/[`Self::join_lane_of`], carried by [`Self::rekey_position`],
@@ -294,7 +290,6 @@ impl StepGraph {
             live: true,
             position: None,
         });
-        self.ref_parents.push(Vec::new());
         StepGraphIndex::Ref(self.refs.len() - 1)
     }
 
@@ -517,6 +512,24 @@ impl StepGraph {
         }
     }
 
+    /// Point a DEAD reference's retained position at `anchor` — the bare retention pointer
+    /// stale selectors normalize through. Lane membership, below, and ambiguity are dropped;
+    /// live references re-anchor via the arrangement machinery instead.
+    pub(crate) fn set_retained_anchor(&mut self, node: StepGraphIndex, anchor: StepGraphIndex) {
+        debug_assert!(
+            !self.is_reference(node) && matches!(node, StepGraphIndex::Ref(_)),
+            "retained anchors belong to dead references"
+        );
+        if let Some(stored) = self.position_of(node) {
+            self.lane_remove(node, stored.anchor);
+        }
+        *self.position_slot(node) = Some(RefPosition {
+            anchor,
+            below: None,
+            ambiguous: false,
+        });
+    }
+
     fn lane_remove(&mut self, node: StepGraphIndex, key: StepGraphIndex) {
         let Some(lanes) = self.lanes.get_mut(&key) else {
             return;
@@ -619,18 +632,19 @@ impl StepGraph {
     // dropped — revival is an explicit op-level re-statement, never a store-level
     // coincidence.
 
-    /// The ordered parents of `node` — slot position is the parent order.
+    /// The ordered parents of `node` — slot position is the parent order. References are
+    /// edgeless by construction.
     pub(crate) fn parents(&self, node: StepGraphIndex) -> &[StepGraphIndex] {
         match node {
             StepGraphIndex::Node(i) => &self.node_parents[i],
-            StepGraphIndex::Ref(i) => &self.ref_parents[i],
+            StepGraphIndex::Ref(_) => &[],
         }
     }
 
     fn parents_mut(&mut self, node: StepGraphIndex) -> &mut Vec<StepGraphIndex> {
         match node {
             StepGraphIndex::Node(i) => &mut self.node_parents[i],
-            StepGraphIndex::Ref(i) => &mut self.ref_parents[i],
+            StepGraphIndex::Ref(_) => panic!("references are edgeless — no parent array"),
         }
     }
 
@@ -647,13 +661,7 @@ impl StepGraph {
             .node_parents
             .iter()
             .enumerate()
-            .map(|(i, parents)| (StepGraphIndex::Node(i), parents))
-            .chain(
-                self.ref_parents
-                    .iter()
-                    .enumerate()
-                    .map(|(i, parents)| (StepGraphIndex::Ref(i), parents)),
-            );
+            .map(|(i, parents)| (StepGraphIndex::Node(i), parents));
         for (child, parents) in arrays {
             for (slot, &parent) in parents.iter().enumerate() {
                 if parent == node {
@@ -747,11 +755,7 @@ impl StepGraph {
     /// Re-target every parent-array entry naming `from` onto `to`, slots preserved —
     /// statement names are `(source, slot)`, so they stay valid untouched.
     pub(crate) fn redirect_children(&mut self, from: StepGraphIndex, to: StepGraphIndex) {
-        for parents in self
-            .node_parents
-            .iter_mut()
-            .chain(self.ref_parents.iter_mut())
-        {
+        for parents in self.node_parents.iter_mut() {
             for parent in parents.iter_mut() {
                 if *parent == from {
                     *parent = to;
@@ -772,22 +776,6 @@ impl StepGraph {
         let parents = std::mem::take(self.parents_mut(child));
         self.shadow_resync(child);
         parents
-    }
-
-    /// Overwrite `node`'s whole parent array — a creation/finalize-phase write: lane
-    /// statements are untouched, so this is only correct while no statement names the
-    /// node's slots.
-    pub(crate) fn set_parents(&mut self, node: StepGraphIndex, parents: Vec<StepGraphIndex>) {
-        *self.parents_mut(node) = parents;
-        self.shadow_resync(node);
-    }
-
-    /// Drop every creation-phase reference parent array — the finalize strip's last step;
-    /// from here on references are edgeless positions.
-    pub(crate) fn clear_ref_parents(&mut self) {
-        for parents in self.ref_parents.iter_mut() {
-            parents.clear();
-        }
     }
 
     /// Arm the dissolve oracle: `cg` (the carried CommitGraph the arena was built from) starts
@@ -886,13 +874,8 @@ impl StepGraph {
     /// never appear here: post-strip they are edgeless by construction, and the consumers
     /// (head discovery) want picks and tombstones only.
     pub(crate) fn tips(&self) -> impl Iterator<Item = StepGraphIndex> + '_ {
-        let referenced: HashSet<StepGraphIndex> = self
-            .node_parents
-            .iter()
-            .chain(self.ref_parents.iter())
-            .flatten()
-            .copied()
-            .collect();
+        let referenced: HashSet<StepGraphIndex> =
+            self.node_parents.iter().flatten().copied().collect();
         (0..self.ids.len())
             .map(StepGraphIndex::Node)
             .filter(move |node| !referenced.contains(node))
