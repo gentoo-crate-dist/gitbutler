@@ -836,10 +836,11 @@ fn attach_flooded_refs(
     {
         additions.push(entry);
         let entry_approach = positions::ref_approach(graph, entry);
+        let entry_depth = positions::ref_depth(graph, entry);
         additions.extend(graph.anchored_refs().filter_map(|(node, stored)| {
             (stored.anchor == entry_stored.anchor
                 && positions::ref_approach(graph, node) == entry_approach
-                && stored.rank < entry_stored.rank)
+                && positions::ref_depth(graph, node) < entry_depth)
                 .then_some(node)
         }));
     }

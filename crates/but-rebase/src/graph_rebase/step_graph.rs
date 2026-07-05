@@ -75,11 +75,9 @@ pub(crate) struct StoredAnchor {
     /// The node this reference resolves to (a pick, or its tombstone after deletion) — the
     /// commit the ref points at, reached lazily through tombstones at read time.
     pub anchor: StepGraphIndex,
-    /// Orders co-located references above one anchor, 0 = closest to the anchor.
-    pub rank: usize,
     /// The reference directly underneath in the physical stack (`None` = sits on the anchor).
-    /// Stage B dual-write: authored beside `rank` by every writer; depth along the below-chain
-    /// must equal `rank` (checkpoint-asserted) until rank is deleted and depth takes over.
+    /// Rank is DERIVED: a reference's depth is the length of its below-chain
+    /// (`positions::ref_depth`).
     pub below: Option<StepGraphIndex>,
     /// The entry into this position converged — more than one thing (legs and/or refs stacked
     /// above) met here (a merge). A creation-time signal distinct from `approach.len() > 1` (a position
@@ -101,10 +99,10 @@ pub(crate) enum LaneCarry {
 }
 
 /// One lane above a stored anchor: the references sharing an approach at one position.
-/// Membership only — order among members stays rank's job.
+/// Membership only — order among members stays the below-chain's job.
 #[derive(Debug, Clone)]
 pub(crate) struct LaneRec {
-    /// The reference nodes in this lane, unordered (sort by stored rank to read).
+    /// The reference nodes in this lane, unordered (order by below-chain depth to read).
     pub members: Vec<StepGraphIndex>,
     /// How much of the anchor's legs this lane carries.
     pub carry: LaneCarry,
@@ -126,7 +124,7 @@ pub(crate) struct StepGraph {
     edges: Vec<Option<EdgeRecord>>,
     outgoing: Vec<Vec<StepEdgeIndex>>,
     incoming: Vec<Vec<StepEdgeIndex>>,
-    /// `Some` exactly for reference nodes; carries the ref's anchor, rank, and ambiguity.
+    /// `Some` exactly for reference nodes; carries the ref's anchor, below, and ambiguity.
     anchors: Vec<Option<StoredAnchor>>,
     /// THE approach store: lane membership per STORED (unresolved) anchor value. Which legs
     /// descend into a reference's position lives here and only here — authored by
@@ -164,7 +162,6 @@ impl StepGraph {
         &mut self,
         node: StepGraphIndex,
         anchor: StepGraphIndex,
-        rank: usize,
         approach: &[(StepGraphIndex, usize)],
         ambiguous: bool,
         below: Option<StepGraphIndex>,
@@ -194,19 +191,17 @@ impl StepGraph {
         self.lane_insert(node, anchor, carry, legs);
         self.anchors[node] = Some(StoredAnchor {
             anchor,
-            rank,
             ambiguous,
             below,
         });
     }
 
     /// Join `node` into the lane CONTAINING `mate` — direct membership, not legs-equality —
-    /// at `rank` sitting on `below`, copying the mate's anchor and ambiguity.
+    /// sitting on `below`, copying the mate's anchor and ambiguity.
     pub(crate) fn join_lane_of(
         &mut self,
         node: StepGraphIndex,
         mate: StepGraphIndex,
-        rank: usize,
         below: Option<StepGraphIndex>,
     ) {
         let Some(m) = self.anchor_of(mate) else {
@@ -230,14 +225,13 @@ impl StepGraph {
         }
         self.anchors[node] = Some(StoredAnchor {
             anchor: m.anchor,
-            rank,
             ambiguous: m.ambiguous,
             below,
         });
     }
 
     /// Re-key `node`'s position onto `new_anchor`, carrying its CURRENT lane record — the
-    /// carry and legs as maintained through edge surgery. Rank and ambiguity are preserved.
+    /// carry and legs as maintained through edge surgery. Below and ambiguity are preserved.
     pub(crate) fn rekey_anchor(&mut self, node: StepGraphIndex, new_anchor: StepGraphIndex) {
         let Some(stored) = self.anchor_of(node) else {
             return;
@@ -264,15 +258,7 @@ impl StepGraph {
         }
     }
 
-    /// Change `node`'s rank only — pure chain reordering. The anchor key and lane membership
-    /// are untouched (no lane rebuild, unlike a full re-store).
-    pub(crate) fn set_rank(&mut self, node: StepGraphIndex, rank: usize) {
-        if let Some(stored) = self.anchors[node].as_mut() {
-            stored.rank = rank;
-        }
-    }
-
-    /// Re-hang `node` onto `below` — an adjacency statement only; anchor, rank, and lane
+    /// Re-hang `node` onto `below` — an adjacency statement only; anchor and lane
     /// membership are untouched.
     pub(crate) fn set_below(&mut self, node: StepGraphIndex, below: Option<StepGraphIndex>) {
         if let Some(stored) = self.anchors[node].as_mut() {
@@ -373,7 +359,6 @@ impl StepGraph {
             };
             self.anchors[new_node] = Some(StoredAnchor {
                 anchor: new_anchor,
-                rank: stored.rank,
                 ambiguous: stored.ambiguous,
                 below: stored.below.and_then(|b| mapping.get(&b).copied()),
             });
