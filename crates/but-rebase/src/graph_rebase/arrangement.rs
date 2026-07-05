@@ -2,7 +2,7 @@
 //!
 //! Everything a [`StoredAnchor`](crate::graph_rebase::step_graph::StoredAnchor) records is keyed
 //! by graph coordinates (node ids, parent slots) that churn under mutation, which is why positions
-//! need incremental maintenance (`rewrite_approach_leg`, `join_chain_at`, the preserve-vs-reclassify
+//! need incremental maintenance (`rewrite_approach_leg`, `apply_chain_join`, the preserve-vs-reclassify
 //! flag). The intended replacement keys the same information by REF NAMES, which mutation never
 //! churns: per anchor commit, an ordered list of lanes, each an ordered list of ref names — exactly
 //! the shape of workspace metadata (stack order, branch order). Anchor, rank, and approach then

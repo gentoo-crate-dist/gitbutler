@@ -1138,15 +1138,15 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                             .context("Reference target should resolve to a commit")?,
                         None => target.id,
                     };
+                    let join = (connect_to != target.id)
+                        .then(|| positions::prepare_chain_join(&self.graph, target.id));
                     let orders = self.add_edges_to_parents(
                         parent.id,
                         [connect_to],
                         parent_reparenting_order,
                     );
-                    if connect_to != target.id
-                        && let Some(order) = orders.first()
-                    {
-                        positions::join_chain_at(&mut self.graph, target.id, (parent.id, *order));
+                    if let (Some(join), Some(order)) = (join, orders.first()) {
+                        positions::apply_chain_join(&mut self.graph, &join, (parent.id, *order));
                     }
                 }
             }
@@ -1226,18 +1226,20 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                         self.add_edge(parent, first, 0)?;
                     }
                 } else {
+                    let joins: Vec<_> = ref_parents
+                        .iter()
+                        .map(|(k, ref_node)| {
+                            (*k, positions::prepare_chain_join(&self.graph, *ref_node))
+                        })
+                        .collect();
                     let new_orders = self.add_edges_to_parents(
                         parent.id,
                         parents_to_add,
                         parent_reparenting_order,
                     );
-                    for (k, ref_node) in &ref_parents {
+                    for (k, join) in &joins {
                         if let Some(order) = new_orders.get(*k) {
-                            positions::join_chain_at(
-                                &mut self.graph,
-                                *ref_node,
-                                (parent.id, *order),
-                            );
+                            positions::apply_chain_join(&mut self.graph, join, (parent.id, *order));
                         }
                     }
                     // Chains those legs carried are now approached through the segment's
@@ -1522,15 +1524,18 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             return Ok(());
         }
         // An edge into a reference enters its chain: the pick edge goes to the anchor and the
-        // reference (with members below it) gains the new leg. Add the pick edge FIRST so that
-        // `join_chain_at`'s `set_anchor` authors the chain's `ApproachKind` against the final legs
-        // (the new leg included), not the pre-edge topology.
+        // reference (with members below it) gains the new leg. The chain is captured BEFORE the
+        // edge lands (a consistent store) and applied after, so the join classifies against the
+        // final legs (the new leg included) without mid-surgery reads.
         let parent_ref = self.graph.anchor_of(parent.id);
         let parent_pick = match &parent_ref {
             Some(stored) => positions::resolve_to_pick(&self.graph, stored.anchor)
                 .context("Reference target should resolve to a commit")?,
             None => parent.id,
         };
+        let join = parent_ref
+            .is_some()
+            .then(|| positions::prepare_chain_join(&self.graph, parent.id));
         self.graph.add_edge(
             child.id,
             parent_pick,
@@ -1538,8 +1543,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 order: desired_order,
             },
         );
-        if parent_ref.is_some() {
-            positions::join_chain_at(&mut self.graph, parent.id, (child.id, desired_order));
+        if let Some(join) = join {
+            positions::apply_chain_join(&mut self.graph, &join, (child.id, desired_order));
         }
 
         Ok(())

@@ -274,18 +274,26 @@ pub(crate) fn refs_reachable_with(
     out
 }
 
-/// A new leg enters `ref_node`'s chain at its position: the reference and its chain-mates at
-/// or below its rank gain the leg in their approach legs. Root chains (empty approach) at one anchor are
-/// distinct siblings, so only the reference itself joins.
-pub(crate) fn join_chain_at(
-    graph: &mut StepGraph,
-    ref_node: StepGraphIndex,
-    leg: (StepGraphIndex, usize),
-) {
+/// A chain about to be entered by a new leg, captured BEFORE the leg's edge exists — while
+/// the store is still consistent — so [`apply_chain_join`] never reads a half-updated store.
+pub(crate) struct ChainJoin {
+    /// The joining members: the reference and its chain-mates at or below its rank. Root
+    /// chains (empty approach) at one anchor are distinct siblings, so only the reference
+    /// itself joins.
+    members: Vec<(StepGraphIndex, StoredAnchor)>,
+    /// The chain's shared approach at capture time.
+    approach: Vec<(StepGraphIndex, usize)>,
+}
+
+/// Capture `ref_node`'s chain for a coming join — call BEFORE adding the joining leg's edge.
+pub(crate) fn prepare_chain_join(graph: &StepGraph, ref_node: StepGraphIndex) -> ChainJoin {
     let Some(stored) = graph.anchor_of(ref_node) else {
-        return;
+        return ChainJoin {
+            members: Vec::new(),
+            approach: Vec::new(),
+        };
     };
-    let joiners: Vec<_> = if matches!(stored.kind, ApproachKind::Root) {
+    let members = if matches!(stored.kind, ApproachKind::Root) {
         vec![(ref_node, stored.clone())]
     } else {
         chain_members(graph, ref_node)
@@ -293,16 +301,28 @@ pub(crate) fn join_chain_at(
             .filter(|(_, m)| m.rank <= stored.rank)
             .collect()
     };
-    // Called right after the leg edge is added, so the anchor's legs are complete: recompute the
-    // intended approach and classify. AllLegs stays AllLegs; a Lane gains the slot; a Root descends.
-    for (node, member) in joiners {
-        let mut approach = ref_approach(graph, node);
+    ChainJoin {
+        members,
+        approach: ref_approach(graph, ref_node),
+    }
+}
+
+/// The new `leg` enters the captured chain: every member gains it in its approach, classified
+/// against the anchor's now-complete legs — call right AFTER the leg's edge is added. AllLegs
+/// stays AllLegs; a Lane gains the slot; a Root descends.
+pub(crate) fn apply_chain_join(
+    graph: &mut StepGraph,
+    join: &ChainJoin,
+    leg: (StepGraphIndex, usize),
+) {
+    for (node, member) in &join.members {
+        let mut approach = join.approach.clone();
         if !approach.contains(&leg) {
             approach.push(leg);
         }
         let mut placed = StoredAnchor::place(graph, member.anchor, member.rank, &approach);
         placed.ambiguous = member.ambiguous || approach.len() > 1;
-        graph.set_anchor(node, Some(placed));
+        graph.set_anchor(*node, Some(placed));
     }
 }
 
