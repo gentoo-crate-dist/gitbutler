@@ -3,10 +3,10 @@
 use std::collections::HashSet;
 
 use crate::graph_rebase::arrangement::{
-    SplitBoundary, StackSlot, move_ref, place_ref, repoint_ref, settle_chain_lower, split_chain,
+    SplitBoundary, StackSlot, carry_stack_above, land_stack_above, move_ref, place_ref,
+    readopt_dangling_refs, repoint_ref, settle_chain_lower, split_chain, transfer_stack,
     unhook_ref,
 };
-use crate::graph_rebase::step_graph::StoredAnchor;
 use crate::graph_rebase::{Direction, StepGraphIndex, positions};
 use anyhow::{Context as _, Result, anyhow, bail};
 use but_core::RefMetadata;
@@ -773,36 +773,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         // at or below its rank — those stay with the segment.
         if let Some(anchor) = chain_anchor {
             for moving_node in &moving_ref_children {
-                let Some(moving) = self.graph.anchor_of(*moving_node) else {
-                    continue;
-                };
-                let moving_approach = positions::ref_approach(&self.graph, *moving_node);
-                let moves: Vec<_> = self
-                    .graph
-                    .anchored_refs()
-                    .filter(|(node, stored)| {
-                        positions::resolve_to_pick(&self.graph, stored.anchor)
-                            == Some(target_child.id)
-                            && positions::ref_approach(&self.graph, *node) == moving_approach
-                            && stored.rank >= moving.rank
-                    })
-                    .map(|(node, _)| node)
-                    .collect::<Vec<_>>();
-                // Re-anchor onto the disconnected parent, re-classifying each ref's lane there
-                // (its legs come along, but the target may be a merge base with distinct lanes).
-                for node in moves {
-                    if let Some(stored) = self.graph.anchor_of(node) {
-                        let approach = positions::ref_approach(&self.graph, node);
-                        let mut placed = StoredAnchor::place(
-                            &self.graph,
-                            anchor,
-                            stored.rank - moving.rank,
-                            &approach,
-                        );
-                        placed.ambiguous = stored.ambiguous;
-                        self.graph.set_anchor(node, Some(placed));
-                    }
-                }
+                transfer_stack(&mut self.graph, *moving_node, target_child.id, anchor);
             }
         }
         if full_child_disconnect && let Some(anchor) = chain_anchor {
@@ -810,39 +781,13 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 None => {
                     // When the disconnected parent edge carried a chain, the node-era parent
                     // was that chain's top ref — the child refs stack above it and follow it
-                    // through later moves.
-                    if let Some(top) = carried_parent_tops.first().copied()
-                        && let Some(top_stored) = self.graph.anchor_of(top)
-                    {
-                        // The top ref's feeder was emptied in step 2; step 3's reconnect bridged
-                        // fresh legs into `anchor`. Restore the top (and the moved refs that
-                        // inherit its approach) to that full bridged leg set — every bridged leg,
-                        // so it is AllLegs, correct in the merge case too.
-                        let bridge = positions::legs_into_pick(&self.graph, anchor);
-                        let top_rank = top_stored.rank;
-                        let placed_top =
-                            StoredAnchor::place(&self.graph, top_stored.anchor, top_rank, &bridge);
-                        self.graph.set_anchor(top, Some(placed_top));
-
-                        let moves: Vec<_> = self
-                            .graph
-                            .anchored_refs()
-                            .filter(|(_, stored)| {
-                                positions::resolve_to_pick(&self.graph, stored.anchor)
-                                    == Some(target_child.id)
-                            })
-                            .map(|(node, stored)| (node, stored.rank))
-                            .collect();
-                        for (node, rank) in moves {
-                            let placed = StoredAnchor::place(
-                                &self.graph,
-                                anchor,
-                                rank + top_rank + 1,
-                                &bridge,
-                            );
-                            self.graph.set_anchor(node, Some(placed));
-                        }
-                    } else {
+                    // through later moves. The top's feeder was emptied in step 2; step 3's
+                    // reconnect bridged fresh legs into `anchor`, and the joined tower rests
+                    // behind that full bridged leg set (AllLegs, correct in the merge case too).
+                    let landed = carried_parent_tops.first().is_some_and(|&top| {
+                        land_stack_above(&mut self.graph, target_child.id, top, anchor)
+                    });
+                    if !landed {
                         positions::reanchor_refs_at(
                             &mut self.graph,
                             target_child.id,
@@ -852,26 +797,16 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     }
                 }
                 Some(delimiter) => {
-                    let delimiter_rank = delimiter.rank;
+                    // The delimiter and its chain at or below its rank stay with the segment;
+                    // the lane slice above it follows the pick move verbatim.
                     let delimiter_approach = child_ref_approach.clone().unwrap_or_default();
-                    let moves: Vec<_> = self
-                        .graph
-                        .anchored_refs()
-                        .filter(|(node, stored)| {
-                            positions::resolve_to_pick(&self.graph, stored.anchor)
-                                == Some(target_child.id)
-                                && positions::ref_approach(&self.graph, *node) == delimiter_approach
-                                && stored.rank > delimiter_rank
-                        })
-                        .map(|(node, _)| node)
-                        .collect::<Vec<_>>();
-                    // Re-anchor: preserve kind, just move onto the new pick.
-                    for node in moves {
-                        if let Some(mut stored) = self.graph.anchor_of(node) {
-                            stored.anchor = anchor;
-                            self.graph.set_anchor(node, Some(stored));
-                        }
-                    }
+                    carry_stack_above(
+                        &mut self.graph,
+                        target_child.id,
+                        &delimiter_approach,
+                        delimiter.rank,
+                        anchor,
+                    );
                 }
             }
         }
@@ -881,19 +816,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         // semantics: the position follows where the commit's place went, the approach (approach)
         // stays, so a rewired child renders its chain exactly as the edge-era rewire did.
         if let Some(new_anchor) = disconnected_parent_edges.first().map(|(_, target)| *target) {
-            let dangling: Vec<_> = self
-                .graph
-                .anchored_refs()
-                .filter_map(|(node, stored)| {
-                    crate::graph_rebase::positions::resolve_to_pick(&self.graph, stored.anchor)
-                        .is_none()
-                        .then_some((node, stored))
-                })
-                .collect();
-            for (node, mut stored) in dangling {
-                stored.anchor = new_anchor;
-                self.graph.set_anchor(node, Some(stored));
-            }
+            readopt_dangling_refs(&mut self.graph, new_anchor);
         }
 
         Ok(())

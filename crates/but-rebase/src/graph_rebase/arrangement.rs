@@ -348,6 +348,112 @@ pub(crate) fn unhook_ref(graph: &mut StepGraph, node: StepGraphIndex, drop_legs:
     );
 }
 
+/// Move the stack slice led by `lead_ref` — it and everything above it in its lane on
+/// `source_pick` — onto `dest_anchor`: ranks rebase so the lead lands at 0, each member is
+/// re-classified against its own legs at the destination (they come along), and stored
+/// ambiguity is preserved.
+pub(crate) fn transfer_stack(
+    graph: &mut StepGraph,
+    lead_ref: StepGraphIndex,
+    source_pick: StepGraphIndex,
+    dest_anchor: StepGraphIndex,
+) {
+    let Some(lead) = graph.anchor_of(lead_ref) else {
+        return;
+    };
+    let lane = positions::ref_approach(graph, lead_ref);
+    let moves: Vec<_> = graph
+        .anchored_refs()
+        .filter(|(node, stored)| {
+            positions::resolve_to_pick(graph, stored.anchor) == Some(source_pick)
+                && positions::ref_approach(graph, *node) == lane
+                && stored.rank >= lead.rank
+        })
+        .map(|(node, _)| node)
+        .collect();
+    for node in moves {
+        if let Some(stored) = graph.anchor_of(node) {
+            let approach = positions::ref_approach(graph, node);
+            let mut placed =
+                StoredAnchor::place(graph, dest_anchor, stored.rank - lead.rank, &approach);
+            placed.ambiguous = stored.ambiguous;
+            graph.set_anchor(node, Some(placed));
+        }
+    }
+}
+
+/// Carry the slice of `lane` on `source_pick` strictly above `above_rank` onto `dest_anchor`
+/// verbatim — same ranks, same kinds; only the anchor key changes. The delimiter position
+/// below the slice stays behind. `lane`/`above_rank` are caller-captured (pre-mutation)
+/// coordinates rather than live derivations.
+pub(crate) fn carry_stack_above(
+    graph: &mut StepGraph,
+    source_pick: StepGraphIndex,
+    lane: &[(StepGraphIndex, usize)],
+    above_rank: usize,
+    dest_anchor: StepGraphIndex,
+) {
+    let moves: Vec<_> = graph
+        .anchored_refs()
+        .filter(|(node, stored)| {
+            positions::resolve_to_pick(graph, stored.anchor) == Some(source_pick)
+                && positions::ref_approach(graph, *node) == lane
+                && stored.rank > above_rank
+        })
+        .map(|(node, _)| node)
+        .collect();
+    for node in moves {
+        if let Some(mut stored) = graph.anchor_of(node) {
+            stored.anchor = dest_anchor;
+            graph.set_anchor(node, Some(stored));
+        }
+    }
+}
+
+/// Stack every reference on `source_pick` above `top` (a reference on another pick), the
+/// whole tower re-placed behind `bridge_anchor`'s full incoming leg set — the bridged legs
+/// that now descend into the joined chain. Returns false (leaving the graph untouched) when
+/// `top` holds no position.
+pub(crate) fn land_stack_above(
+    graph: &mut StepGraph,
+    source_pick: StepGraphIndex,
+    top: StepGraphIndex,
+    bridge_anchor: StepGraphIndex,
+) -> bool {
+    let Some(top_stored) = graph.anchor_of(top) else {
+        return false;
+    };
+    let bridge = positions::legs_into_pick(graph, bridge_anchor);
+    let top_rank = top_stored.rank;
+    let placed_top = StoredAnchor::place(graph, top_stored.anchor, top_rank, &bridge);
+    graph.set_anchor(top, Some(placed_top));
+
+    let moves: Vec<_> = graph
+        .anchored_refs()
+        .filter(|(_, stored)| positions::resolve_to_pick(graph, stored.anchor) == Some(source_pick))
+        .map(|(node, stored)| (node, stored.rank))
+        .collect();
+    for (node, rank) in moves {
+        let placed = StoredAnchor::place(graph, bridge_anchor, rank + top_rank + 1, &bridge);
+        graph.set_anchor(node, Some(placed));
+    }
+    true
+}
+
+/// Re-key every reference whose anchor no longer resolves (it sat on removed picks) onto
+/// `new_anchor`, positions carried verbatim — the ruled dangling semantics: the position
+/// follows where the commit's place went, the approach stays.
+pub(crate) fn readopt_dangling_refs(graph: &mut StepGraph, new_anchor: StepGraphIndex) {
+    let dangling: Vec<_> = graph
+        .anchored_refs()
+        .filter(|(_, stored)| positions::resolve_to_pick(graph, stored.anchor).is_none())
+        .collect();
+    for (node, mut stored) in dangling {
+        stored.anchor = new_anchor;
+        graph.set_anchor(node, Some(stored));
+    }
+}
+
 /// Which side of `at_ref` a chain split leaves with the lower part.
 pub(crate) enum SplitBoundary {
     /// Members strictly above the ref move up; the ref stays with the lower part.
