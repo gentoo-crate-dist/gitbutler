@@ -85,7 +85,7 @@ fn derive_ref_position_from_edges(
     graph: &StepGraph,
     ref_node: StepGraphIndex,
 ) -> Option<(RefPosition, Vec<(StepGraphIndex, usize)>)> {
-    if !matches!(graph[ref_node], Step::Reference { .. }) {
+    if !graph.is_reference(ref_node) {
         return None;
     }
     // Descend: the anchor is the first pick below, through references and tombstones.
@@ -100,17 +100,12 @@ fn derive_ref_position_from_edges(
         else {
             break;
         };
-        match &graph[next] {
-            Step::Pick(_) => {
-                anchor = Some(next);
-                break;
-            }
-            Step::Reference { .. } => {
-                if below.is_none() {
-                    below = Some(next);
-                }
-            }
-            Step::None => {}
+        if matches!(graph[next], Step::Pick(_)) {
+            anchor = Some(next);
+            break;
+        }
+        if graph.is_reference(next) && below.is_none() {
+            below = Some(next);
         }
         cursor = next;
     }
@@ -186,7 +181,7 @@ pub(crate) fn debug_assert_positions_total(graph: &StepGraph) {
     let mut seen: std::collections::HashMap<OrderedPositionKey, StepGraphIndex> =
         Default::default();
     for node in graph.node_indices() {
-        if !matches!(graph[node], Step::Reference { .. }) {
+        if !graph.is_reference(node) {
             continue;
         }
         // A reference without a stored anchor is only legitimate when the graph holds no
@@ -215,9 +210,9 @@ pub(crate) fn debug_assert_positions_total(graph: &StepGraph) {
 /// retention reads but are spliced out of the physical stack, so only live refs are graded.
 /// `BUT_BELOW_DUMP=1` prints the full position table first.
 fn debug_assert_below_wellformed(graph: &StepGraph) {
-    let name = |node: StepGraphIndex| match &graph[node] {
-        Step::Reference { refname, .. } => refname.to_string(),
-        other => format!("{other:?}"),
+    let name = |node: StepGraphIndex| match graph.reference(node) {
+        Some((refname, _)) => refname.to_string(),
+        None => format!("{:?}", graph[node]),
     };
     if std::env::var_os("BUT_BELOW_DUMP").is_some() {
         for (node, stored) in graph.anchored_refs() {
@@ -233,7 +228,7 @@ fn debug_assert_below_wellformed(graph: &StepGraph) {
         }
     }
     for (node, stored) in graph.anchored_refs() {
-        if !matches!(graph[node], Step::Reference { .. }) {
+        if !graph.is_reference(node) {
             continue;
         }
         let anchor = resolve_to_pick(graph, stored.anchor);
@@ -438,24 +433,21 @@ pub(crate) fn legs_into_pick(
 pub(crate) fn resolve_to_pick(graph: &StepGraph, node: StepGraphIndex) -> Option<StepGraphIndex> {
     let mut cursor = node;
     for _ in 0..10_000 {
-        match &graph[cursor] {
-            Step::Pick(_) => return Some(cursor),
-            Step::Reference { .. } => {
-                cursor = match graph.anchor_of(cursor) {
-                    Some(stored) => stored.anchor,
-                    None => graph
-                        .edges_directed(cursor, Direction::Outgoing)
-                        .next()
-                        .map(|e| e.target())?,
-                };
-            }
-            Step::None => {
-                cursor = graph
-                    .edges_directed(cursor, Direction::Outgoing)
-                    .next()
-                    .map(|e| e.target())?;
-            }
+        if matches!(graph[cursor], Step::Pick(_)) {
+            return Some(cursor);
         }
+        // A reference resolves via its stored anchor (or its chain edge during the creation
+        // finalize pass); a tombstone follows its preserved first edge downward.
+        cursor = match graph
+            .anchor_of(cursor)
+            .filter(|_| graph.is_reference(cursor))
+        {
+            Some(stored) => stored.anchor,
+            None => graph
+                .edges_directed(cursor, Direction::Outgoing)
+                .next()
+                .map(|e| e.target())?,
+        };
     }
     None
 }
@@ -470,7 +462,7 @@ pub(crate) fn initialize_anchors_and_strip_ref_edges(graph: &mut StepGraph) {
     // chain topology while it still exists. `unborn` chains (no pick below) keep no stored anchor.
     let mut positions = Vec::new();
     for node in graph.node_indices() {
-        if !matches!(graph[node], Step::Reference { .. }) {
+        if !graph.is_reference(node) {
             continue;
         }
         let Some((pos, approach)) = derive_ref_position_from_edges(graph, node) else {
@@ -487,8 +479,8 @@ pub(crate) fn initialize_anchors_and_strip_ref_edges(graph: &mut StepGraph) {
     let mut to_remove = Vec::new();
     let mut to_add = Vec::new();
     for edge in graph.edge_references() {
-        let source_is_ref = matches!(graph[edge.source()], Step::Reference { .. });
-        let target_is_ref = matches!(graph[edge.target()], Step::Reference { .. });
+        let source_is_ref = graph.is_reference(edge.source());
+        let target_is_ref = graph.is_reference(edge.target());
         if source_is_ref {
             to_remove.push(edge.id());
         } else if target_is_ref {

@@ -27,7 +27,7 @@ impl<'ws, 'graph, M: RefMetadata> SuccessfulRebase<'ws, 'graph, M> {
                     merge_base_override,
                 } => {
                     let selector = self.history.normalize_selector(selector)?;
-                    let step = self.graph[selector.id].clone();
+                    let step = self.graph.step_view(selector.id);
 
                     let (new_head, new_head_refname) = match step {
                         Step::None => bail!("Checkout selector is pointing to none"),

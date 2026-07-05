@@ -150,6 +150,49 @@ impl StepGraph {
         self.nodes.len() - 1
     }
 
+    /// Add a reference and return its stable id.
+    pub(crate) fn add_reference(
+        &mut self,
+        refname: gix::refs::FullName,
+        mutable: bool,
+    ) -> StepGraphIndex {
+        self.add_node(Step::Reference { refname, mutable })
+    }
+
+    /// The reference payload at `node` — `Some` iff the slot holds a live (non-tombstoned)
+    /// reference.
+    pub(crate) fn reference(&self, node: StepGraphIndex) -> Option<(&gix::refs::FullName, bool)> {
+        match self.nodes.get(node)? {
+            Step::Reference { refname, mutable } => Some((refname, *mutable)),
+            _ => None,
+        }
+    }
+
+    /// `true` iff `node` is a live reference.
+    pub(crate) fn is_reference(&self, node: StepGraphIndex) -> bool {
+        self.reference(node).is_some()
+    }
+
+    /// All live references, ascending by node id.
+    pub(crate) fn references(
+        &self,
+    ) -> impl Iterator<Item = (StepGraphIndex, &gix::refs::FullName, bool)> + '_ {
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, step)| match step {
+                Step::Reference { refname, mutable } => Some((idx, refname, *mutable)),
+                _ => None,
+            })
+    }
+
+    /// The step at `node` as an owned view. This is the read every whole-step consumer must
+    /// use: it is the seam that will synthesize `Step::Reference` views once references leave
+    /// the arena.
+    pub(crate) fn step_view(&self, node: StepGraphIndex) -> Step {
+        self.nodes[node].clone()
+    }
+
     /// The stored position of the reference at `node`, if it is a positioned reference.
     pub(crate) fn anchor_of(&self, node: StepGraphIndex) -> Option<RefPosition> {
         self.anchors.get(node).cloned().flatten()

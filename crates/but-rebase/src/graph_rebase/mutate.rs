@@ -272,10 +272,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
 
     /// Get a selector to a particular reference in the graph
     pub fn try_select_reference(&self, target: &gix::refs::FullNameRef) -> Option<Selector> {
-        for node_idx in self.graph.node_indices() {
-            if let Step::Reference { refname, .. } = &self.graph[node_idx]
-                && target == refname.as_ref()
-            {
+        for (node_idx, refname, _) in self.graph.references() {
+            if target == refname.as_ref() {
                 return Some(self.new_selector(node_idx));
             }
         }
@@ -443,7 +441,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         // Replacing a reference with a non-reference (tombstoning) removes it from the physical
         // stack: splice dependents past it. The stored anchor itself is kept for retention reads.
         if matches!(step, Step::Reference { .. })
-            && !matches!(self.graph[target.id], Step::Reference { .. })
+            && !self.graph.is_reference(target.id)
             && let Some(stored) = self.graph.anchor_of(target.id)
         {
             splice_out(&mut self.graph, target.id, stored.below);
@@ -1474,7 +1472,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         // tombstone carrying a stale anchor (which upstream-integration retention still reads) is
         // not a reference and must not be treated as one, or the re-anchor cascades the stale
         // position through the graph.
-        if matches!(self.graph[child.id], Step::Reference { .. }) {
+        if self.graph.is_reference(child.id) {
             let new_anchor = match self.graph.anchor_of(parent.id) {
                 Some(parent_stored) => {
                     positions::resolve_to_pick(&self.graph, parent_stored.anchor)

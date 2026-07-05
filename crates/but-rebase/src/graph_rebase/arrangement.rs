@@ -24,7 +24,7 @@ use std::collections::HashMap;
 
 use crate::graph_rebase::positions::{self, legs_into_pick};
 use crate::graph_rebase::step_graph::{LaneCarry, RefPosition};
-use crate::graph_rebase::{Direction, Step, StepGraph, StepGraphIndex};
+use crate::graph_rebase::{Direction, StepGraph, StepGraphIndex};
 
 /// A position in a commit's reference stack, named by intent.
 #[derive(Debug, Clone, Copy)]
@@ -333,7 +333,7 @@ pub(crate) fn repoint_ref(graph: &mut StepGraph, node: StepGraphIndex, new_ancho
                     .filter(|(mate, member)| {
                         member.below == Some(current)
                             && !carried.contains(mate)
-                            && matches!(graph[*mate], Step::Reference { .. })
+                            && graph.is_reference(*mate)
                     })
                     .map(|(mate, _)| mate)
                     .collect();
@@ -641,10 +641,7 @@ fn extract(graph: &StepGraph, notes: &mut Vec<String>) -> Arrangement {
     // (anchor, approach) -> members
     type ChainKey = (StepGraphIndex, Vec<(StepGraphIndex, usize)>);
     let mut chains: HashMap<ChainKey, Vec<(gix::refs::FullName, usize, bool)>> = HashMap::new();
-    for node in graph.node_indices() {
-        let Step::Reference { refname, .. } = &graph[node] else {
-            continue;
-        };
+    for (node, refname, _) in graph.references() {
         if let Some(previous) = seen_names.insert(refname.clone(), node) {
             notes.push(format!("DUPNAME {refname:?} nodes {previous} and {node}"));
         }
@@ -791,10 +788,7 @@ fn census(graph: &StepGraph) -> Vec<String> {
         }
     }
     let derived = derive(graph, &arrangement, &mut notes);
-    for node in graph.node_indices() {
-        let Step::Reference { refname, .. } = &graph[node] else {
-            continue;
-        };
+    for (node, refname, _) in graph.references() {
         let Some(stored) = graph.anchor_of(node) else {
             continue;
         };
@@ -835,10 +829,7 @@ pub(crate) fn census_to_file(graph: &StepGraph) {
     else {
         return;
     };
-    let refs = graph
-        .node_indices()
-        .filter(|&n| matches!(graph[n], Step::Reference { .. }))
-        .count();
+    let refs = graph.references().count();
     let _ = writeln!(file, "GRAPH refs={refs} findings={}", notes.len());
     for note in notes {
         let _ = writeln!(file, "{note}");

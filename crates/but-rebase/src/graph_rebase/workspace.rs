@@ -187,10 +187,10 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         //   If we don't find a workspace commit, all commits from HEAD are considered above the workspace.
 
         let ws_ref: gix::refs::FullName = WORKSPACE_REF_NAME.try_into()?;
-        let on_workspace = matches!(
-            &self.graph[entrypoint_ix],
-            Step::Reference { refname, .. } if *refname == ws_ref
-        );
+        let on_workspace = self
+            .graph
+            .reference(entrypoint_ix)
+            .is_some_and(|(refname, _)| *refname == ws_ref);
 
         let target_ix = self.target_selector().map(|s| s.id);
         let revision = self.history.current_revision();

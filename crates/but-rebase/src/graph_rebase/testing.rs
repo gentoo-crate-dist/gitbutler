@@ -64,7 +64,7 @@ impl TestingDot for StepGraph {
     fn steps_dot(&self) -> String {
         let mut out = String::from("digraph {\n");
         for idx in self.node_indices() {
-            let label = match &self[idx] {
+            let label = match self.step_view(idx) {
                 Step::Pick(Pick { id, .. }) => format!("pick: {id}"),
                 Step::Reference { refname, .. } => {
                     format!("reference: {}", refname.as_bstr())
@@ -220,7 +220,7 @@ fn get_sorted_parents(graph: &StepGraph, node: StepGraphIndex) -> Vec<StepGraphI
 /// A deterministic ordering for the head nodes so snapshots are stable: picks
 /// before references, then by id / refname.
 fn compare_heads(graph: &StepGraph, a: StepGraphIndex, b: StepGraphIndex) -> Ordering {
-    match (&graph[a], &graph[b]) {
+    match (&graph.step_view(a), &graph.step_view(b)) {
         (
             Step::Reference { refname, .. },
             Step::Reference {
@@ -353,8 +353,8 @@ where
 
     let mut out = String::new();
     for node in topological_order(graph, nodes, &heads) {
-        let step = &graph[node];
-        let title = match step {
+        let step = graph.step_view(node);
+        let title = match &step {
             Step::Pick(Pick { id, .. }) => get_title(*id),
             _ => None,
         };
@@ -367,7 +367,7 @@ where
             node,
             parents,
             step.to_symbol().to_string(),
-            format_step(step, title),
+            format_step(&step, title),
         ));
     }
     out.trim_end().to_string()

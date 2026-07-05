@@ -230,7 +230,7 @@ pub struct Selector {
 impl ToCommitSelector for Selector {
     fn to_commit_selector(&self, editor: &Editor<impl RefMetadata>) -> Result<Selector> {
         let selector = editor.history.normalize_selector(*self)?;
-        let step = &editor.graph[selector.id];
+        let step = editor.graph.step_view(selector.id);
         if !matches!(step, Step::Pick(_)) {
             bail!("Expected selector for {step:?} to refer to a commit");
         }
@@ -242,8 +242,8 @@ impl ToCommitSelector for Selector {
 impl ToReferenceSelector for Selector {
     fn to_reference_selector(&self, editor: &Editor<impl RefMetadata>) -> Result<Selector> {
         let selector = editor.history.normalize_selector(*self)?;
-        let step = &editor.graph[selector.id];
-        if !matches!(step, Step::Reference { .. }) {
+        if !editor.graph.is_reference(selector.id) {
+            let step = editor.graph.step_view(selector.id);
             bail!("Expected selector for {step:?} to refer to a reference");
         }
 
@@ -365,11 +365,10 @@ impl<'ws, 'meta, M: RefMetadata> SuccessfulRebase<'ws, 'meta, M> {
             .filter_map(|checkout| match checkout {
                 Checkout::Head { selector, .. } => {
                     let selector = self.history.normalize_selector(*selector).ok()?;
-                    let step = &self.graph[selector.id];
 
-                    match step {
+                    match self.graph.step_view(selector.id) {
                         Step::None => None,
-                        Step::Pick(Pick { id, .. }) => Some((*id, None)),
+                        Step::Pick(Pick { id, .. }) => Some((id, None)),
                         Step::Reference { refname, .. } => {
                             if let Some(to_reference) =
                                 crate::graph_rebase::positions::resolve_to_pick(
@@ -378,7 +377,7 @@ impl<'ws, 'meta, M: RefMetadata> SuccessfulRebase<'ws, 'meta, M> {
                                 )
                                 && let Step::Pick(Pick { id, .. }) = self.graph[to_reference]
                             {
-                                Some((id, Some(refname.clone())))
+                                Some((id, Some(refname)))
                             } else {
                                 None
                             }
@@ -458,7 +457,7 @@ impl<M: RefMetadata> LookupStep for MaterializeOutcome<'_, '_, M> {
 
 fn lookup_step(graph: &StepGraph, history: &RevisionHistory, selector: Selector) -> Result<Step> {
     let normalized = history.normalize_selector(selector)?;
-    Ok(graph[normalized.id].clone())
+    Ok(graph.step_view(normalized.id))
 }
 
 /// How node ids and commit ids moved as the editor transformed the graph.
