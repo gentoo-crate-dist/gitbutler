@@ -8,15 +8,120 @@
 //! the shape of workspace metadata (stack order, branch order). Anchor, rank, and approach then
 //! become DERIVED, projection-style, from the table + live pick edges.
 //!
-//! This module currently provides the derivation and a corpus census (env `BUT_ARRANGE_CENSUS`,
-//! called from `debug_assert_positions_total`): extract the table from today's stored positions,
-//! re-derive every position from it, and compare. Divergences enumerate precisely where the
-//! name-keyed model needs a better rule — or where information is genuinely not order-derivable.
+//! This module provides two things:
+//!
+//! 1. The OP API ([`place_ref`] and friends): mutation sites speak position INTENTS
+//!    ([`StackSlot`]) instead of authoring `(anchor, rank, kind)` triples by hand. Implemented
+//!    atop the stored anchors today; when the store swaps to the name-keyed table, only these
+//!    ops' internals change.
+//! 2. A corpus census (env `BUT_ARRANGE_CENSUS`, called from `debug_assert_positions_total`):
+//!    extract the table from today's stored positions, re-derive every position from it, and
+//!    compare. Divergences enumerate precisely where the name-keyed model needs a better rule —
+//!    or where information is genuinely not order-derivable. Verdict so far: zero divergences
+//!    corpus-wide.
 
 use std::collections::HashMap;
 
-use crate::graph_rebase::positions::{legs_into_pick, ref_position};
+use crate::graph_rebase::positions::{self, legs_into_pick, ref_position};
+use crate::graph_rebase::step_graph::StoredAnchor;
 use crate::graph_rebase::{Step, StepGraph, StepGraphIndex};
+
+/// A position in a commit's reference stack, named by intent.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum StackSlot {
+    /// Directly above this reference in its chain: one rank up, members above shift.
+    Above(StepGraphIndex),
+    /// At this reference's position, pushing it and everything above one rank up.
+    Below(StepGraphIndex),
+    /// The bottom of the pick's whole stack (rank 0, carrying all its legs — "the branch
+    /// here"); every reference on the pick shifts up.
+    Bottom(StepGraphIndex),
+    /// The top of the chain the leg `(child, parent-slot)` carries into `pick`.
+    LaneTop {
+        /// The commit the lane's chain is anchored on.
+        pick: StepGraphIndex,
+        /// The child edge whose lane the reference stacks onto.
+        leg: (StepGraphIndex, usize),
+    },
+    /// A fresh root above `pick`: nothing descends into it, no other position moves.
+    Root(StepGraphIndex),
+}
+
+/// Place the reference at `node` into `slot`, shifting other positions as the slot demands.
+/// The node must not currently occupy a position that should move with it (this is the FRESH
+/// placement op; moving an existing reference is a different intent).
+pub(crate) fn place_ref(graph: &mut StepGraph, node: StepGraphIndex, slot: StackSlot) {
+    match slot {
+        StackSlot::Above(target) => {
+            let Some(stored) = graph.anchor_of(target) else {
+                return;
+            };
+            let shifts: Vec<_> = positions::chain_members(graph, target)
+                .into_iter()
+                .filter(|(mate, m)| *mate != node && m.rank > stored.rank)
+                .collect();
+            for (mate, mut member) in shifts {
+                member.rank += 1;
+                graph.set_anchor(mate, Some(member));
+            }
+            graph.set_anchor(
+                node,
+                Some(StoredAnchor {
+                    rank: stored.rank + 1,
+                    ..stored
+                }),
+            );
+        }
+        StackSlot::Below(target) => {
+            let Some(stored) = graph.anchor_of(target) else {
+                return;
+            };
+            let shifts: Vec<_> = positions::chain_members(graph, target)
+                .into_iter()
+                .filter(|(mate, m)| *mate != node && m.rank >= stored.rank)
+                .collect();
+            for (mate, mut member) in shifts {
+                member.rank += 1;
+                graph.set_anchor(mate, Some(member));
+            }
+            graph.set_anchor(node, Some(stored));
+        }
+        StackSlot::Bottom(pick) => {
+            let approach = positions::legs_into_pick(graph, pick);
+            let shifts: Vec<_> = graph
+                .anchored_refs()
+                .filter(|(mate, stored)| {
+                    *mate != node && positions::resolve_to_pick(graph, stored.anchor) == Some(pick)
+                })
+                .collect();
+            for (mate, mut member) in shifts {
+                member.rank += 1;
+                graph.set_anchor(mate, Some(member));
+            }
+            let placed = StoredAnchor::place(graph, pick, 0, &approach);
+            graph.set_anchor(node, Some(placed));
+        }
+        StackSlot::LaneTop { pick, leg } => {
+            let approach = vec![leg];
+            let rank = graph
+                .anchored_refs()
+                .filter(|(mate, stored)| {
+                    *mate != node
+                        && positions::resolve_to_pick(graph, stored.anchor) == Some(pick)
+                        && positions::ref_approach(graph, *mate) == approach
+                })
+                .map(|(_, stored)| stored.rank + 1)
+                .max()
+                .unwrap_or(0);
+            let placed = StoredAnchor::place(graph, pick, rank, &approach);
+            graph.set_anchor(node, Some(placed));
+        }
+        StackSlot::Root(pick) => {
+            let placed = StoredAnchor::place(graph, pick, 0, &[]);
+            graph.set_anchor(node, Some(placed));
+        }
+    }
+}
 
 /// How much of its anchor's incoming legs a lane carries.
 #[derive(Debug, Clone, PartialEq, Eq)]

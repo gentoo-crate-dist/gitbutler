@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use crate::graph_rebase::arrangement::{StackSlot, place_ref};
 use crate::graph_rebase::step_graph::{ApproachKind, StoredAnchor};
 use crate::graph_rebase::{Direction, StepGraphIndex, positions};
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -1565,25 +1566,9 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 Ok(self.new_selector(new_idx))
             }
             (InsertSide::Above, None) => {
-                // A reference above a pick joins that pick's co-located chain at rank 0; every
-                // existing member shifts up one rank. All members share the chain's approach — the
-                // legs entering the pick from above — so the new one adopts them too.
-                let approach = positions::legs_into_pick(&self.graph, target.id);
-                let shifts: Vec<_> = self
-                    .graph
-                    .anchored_refs()
-                    .filter_map(|(node, stored)| {
-                        (positions::resolve_to_pick(&self.graph, stored.anchor) == Some(target.id))
-                            .then(|| (node, stored.clone()))
-                    })
-                    .collect();
-                for (node, mut stored) in shifts {
-                    stored.rank += 1;
-                    self.graph.set_anchor(node, Some(stored));
-                }
+                // A reference above a pick becomes the bottom of the pick's stack.
                 let new_idx = self.graph.add_node(step);
-                let placed = StoredAnchor::place(&self.graph, target.id, 0, &approach);
-                self.graph.set_anchor(new_idx, Some(placed));
+                place_ref(&mut self.graph, new_idx, StackSlot::Bottom(target.id));
                 Ok(self.new_selector(new_idx))
             }
             (InsertSide::Above, Some(stored)) if !inserting_reference => {
@@ -1634,24 +1619,10 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 }
                 Ok(self.new_selector(new_idx))
             }
-            (InsertSide::Above, Some(stored)) => {
+            (InsertSide::Above, Some(_)) => {
                 // A reference above a reference joins its chain one rank up.
-                let shifts: Vec<_> = positions::chain_members(&self.graph, target.id)
-                    .into_iter()
-                    .filter(|(_, m)| m.rank > stored.rank)
-                    .collect();
-                for (node, mut member) in shifts {
-                    member.rank += 1;
-                    self.graph.set_anchor(node, Some(member));
-                }
                 let new_idx = self.graph.add_node(step);
-                self.graph.set_anchor(
-                    new_idx,
-                    Some(StoredAnchor {
-                        rank: stored.rank + 1,
-                        ..stored
-                    }),
-                );
+                place_ref(&mut self.graph, new_idx, StackSlot::Above(target.id));
                 Ok(self.new_selector(new_idx))
             }
             (InsertSide::Below, None) if !inserting_reference => {
@@ -1689,19 +1660,14 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     .map(|e| (e.target(), e.weight().order));
                 let new_idx = self.graph.add_node(step);
                 if let Some((parent_pick, slot)) = first_parent {
-                    let approach = vec![(target.id, slot)];
-                    let rank = self
-                        .graph
-                        .anchored_refs()
-                        .filter(|(node, s)| {
-                            s.anchor == parent_pick
-                                && positions::ref_approach(&self.graph, *node) == approach
-                        })
-                        .map(|(_, s)| s.rank + 1)
-                        .max()
-                        .unwrap_or(0);
-                    let placed = StoredAnchor::place(&self.graph, parent_pick, rank, &approach);
-                    self.graph.set_anchor(new_idx, Some(placed));
+                    place_ref(
+                        &mut self.graph,
+                        new_idx,
+                        StackSlot::LaneTop {
+                            pick: parent_pick,
+                            leg: (target.id, slot),
+                        },
+                    );
                 }
                 Ok(self.new_selector(new_idx))
             }
@@ -1748,19 +1714,11 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 }
                 Ok(self.new_selector(new_idx))
             }
-            (InsertSide::Below, Some(stored)) => {
-                // A reference below a reference takes its rank; it and everything above shift
-                // up.
-                let shifts: Vec<_> = positions::chain_members(&self.graph, target.id)
-                    .into_iter()
-                    .filter(|(_, m)| m.rank >= stored.rank)
-                    .collect();
-                for (node, mut member) in shifts {
-                    member.rank += 1;
-                    self.graph.set_anchor(node, Some(member));
-                }
+            (InsertSide::Below, Some(_)) => {
+                // A reference below a reference takes its position; it and everything above
+                // shift up.
                 let new_idx = self.graph.add_node(step);
-                self.graph.set_anchor(new_idx, Some(stored));
+                place_ref(&mut self.graph, new_idx, StackSlot::Below(target.id));
                 Ok(self.new_selector(new_idx))
             }
         }
@@ -1825,8 +1783,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 // A fresh, anchorless reference gaining its first downward link (the transaction's
                 // `add_step` + `add_edge` branch-creation path): position it at the target as a
                 // root chain — nothing descends into it yet.
-                let placed = StoredAnchor::place(&self.graph, new_anchor, 0, &[]);
-                self.graph.set_anchor(child.id, Some(placed));
+                place_ref(&mut self.graph, child.id, StackSlot::Root(new_anchor));
                 return Ok(());
             };
             // An existing reference re-anchors onto the parent. The legs approaching it (node-era
