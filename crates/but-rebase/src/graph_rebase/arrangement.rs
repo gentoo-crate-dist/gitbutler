@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 
 use crate::graph_rebase::positions::{self, legs_into_pick, ref_position};
-use crate::graph_rebase::step_graph::{ApproachKind, LaneCarry, LaneRec, StoredAnchor};
+use crate::graph_rebase::step_graph::{ApproachKind, LaneCarry, StoredAnchor};
 use crate::graph_rebase::{Direction, Step, StepGraph, StepGraphIndex};
 
 /// A position in a commit's reference stack, named by intent.
@@ -222,8 +222,7 @@ pub(crate) fn move_ref(graph: &mut StepGraph, node: StepGraphIndex, slot: StackS
                     .map(|e| (e.id(), e.weight().clone()))
                     .collect();
                 for (id, weight) in moved {
-                    graph.remove_edge(id);
-                    graph.add_edge(*leg, new_pick, weight);
+                    graph.move_edge(id, new_pick, weight);
                 }
             }
             if !approach.contains(&(*leg, *leg_slot)) {
@@ -273,8 +272,7 @@ pub(crate) fn repoint_ref(graph: &mut StepGraph, node: StepGraphIndex, new_ancho
                     .map(|e| (e.id(), e.weight().clone()))
                     .collect();
                 for (id, weight) in moved {
-                    graph.remove_edge(id);
-                    graph.add_edge(*leg, new_anchor, weight);
+                    graph.move_edge(id, new_anchor, weight);
                 }
             }
             let mates: Vec<_> = positions::chain_members(graph, node)
@@ -705,92 +703,39 @@ fn derive(
     out
 }
 
-/// TEMP (store-swap bridge): the consumption READ of the shadow lane table — every anchored
-/// reference's approach derived purely from (lane order + carry counts + live legs). Merge
-/// entries by resolved pick, order `Count` lanes by their first live leg, let each consume
-/// its count from the pick's sorted legs.
+/// TEMP (store-swap bridge): the DIRECT read of the shadow lane table — every anchored
+/// reference's approach is its lane's own data against the live legs. `Count` lane legs are
+/// live-exact (edge removal strips dead legs in [`StepGraph::remove_edge`]); the read orders
+/// them by the pick's live leg order. A lane leg missing from the live set means a maintenance
+/// gap — measured via LANE-STALE-LEGS, never silent.
 pub(crate) fn lane_approaches(
     graph: &StepGraph,
     notes: &mut Vec<String>,
 ) -> HashMap<StepGraphIndex, Vec<(StepGraphIndex, usize)>> {
-    // Tombstoned anchors share a live pick, so merge stored keys by resolution — and merge
-    // lanes with identical identity across keys: re-keying fragments one conceptual lane
-    // into several table entries (same legs = same approach = same lane).
-    let mut groups: HashMap<Option<StepGraphIndex>, Vec<LaneRec>> = HashMap::new();
+    let mut derived: HashMap<StepGraphIndex, Vec<(StepGraphIndex, usize)>> = HashMap::new();
     for (&key, lanes) in graph.lane_table() {
         let pick = positions::resolve_to_pick(graph, key);
-        let group = groups.entry(pick).or_default();
-        for lane in lanes {
-            match group
-                .iter_mut()
-                .find(|g| g.carry == lane.carry && g.legs == lane.legs)
-            {
-                Some(g) => g.members.extend(lane.members.iter().copied()),
-                None => group.push(lane.clone()),
-            }
-        }
-    }
-    let mut derived: HashMap<StepGraphIndex, Vec<(StepGraphIndex, usize)>> = HashMap::new();
-    for (pick, lanes) in groups {
         let legs = pick.map(|p| legs_into_pick(graph, p)).unwrap_or_default();
-        // Emulate the maintenance the swap will make explicit at edge-mutating ops: legs
-        // that died since write time leave a lane's carry (measured via LANE-STALE-LEGS,
-        // never silent). A `Count` lane's effective carry is re-classified against the live
-        // legs — cover none = the lane lost its carry, cover all = reads as `All`.
-        let mut classified: Vec<(LaneCarry, Vec<(StepGraphIndex, usize)>, &[StepGraphIndex])> =
-            Vec::new();
-        for lane in &lanes {
-            let (carry, effective) = match lane.carry {
-                LaneCarry::None => (LaneCarry::None, Vec::new()),
-                LaneCarry::All => (LaneCarry::All, Vec::new()),
+        for lane in lanes {
+            let approach = match lane.carry {
+                LaneCarry::None => Vec::new(),
+                LaneCarry::All => legs.clone(),
                 LaneCarry::Count(_) => {
-                    let effective: Vec<_> = legs
+                    let live: Vec<_> = legs
                         .iter()
                         .filter(|l| lane.legs.contains(l))
                         .copied()
                         .collect();
-                    if effective.len() != lane.legs.len() {
+                    if live.len() != lane.legs.len() {
                         notes.push(format!(
-                            "LANE-STALE-LEGS pick {pick:?} stored={:?} live={effective:?}",
+                            "LANE-STALE-LEGS pick {pick:?} stored={:?} live={live:?}",
                             lane.legs
                         ));
                     }
-                    if effective.is_empty() {
-                        (LaneCarry::None, Vec::new())
-                    } else if effective.len() == legs.len() {
-                        (LaneCarry::All, Vec::new())
-                    } else {
-                        (LaneCarry::Count(effective.len()), effective)
-                    }
+                    live
                 }
             };
-            classified.push((carry, effective, &lane.members));
-        }
-        // Consumption order: `Count` lanes by their first live leg; `All`/`None` don't consume.
-        classified.sort_by_key(|(carry, effective, _)| match carry {
-            LaneCarry::Count(_) => (
-                0,
-                legs.iter().position(|l| Some(l) == effective.first()),
-                effective.clone(),
-            ),
-            LaneCarry::All => (1, None, Vec::new()),
-            LaneCarry::None => (2, None, Vec::new()),
-        });
-        let mut consumed = 0usize;
-        for (carry, _, members) in classified {
-            let approach = match carry {
-                LaneCarry::None => Vec::new(),
-                LaneCarry::All => legs.clone(),
-                LaneCarry::Count(n) => {
-                    let run = legs
-                        .get(consumed..consumed + n)
-                        .map(<[_]>::to_vec)
-                        .unwrap_or_default();
-                    consumed += n;
-                    run
-                }
-            };
-            for &member in members {
+            for &member in &lane.members {
                 derived.insert(member, approach.clone());
             }
         }

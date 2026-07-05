@@ -1050,7 +1050,6 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                             .map(|e| (e.id(), e.source(), e.weight().clone()))
                             .collect();
                         for (edge_id, source, weight) in legs {
-                            self.graph.remove_edge(edge_id);
                             let new_weight =
                                 if let Some((_, child_weight, _)) = highest_order_child.as_ref() {
                                     Edge {
@@ -1060,7 +1059,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                                     weight.clone()
                                 };
                             let new_order = new_weight.order;
-                            self.graph.add_edge(source, child_pick, new_weight);
+                            self.graph.move_edge(edge_id, child_pick, new_weight);
                             if new_order != weight.order {
                                 positions::rewrite_approach_leg(
                                     &mut self.graph,
@@ -1098,7 +1097,6 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
 
                     // Connect all target's children with the child-most node in the given segment.
                     for (edge_id, edge_weight, edge_source) in edges {
-                        self.graph.remove_edge(edge_id);
                         // Avoid weight collision by adding the order value of the highest order child plus one,
                         // accommodating for order 0.
                         let new_weight =
@@ -1110,7 +1108,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                                 edge_weight.clone()
                             };
                         let new_order = new_weight.order;
-                        self.graph.add_edge(edge_source, child.id, new_weight);
+                        self.graph.move_edge(edge_id, child.id, new_weight);
                         if new_order != edge_weight.order {
                             positions::rewrite_approach_leg(
                                 &mut self.graph,
@@ -1329,9 +1327,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 let new_idx = self.graph.add_node(step);
                 self.graph.add_edge(new_idx, target.id, Edge { order: 0 });
 
-                for (edge_id, edge_weight, edge_source) in edges {
-                    self.graph.remove_edge(edge_id);
-                    self.graph.add_edge(edge_source, new_idx, edge_weight);
+                for (edge_id, edge_weight, _edge_source) in edges {
+                    self.graph.move_edge(edge_id, new_idx, edge_weight);
                 }
                 positions::reanchor_refs_at(&mut self.graph, target.id, new_idx, false);
 
@@ -1368,9 +1365,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                         })
                         .map(|e| (e.id(), e.source(), e.weight().clone()))
                         .collect();
-                    for (edge_id, source, weight) in legs {
-                        self.graph.remove_edge(edge_id);
-                        self.graph.add_edge(source, new_idx, weight);
+                    for (edge_id, _source, weight) in legs {
+                        self.graph.move_edge(edge_id, new_idx, weight);
                     }
                 }
                 Ok(self.new_selector(new_idx))
@@ -1449,9 +1445,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     })
                     .map(|e| (e.id(), e.source(), e.weight().clone()))
                     .collect();
-                for (edge_id, source, weight) in legs {
-                    self.graph.remove_edge(edge_id);
-                    self.graph.add_edge(source, new_idx, weight);
+                for (edge_id, _source, weight) in legs {
+                    self.graph.move_edge(edge_id, new_idx, weight);
                 }
                 Ok(self.new_selector(new_idx))
             }

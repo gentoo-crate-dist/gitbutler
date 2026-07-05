@@ -266,12 +266,48 @@ impl StepGraph {
     }
 
     /// Add an edge from `source` to `target` and return its stable id.
+    ///
+    /// A new edge can REVIVE a leg: ops like disconnect/reconnect drop a leg and later
+    /// re-create it at the same `(source, order)`, relying on the kind read to pick it back
+    /// up. The lane bridge mirrors that: any anchored reference whose authored kind names the
+    /// leg reclaims it into its lane. (Each such consult marks a site the store swap turns
+    /// into an explicit "this edge enters lane L" op statement.)
     pub(crate) fn add_edge(
         &mut self,
         source: StepGraphIndex,
         target: StepGraphIndex,
         weight: Edge,
     ) -> StepEdgeIndex {
+        let leg = (source, weight.order);
+        let claimants: Vec<(StepGraphIndex, StepGraphIndex)> = self
+            .anchors
+            .iter()
+            .enumerate()
+            .filter_map(|(node, stored)| {
+                let stored = stored.as_ref()?;
+                let ApproachKind::Lane(legs) = &stored.kind else {
+                    return None;
+                };
+                (legs.contains(&leg)
+                    && crate::graph_rebase::positions::resolve_to_pick(self, stored.anchor)
+                        == Some(target))
+                .then_some((node, stored.anchor))
+            })
+            .collect();
+        for (node, key) in claimants {
+            let Some(lanes) = self.lanes.get_mut(&key) else {
+                continue;
+            };
+            for lane in lanes.iter_mut() {
+                if let LaneCarry::Count(_) = lane.carry
+                    && lane.members.contains(&node)
+                    && !lane.legs.contains(&leg)
+                {
+                    lane.legs.push(leg);
+                    lane.carry = LaneCarry::Count(lane.legs.len());
+                }
+            }
+        }
         let id = self.edges.len();
         self.edges.push(Some(EdgeRecord {
             source,
@@ -283,12 +319,63 @@ impl StepGraph {
         id
     }
 
-    /// Remove the edge with `id`, returning its payload if it was still present.
+    /// Remove the edge with `id`, returning its payload if it was still present. The dead leg
+    /// leaves every lane that carried it — the store-side maintenance that keeps lane legs
+    /// live-exact through edge surgery (a leg's `(source, order)` is unique among the source's
+    /// outgoing edges, so a global sweep can only hit the right lane or a stale twin).
     pub(crate) fn remove_edge(&mut self, id: StepEdgeIndex) -> Option<Edge> {
         let record = self.edges.get_mut(id)?.take()?;
         self.outgoing[record.source].retain(|&e| e != id);
         self.incoming[record.target].retain(|&e| e != id);
+        let leg = (record.source, record.weight.order);
+        for lanes in self.lanes.values_mut() {
+            for lane in lanes.iter_mut() {
+                if let LaneCarry::Count(_) = lane.carry
+                    && let Some(at) = lane.legs.iter().position(|&l| l == leg)
+                {
+                    lane.legs.remove(at);
+                    lane.carry = LaneCarry::Count(lane.legs.len());
+                }
+            }
+        }
         Some(record.weight)
+    }
+
+    /// Re-target the edge with `id` (same source) — one leg MOVING, not dying and being
+    /// reborn: the leg keeps its lane ownership, which a remove+add pair would strip. An
+    /// order change renames the leg inside every lane that carries it.
+    pub(crate) fn move_edge(
+        &mut self,
+        id: StepEdgeIndex,
+        new_target: StepGraphIndex,
+        new_weight: Edge,
+    ) {
+        let Some(record) = self.edges.get_mut(id).and_then(Option::as_mut) else {
+            return;
+        };
+        let source = record.source;
+        let old_target = record.target;
+        let old_order = record.weight.order;
+        record.target = new_target;
+        record.weight = new_weight.clone();
+        // Reposition in both adjacency lists exactly like a remove+add pair would (readers
+        // iterate newest-first), so only the lane bookkeeping differs from the old pattern.
+        self.outgoing[source].retain(|&e| e != id);
+        self.outgoing[source].push(id);
+        self.incoming[old_target].retain(|&e| e != id);
+        self.incoming[new_target].push(id);
+        if old_order != new_weight.order {
+            let (old_leg, new_leg) = ((source, old_order), (source, new_weight.order));
+            for lanes in self.lanes.values_mut() {
+                for lane in lanes.iter_mut() {
+                    for leg in lane.legs.iter_mut() {
+                        if *leg == old_leg {
+                            *leg = new_leg;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// All node ids, ascending.
