@@ -681,7 +681,8 @@ fn divide_workspace_into_stacks(
     // edge resolves through reference/tombstone steps to the pick beneath.
     let mut initial_stacks = graph
         .parents(workspace_commit_ix)
-        .into_iter()
+        .iter()
+        .copied()
         .map(|head| {
             let mut nodes = std::collections::HashSet::new();
             let mut tips = Vec::new();
@@ -692,7 +693,7 @@ fn divide_workspace_into_stacks(
                 tips.push(pick);
             }
             while let Some(tip) = tips.pop() {
-                for parent in graph.parents(tip) {
+                for &parent in graph.parents(tip) {
                     let Some(pick) = positions::resolve_to_pick(graph, parent) else {
                         continue;
                     };

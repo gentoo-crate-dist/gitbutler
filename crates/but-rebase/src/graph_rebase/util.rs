@@ -64,7 +64,7 @@ fn ordered_commit_parents(graph: &StepGraph, target: StepGraphIndex) -> Vec<Step
             continue;
         };
 
-        for parent in graph.parents(node).into_iter().rev() {
+        for &parent in graph.parents(node).iter().rev() {
             if seen.insert(parent) {
                 potential.push((parent, false));
             }
@@ -81,7 +81,7 @@ mod test {
 
         use anyhow::Result;
 
-        use crate::graph_rebase::{Edge, Step, StepGraph, util::collect_ordered_parents};
+        use crate::graph_rebase::{Step, StepGraph, util::collect_ordered_parents};
 
         #[test]
         fn basic_scenario() -> Result<()> {
@@ -104,51 +104,16 @@ mod test {
             let f = graph.add_node(Step::new_pick(f_id));
 
             // A's parents
-            graph.add_edge(a, b, Edge { order: 0 });
-            graph.add_edge(a, c, Edge { order: 1 });
-            graph.add_edge(a, f, Edge { order: 2 });
+            graph.push_parent(a, b);
+            graph.push_parent(a, c);
+            graph.push_parent(a, f);
 
             // C's parents
-            graph.add_edge(c, d, Edge { order: 0 });
-            graph.add_edge(c, e, Edge { order: 1 });
+            graph.push_parent(c, d);
+            graph.push_parent(c, e);
 
             let parents = collect_ordered_parents(&graph, a);
             assert_eq!(&parents, &[b, d, e, f]);
-
-            Ok(())
-        }
-
-        #[test]
-        fn insertion_order_is_irrelevant() -> Result<()> {
-            let mut graph = StepGraph::new();
-            let a_id = gix::ObjectId::from_str("1000000000000000000000000000000000000000")?;
-            let a = graph.add_node(Step::new_pick(a_id));
-            // First parent
-            let b_id = gix::ObjectId::from_str("1000000000000000000000000000000000000000")?;
-            let b = graph.add_node(Step::new_pick(b_id));
-            // Second parent - is a reference
-            let c = graph.add_reference("refs/heads/foobar".try_into()?, true);
-            // Second parent's second child
-            let d_id = gix::ObjectId::from_str("3000000000000000000000000000000000000000")?;
-            let d = graph.add_node(Step::new_pick(d_id));
-            // Second parent's first child
-            let e_id = gix::ObjectId::from_str("4000000000000000000000000000000000000000")?;
-            let e = graph.add_node(Step::new_pick(e_id));
-            // Third parent
-            let f_id = gix::ObjectId::from_str("5000000000000000000000000000000000000000")?;
-            let f = graph.add_node(Step::new_pick(f_id));
-
-            // A's parents
-            graph.add_edge(a, f, Edge { order: 2 });
-            graph.add_edge(a, c, Edge { order: 1 });
-            graph.add_edge(a, b, Edge { order: 0 });
-
-            // C's parents
-            graph.add_edge(c, d, Edge { order: 1 });
-            graph.add_edge(c, e, Edge { order: 0 });
-
-            let parents = collect_ordered_parents(&graph, a);
-            assert_eq!(&parents, &[b, e, d, f]);
 
             Ok(())
         }

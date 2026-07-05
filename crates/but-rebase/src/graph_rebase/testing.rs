@@ -18,8 +18,6 @@ use anyhow::Result;
 use but_core::RefMetadata;
 use renderdag::{Ancestor, GraphRowRenderer, Renderer as _};
 
-#[cfg(test)]
-use crate::graph_rebase::Edge;
 use crate::graph_rebase::{
     Editor, Pick, Selector, Step, StepGraph, StepGraphIndex, SuccessfulRebase, positions,
     workspace::Subgraph,
@@ -74,7 +72,7 @@ impl TestingDot for StepGraph {
             out.push_str(&format!("    {idx} [ label=\"{label}\"]\n"));
         }
         for idx in self.node_indices() {
-            for (order, parent) in self.parent_orders(idx) {
+            for (order, parent) in self.parents(idx).iter().enumerate() {
                 out.push_str(&format!(
                     "    {idx} -> {parent} [ label=\"order: {order}\"]\n"
                 ));
@@ -198,13 +196,11 @@ fn get_sorted_parents(graph: &StepGraph, node: StepGraphIndex) -> Vec<StepGraphI
             .unwrap_or(stored.anchor);
         return vec![below];
     }
-    let mut parents: Vec<_> = graph
-        .edges(node)
-        .map(|e| (e.weight().order, e.target()))
-        .collect();
-    parents.sort_by_key(|(order, _)| *order);
-    parents
-        .into_iter()
+    graph
+        .parents(node)
+        .iter()
+        .copied()
+        .enumerate()
         .map(|(order, target)| {
             chains
                 .iter()
@@ -470,9 +466,11 @@ mod tests {
         )
     }
 
-    /// Helper to build a graph and add edges with order
+    /// Helper to append a parent slot; the stated order documents the intended slot and is
+    /// asserted against the push (arrays make insertion order the structure).
     fn add_edge(graph: &mut StepGraph, from: StepGraphIndex, to: StepGraphIndex, order: usize) {
-        graph.add_edge(from, to, Edge { order });
+        let slot = graph.push_parent(from, to);
+        assert_eq!(slot, order, "test builder must push parents in slot order");
     }
 
     #[test]

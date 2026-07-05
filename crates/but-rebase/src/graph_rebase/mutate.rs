@@ -1,20 +1,67 @@
 //! Operations for mutating the editor
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::graph_rebase::arrangement::{
     SplitBoundary, StackSlot, carry_stack_above, land_stack_above, move_ref, place_ref,
     readopt_dangling_refs, repoint_ref, settle_chain_lower, splice_out, split_chain,
     transfer_stack, unhook_ref,
 };
-use crate::graph_rebase::{Direction, StepGraph, StepGraphIndex, positions};
+use crate::graph_rebase::{StepGraph, StepGraphIndex, positions};
 use anyhow::{Context as _, Result, anyhow, bail};
 use but_core::RefMetadata;
 use serde::{Deserialize, Serialize};
 
 use crate::graph_rebase::{
-    Edge, Editor, Pick, Selector, Step, ToCommitSelector, ToReferenceSelector, ToSelector,
+    Editor, Pick, Selector, Step, ToCommitSelector, ToReferenceSelector, ToSelector,
 };
+
+/// Parent-slot names captured at one instant (a frame), resolved against a store that has
+/// since shifted. `current` maps a frame name to today's slot; removals and inserts are noted
+/// so later lookups stay aligned. `None` means the named leg itself was already removed.
+#[derive(Default)]
+struct SlotLedger {
+    map: HashMap<StepGraphIndex, Vec<Option<usize>>>,
+}
+
+impl SlotLedger {
+    /// Today's slot of the leg captured as `(source, frame_slot)`, or `None` if it was
+    /// removed. The identity map is built lazily, so a source must be looked up before any
+    /// of its slots mutate.
+    fn current(
+        &mut self,
+        graph: &StepGraph,
+        source: StepGraphIndex,
+        frame_slot: usize,
+    ) -> Option<usize> {
+        self.map
+            .entry(source)
+            .or_insert_with(|| (0..graph.parent_count(source)).map(Some).collect())
+            .get(frame_slot)
+            .copied()
+            .flatten()
+    }
+
+    fn note_remove(&mut self, source: StepGraphIndex, removed: usize) {
+        let entries = self.map.get_mut(&source).expect("looked up before noting");
+        for entry in entries.iter_mut() {
+            match entry {
+                Some(slot) if *slot == removed => *entry = None,
+                Some(slot) if *slot > removed => *slot -= 1,
+                _ => {}
+            }
+        }
+    }
+
+    fn note_insert(&mut self, source: StepGraphIndex, inserted: usize) {
+        let entries = self.map.get_mut(&source).expect("looked up before noting");
+        for slot in entries.iter_mut().flatten() {
+            if *slot >= inserted {
+                *slot += 1;
+            }
+        }
+    }
+}
 
 /// Route a step command to its namespace: references into the ref table, everything else
 /// into the node arena.
@@ -325,7 +372,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         Ok(self
             .graph
             .parents(target.id)
-            .into_iter()
+            .iter()
+            .copied()
             .enumerate()
             .map(|(slot, parent)| (self.new_selector(parent), slot))
             .collect())
@@ -349,7 +397,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         Ok(self
             .graph
             .parents(target.id)
-            .into_iter()
+            .iter()
+            .copied()
             .enumerate()
             .map(|(slot, pick)| {
                 let carried_top = self
@@ -573,33 +622,35 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             ),
         };
 
-        // Edges to children.
-        let incoming_edges = self
+        // Legs from children, as frame-coordinate (child, slot) names.
+        let incoming_legs = self
             .graph
-            .edges_directed(target_child.id, Direction::Incoming)
-            .map(|e| (e.id(), e.weight().to_owned(), e.source()))
-            .filter(|(_, weight, source)| {
+            .incoming_legs(target_child.id)
+            .into_iter()
+            .filter(|leg| {
                 child_ref_approach
                     .as_ref()
-                    .is_none_or(|approach| approach.contains(&(*source, weight.order)))
+                    .is_none_or(|approach| approach.contains(leg))
             })
             .collect::<Vec<_>>();
 
-        // Edges to parents.
-        let outgoing_edges = self
+        // Legs to parents, as frame-coordinate (slot, parent) entries.
+        let outgoing_legs = self
             .graph
-            .edges_directed(target_parent.id, Direction::Outgoing)
-            .map(|e| (e.id(), e.weight().to_owned(), e.target()))
+            .parents(target_parent.id)
+            .iter()
+            .copied()
+            .enumerate()
             .collect::<Vec<_>>();
 
         // All available parents
-        let available_parents = outgoing_edges
+        let available_parents = outgoing_legs
             .iter()
-            .map(|(_, _, edge_target)| *edge_target)
+            .map(|(_, edge_target)| *edge_target)
             .collect::<HashSet<_>>();
-        let available_children = incoming_edges
+        let available_children = incoming_legs
             .iter()
-            .map(|(_, _, edge_source)| *edge_source)
+            .map(|(edge_source, _)| *edge_source)
             .collect::<HashSet<_>>();
 
         // Requested selectors that are references stand for the links their positions
@@ -666,28 +717,27 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             .as_ref()
             .map(|children| children.iter().map(|s| s.id).collect::<HashSet<_>>());
 
-        let mut disconnected_parent_edges = Vec::new();
+        // One ledger spans both loops: the overlap case (the segment's parent-most sitting
+        // directly above the child-most's anchor) captures the same leg in both frames.
+        let mut ledger = SlotLedger::default();
+        let mut disconnected_parent_edges: Vec<(usize, StepGraphIndex)> = Vec::new();
         let mut carried_parent_tops: Vec<StepGraphIndex> = Vec::new();
         // 2. Disconnect parents. Chains the removed legs carried lose them from their approach legs.
-        for (edge_id, _, edge_target) in outgoing_edges {
+        for (frame_slot, edge_target) in outgoing_legs {
             let should_disconnect = parent_ids_to_disconnect
                 .as_ref()
                 .is_none_or(|ids| ids.contains(&edge_target));
             if should_disconnect {
-                // Earlier removals shift this edge down; re-derive its current slot so the
-                // carried-chain check and the removal name the leg as the store does now.
-                // Shifts preserve relative order, so the slots recorded here sort the
-                // disconnected parents exactly as their original stored orders did.
-                self.graph.normalize_parent_slots(target_parent.id);
-                let slot = self
-                    .graph
-                    .edges_directed(target_parent.id, Direction::Outgoing)
-                    .find(|e| e.id() == edge_id)
-                    .map(|e| e.weight().order)
-                    .context("BUG: disconnected parent edge vanished")?;
+                // Earlier removals shift this leg down; the ledger resolves the captured name
+                // to the slot the store uses now. Shifts preserve relative order, so the slots
+                // recorded here sort the disconnected parents exactly as their captured orders
+                // did.
+                let slot = ledger
+                    .current(&self.graph, target_parent.id, frame_slot)
+                    .context("BUG: disconnected parent leg vanished")?;
                 let removed = (target_parent.id, slot);
-                // Chains this edge carried — captured BEFORE the edge is removed, since the
-                // derived approach reflects the live edges. Removing the edge then drops the leg from
+                // Chains this leg carried — captured BEFORE it is removed, since the derived
+                // approach reflects the live parent arrays. Removing it then drops the leg from
                 // every derived approach automatically (no approach bookkeeping needed).
                 let carried: Vec<_> = self
                     .graph
@@ -696,7 +746,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                         positions::ref_approach(&self.graph, *node).contains(&removed)
                     })
                     .collect();
-                // The node-era parent this edge pointed at was the top of the chain it
+                // The node-era parent this leg pointed at was the top of the chain it
                 // carried — remember it so disconnected child refs can stack above it.
                 if let Some(top) = carried
                     .iter()
@@ -709,35 +759,29 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     carried_parent_tops.push(top);
                 }
                 self.graph.remove_parent(target_parent.id, slot);
-                disconnected_parent_edges.push((Edge { order: slot }, edge_target));
+                ledger.note_remove(target_parent.id, slot);
+                disconnected_parent_edges.push((slot, edge_target));
             }
         }
 
         // 3. Disconnect children and reconnect to the disconnected parents.
         let full_child_disconnect = child_ids_to_disconnect.is_none();
         let mut sorted_disconnected = disconnected_parent_edges.clone();
-        sorted_disconnected.sort_by_key(|(weight, _)| weight.order);
+        sorted_disconnected.sort_by_key(|(slot, _)| *slot);
         // The node era resolved a rewired reference through its first (lowest-slot) parent.
         let chain_anchor = sorted_disconnected.first().map(|(_, target)| *target);
-        for (edge_id, _, edge_source) in incoming_edges {
+        for (edge_source, frame_slot) in incoming_legs {
             let should_disconnect = child_ids_to_disconnect
                 .as_ref()
                 .is_none_or(|ids| ids.contains(&edge_source));
             if !should_disconnect {
                 continue;
             }
-            // Earlier removals on the same child shift this edge down; re-derive its
-            // current slot so the carrying check and the removal name the leg as the
-            // store does now.
-            self.graph.normalize_parent_slots(edge_source);
-            let Some(slot) = self
-                .graph
-                .edges_directed(edge_source, Direction::Outgoing)
-                .find(|e| e.id() == edge_id)
-                .map(|e| e.weight().order)
-            else {
+            // Earlier removals on the same child shift this leg down; the ledger resolves the
+            // captured name to the slot the store uses now.
+            let Some(slot) = ledger.current(&self.graph, edge_source, frame_slot) else {
                 // The parent loop already removed this leg: the delimiters can name
-                // overlapping edges when the segment's parent-most sits directly above
+                // overlapping legs when the segment's parent-most sits directly above
                 // the child-most's anchor. Only the reconnect still applies.
                 if !skip_reconnect_step {
                     self.reconnect_edges_to_parents(&disconnected_parent_edges, edge_source);
@@ -764,12 +808,14 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 for (offset, target) in targets.enumerate() {
                     self.graph
                         .insert_parent(edge_source, slot + 1 + offset, target);
+                    ledger.note_insert(edge_source, slot + 1 + offset);
                 }
                 continue;
             }
-            // Remove the child edge. The chains this leg carried lose it from their derived approach
-            // automatically — the edge is gone.
+            // Remove the child leg. The chains it carried lose it from their derived approach
+            // automatically — the leg is gone.
             self.graph.remove_parent(edge_source, slot);
+            ledger.note_remove(edge_source, slot);
             if skip_reconnect_step {
                 continue;
             }
@@ -834,13 +880,13 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     /// Remove the child edge, and reconnect to the right parents.
     fn reconnect_edges_to_parents(
         &mut self,
-        disconnected_parent_edges: &[(Edge, StepGraphIndex)],
+        disconnected_parent_edges: &[(usize, StepGraphIndex)],
         child_node: StepGraphIndex,
     ) {
         // Reconnect the child node to all the disconnected parents, appended after
         // `child_node`'s existing parents in their original relative order.
         let mut disconnected_parent_edges = disconnected_parent_edges.iter().collect::<Vec<_>>();
-        disconnected_parent_edges.sort_by_key(|(weight, _)| weight.order);
+        disconnected_parent_edges.sort_by_key(|(slot, _)| *slot);
         for (_, edge_target) in disconnected_parent_edges {
             self.graph.push_parent(child_node, *edge_target);
         }
@@ -1063,20 +1109,11 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                             .context("Reference target should resolve to a commit")?,
                     ]
                 } else {
-                    let mut edges = self
-                        .graph
-                        .edges_directed(target.id, Direction::Outgoing)
-                        .map(|e| (e.id(), e.weight().order, e.target()))
-                        .collect::<Vec<_>>();
-                    edges.sort_by_key(|(_, order, _)| *order);
-
-                    let mut nodes = Vec::with_capacity(edges.len());
-                    for (edge_id, order, edge_target) in edges {
-                        self.graph.remove_edge(edge_id);
-                        moved_leg_orders.push(order);
-                        nodes.push(edge_target);
-                    }
-                    nodes
+                    // Statements stay named (target, slot) until the rename below moves them
+                    // onto the segment's parent-most.
+                    let drained = self.graph.drain_parents(target.id);
+                    moved_leg_orders = (0..drained.len()).collect();
+                    drained
                 };
 
                 // A reference target re-anchors onto the child-most, dragging its approaching
@@ -1084,9 +1121,9 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 // edge: if the segment's fresh parent leg already existed (an `AllLegs` ref sees
                 // every leg into its anchor), that leg would be dragged too and self-loop the
                 // segment. A plain target connects AFTER instead: its orphaned leg statements
-                // must first be renamed onto the segment's parent-most below — the connect's
-                // slot normalization would purge them. `parents_to_add` is captured up front,
-                // so it still names the pre-re-anchor target position.
+                // must first be renamed onto the segment's parent-most below — the fresh leg
+                // at slot 0 would otherwise take their names. `parents_to_add` is captured up
+                // front, so it still names the pre-re-anchor target position.
                 let target_is_ref = self.graph.position_of(target.id).is_some();
                 if target_is_ref {
                     // A reference child-most stands for its anchor, with the leg entering its chain.
@@ -1356,7 +1393,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             let mut tips = vec![parent];
 
             while let Some(tip) = tips.pop() {
-                for parent in self.graph.parents(tip) {
+                for &parent in self.graph.parents(tip) {
                     if seen.insert(parent) {
                         tips.push(parent);
                     }
@@ -1388,8 +1425,6 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 == positions::resolve_to_pick(&self.graph, parent.id);
             return Ok(if resolves_to_parent { vec![0] } else { vec![] });
         }
-        // Align slot names with statements before reading which slots match.
-        self.graph.normalize_parent_slots(child.id);
         let slots = match self.graph.position_of(parent.id) {
             // Disconnecting from a reference removes the legs carrying its chain — the
             // node-era edge into the reference node.
@@ -1399,7 +1434,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 let parent_approach = positions::ref_approach(&self.graph, parent.id);
                 self.graph
                     .parents(child.id)
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .enumerate()
                     .filter_map(|(slot, target)| {
                         (target == target_pick && parent_approach.contains(&(child.id, slot)))
@@ -1412,7 +1448,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             None => self
                 .graph
                 .parents(child.id)
-                .into_iter()
+                .iter()
+                .copied()
                 .enumerate()
                 .filter_map(|(slot, target)| (target == parent.id).then_some(slot))
                 .collect::<Vec<_>>(),

@@ -1,12 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::graph_rebase::Direction;
 use anyhow::{Result, bail};
 use but_core::{RefMetadata, commit::SignCommit};
 use but_graph::{Commit, SegmentIndex};
 
 use crate::graph_rebase::{
-    Checkout, Edge, Editor, Pick, RevisionHistory, Selector, Step, StepGraph, StepGraphIndex,
+    Checkout, Editor, Pick, RevisionHistory, Selector, Step, StepGraph, StepGraphIndex,
     SuccessfulRebase, util,
 };
 
@@ -145,7 +144,7 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                     }
                     let ix = graph.add_reference(reference.clone(), mutable);
                     if let Some(previous_ix) = nodes.last() {
-                        graph.add_edge(*previous_ix, ix, Edge { order: 0 });
+                        graph.push_parent(*previous_ix, ix);
                     }
                     nodes.push(ix);
                 }
@@ -161,7 +160,7 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                 let ix = graph.add_node(Step::Pick(pick));
                 commit_to_pick_ix.insert(commit.id, ix);
                 if let Some(previous_ix) = nodes.last() {
-                    graph.add_edge(*previous_ix, ix, Edge { order: 0 });
+                    graph.push_parent(*previous_ix, ix);
                 }
                 nodes.push(ix);
             }
@@ -210,9 +209,9 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
 
             // but-graph yields outgoing edges in parent order, so iterate as-is. The keys below
             // rank real parents by their index in the source commit's parent array and commit-less
-            // empty branches after them (distinct, increasing) — a ranking, not final orders: the
+            // empty branches after them (distinct, increasing) — a ranking, not final slots: the
             // ranks can have gaps (an empty branch may stand in front of a real parent, or ALL legs
-            // may be commit-less refs over one base), so the sorted ranks compact to dense slots.
+            // may be commit-less refs over one base), so the sorted ranks compact by push order.
             let edges = workspace
                 .graph
                 .edges_directed(*sidx, but_graph::Direction::Outgoing);
@@ -246,8 +245,8 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                 ranked_targets.push((rank, *target));
             }
             ranked_targets.sort_by_key(|(rank, _)| *rank);
-            for (order, (_, target)) in ranked_targets.into_iter().enumerate() {
-                graph.add_edge(*source, target, Edge { order });
+            for (_, target) in ranked_targets {
+                graph.push_parent(*source, target);
             }
         }
 
@@ -296,15 +295,8 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                     .collect::<Vec<_>>(),
             );
 
-            let outgoing_edge_ids: Vec<_> = graph
-                .edges_directed(pick_ix, Direction::Outgoing)
-                .map(|e| e.id())
-                .collect();
-            for edge_id in outgoing_edge_ids {
-                graph.remove_edge(edge_id);
-            }
-
-            'inner: for (order, parent_id) in c.parent_ids.iter().enumerate() {
+            let mut fixed_parents = Vec::with_capacity(c.parent_ids.len());
+            'inner: for parent_id in &c.parent_ids {
                 let Some(&target_ix) = commit_to_pick_ix.get(parent_id) else {
                     tracing::warn!(
                         "Dropping parent edge for commit {} (parent fix): parent {parent_id} not found in pick map",
@@ -312,9 +304,9 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                     );
                     continue 'inner;
                 };
-
-                graph.add_edge(pick_ix, target_ix, Edge { order });
+                fixed_parents.push(target_ix);
             }
+            graph.set_parents(pick_ix, fixed_parents);
         }
 
         crate::graph_rebase::positions::initialize_positions_and_strip_ref_edges(&mut graph);
