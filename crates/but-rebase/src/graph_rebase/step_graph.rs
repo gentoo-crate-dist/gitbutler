@@ -4,6 +4,8 @@
 //! call sites were written against: `edges_directed` yields newest-first, `node_indices` and
 //! `edge_references` ascend.
 
+use std::collections::HashMap;
+
 use crate::graph_rebase::{Edge, Step};
 
 /// The stable identifier of a step node. Only ever grows; tombstoning is done at the
@@ -126,6 +128,33 @@ impl StoredAnchor {
     }
 }
 
+/// How much of its anchor's incoming legs a lane carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LaneCarry {
+    /// Nothing descends into this lane (a root chain: remote above a tip, empty top).
+    None,
+    /// Every leg into the anchor descends through this lane (a plain chain, or a shared
+    /// chain all merge lanes converge on).
+    All,
+    /// This lane carries exactly `n` legs — one lane of a merge. Which legs is derived by
+    /// consuming the anchor's sorted legs in lane order.
+    Count(usize),
+}
+
+/// TEMP (store-swap bridge): one lane of the shadow table — the references sharing an
+/// approach above one stored anchor. Membership only: order among members stays rank's job.
+#[derive(Debug, Clone)]
+pub(crate) struct LaneRec {
+    /// The reference nodes in this lane, unordered (sort by stored rank to read).
+    pub members: Vec<StepGraphIndex>,
+    /// How much of the anchor's legs this lane carries.
+    pub carry: LaneCarry,
+    /// Bridge-era lane identity: the legs the authored [`ApproachKind::Lane`] carried at
+    /// write time. Finds the lane again on later writes and orders lanes at read time; dies
+    /// with the bridge (the end-state persists lane order instead).
+    pub legs: Vec<(StepGraphIndex, usize)>,
+}
+
 /// The rebase step graph: an arena of [`Step`]s where PICKS carry ordered parent edges and
 /// REFERENCES carry explicit positions — edges are the truth for commits, anchors the truth
 /// for refs, with no overlap. A reference is never part of the edge graph, so it cannot bear
@@ -138,6 +167,10 @@ pub(crate) struct StepGraph {
     incoming: Vec<Vec<StepEdgeIndex>>,
     /// `Some` exactly for reference nodes; carries the ref's anchor, rank, kind, and ambiguity.
     anchors: Vec<Option<StoredAnchor>>,
+    /// TEMP (store-swap bridge): lane membership shadowing `anchors`, keyed by the STORED
+    /// (unresolved) anchor value. Maintained in [`Self::set_anchor`], read only by the
+    /// `arrangement` census to prove approach is consumption-derivable before the store swaps.
+    lanes: HashMap<StepGraphIndex, Vec<LaneRec>>,
 }
 
 impl StepGraph {
@@ -164,7 +197,55 @@ impl StepGraph {
     /// by the caller (via [`StoredAnchor::place`] for a fresh position, or preserved on an existing
     /// anchor being re-anchored), so this just stores it.
     pub(crate) fn set_anchor(&mut self, node: StepGraphIndex, anchor: Option<StoredAnchor>) {
+        if let Some(previous) = &self.anchors[node] {
+            let key = previous.anchor;
+            self.lane_remove(node, key);
+        }
+        if let Some(stored) = &anchor {
+            self.lane_insert(node, stored.anchor, &stored.kind);
+        }
         self.anchors[node] = anchor;
+    }
+
+    fn lane_remove(&mut self, node: StepGraphIndex, key: StepGraphIndex) {
+        let Some(lanes) = self.lanes.get_mut(&key) else {
+            return;
+        };
+        for lane in lanes.iter_mut() {
+            lane.members.retain(|&member| member != node);
+        }
+        lanes.retain(|lane| !lane.members.is_empty());
+        if lanes.is_empty() {
+            self.lanes.remove(&key);
+        }
+    }
+
+    fn lane_insert(&mut self, node: StepGraphIndex, key: StepGraphIndex, kind: &ApproachKind) {
+        let (carry, legs) = match kind {
+            ApproachKind::Root => (LaneCarry::None, Vec::new()),
+            ApproachKind::AllLegs => (LaneCarry::All, Vec::new()),
+            ApproachKind::Lane(legs) => (LaneCarry::Count(legs.len()), legs.clone()),
+        };
+        let lanes = self.lanes.entry(key).or_default();
+        let existing = lanes.iter_mut().find(|lane| match carry {
+            // `Count` lanes are identified by their bridge legs (same legs => same count).
+            LaneCarry::Count(_) => matches!(lane.carry, LaneCarry::Count(_)) && lane.legs == legs,
+            // One `None` and one `All` lane per key.
+            _ => lane.carry == carry,
+        });
+        match existing {
+            Some(lane) => lane.members.push(node),
+            None => lanes.push(LaneRec {
+                members: vec![node],
+                carry,
+                legs,
+            }),
+        }
+    }
+
+    /// TEMP (store-swap bridge): the shadow lane table, for the census derivation.
+    pub(crate) fn lane_table(&self) -> &HashMap<StepGraphIndex, Vec<LaneRec>> {
+        &self.lanes
     }
 
     /// The [`ApproachKind`] of the reference at `node`, if it is a positioned reference.

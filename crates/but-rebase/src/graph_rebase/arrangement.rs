@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 
 use crate::graph_rebase::positions::{self, legs_into_pick, ref_position};
-use crate::graph_rebase::step_graph::{ApproachKind, StoredAnchor};
+use crate::graph_rebase::step_graph::{ApproachKind, LaneCarry, LaneRec, StoredAnchor};
 use crate::graph_rebase::{Direction, Step, StepGraph, StepGraphIndex};
 
 /// A position in a commit's reference stack, named by intent.
@@ -557,19 +557,6 @@ pub(crate) fn settle_chain_lower(
     }
 }
 
-/// How much of its anchor's incoming legs a lane carries.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum LaneCarry {
-    /// Nothing descends into this lane (a root chain: remote above a tip, empty top).
-    None,
-    /// Every leg into the anchor descends through this lane (a plain chain, or a shared
-    /// chain all merge lanes converge on).
-    All,
-    /// This lane carries exactly `n` legs — one lane of a merge. Which legs is derived by
-    /// consuming the anchor's sorted legs in lane order.
-    Count(usize),
-}
-
 /// One lane of a co-located group: refs bottom-up. `rank`/`ambiguous` are carried verbatim in
 /// this v1 (rank is only topology-defined inside carrying chains; root-sibling order is table
 /// data by design).
@@ -718,11 +705,162 @@ fn derive(
     out
 }
 
+/// TEMP (store-swap bridge): derive every anchored reference's approach from the graph's
+/// SHADOW lane table (maintained inside `set_anchor`) by consumption — merge entries by
+/// resolved pick, order `Count` lanes by their first live leg, let each consume its count
+/// from the pick's sorted legs — and compare against the kind-derived `ref_approach`.
+/// Divergences enumerate where mutation sites must maintain the table for the swap to hold.
+fn census_lane_table(graph: &StepGraph, notes: &mut Vec<String>) {
+    // Tombstoned anchors share a live pick, so merge stored keys by resolution — and merge
+    // lanes with identical identity across keys: re-keying fragments one conceptual lane
+    // into several table entries (same legs = same approach = same lane).
+    let mut groups: HashMap<Option<StepGraphIndex>, Vec<LaneRec>> = HashMap::new();
+    for (&key, lanes) in graph.lane_table() {
+        let pick = positions::resolve_to_pick(graph, key);
+        let group = groups.entry(pick).or_default();
+        for lane in lanes {
+            match group
+                .iter_mut()
+                .find(|g| g.carry == lane.carry && g.legs == lane.legs)
+            {
+                Some(g) => g.members.extend(lane.members.iter().copied()),
+                None => group.push(lane.clone()),
+            }
+        }
+    }
+    let mut derived: HashMap<StepGraphIndex, Vec<(StepGraphIndex, usize)>> = HashMap::new();
+    let mut group_of: HashMap<StepGraphIndex, Option<StepGraphIndex>> = HashMap::new();
+    for (pick, lanes) in groups {
+        for lane in &lanes {
+            for &member in &lane.members {
+                group_of.insert(member, pick);
+            }
+        }
+        let legs = pick.map(|p| legs_into_pick(graph, p)).unwrap_or_default();
+        // Emulate the maintenance the swap will make explicit at edge-mutating ops: legs
+        // that died since write time leave a lane's carry (measured via LANE-STALE-LEGS,
+        // never silent). A `Count` lane's effective carry is re-classified against the live
+        // legs — cover none = the lane lost its carry, cover all = reads as `All`.
+        let mut classified: Vec<(LaneCarry, Vec<(StepGraphIndex, usize)>, &[StepGraphIndex])> =
+            Vec::new();
+        for lane in &lanes {
+            let (carry, effective) = match lane.carry {
+                LaneCarry::None => (LaneCarry::None, Vec::new()),
+                LaneCarry::All => (LaneCarry::All, Vec::new()),
+                LaneCarry::Count(_) => {
+                    let effective: Vec<_> = legs
+                        .iter()
+                        .filter(|l| lane.legs.contains(l))
+                        .copied()
+                        .collect();
+                    if effective.len() != lane.legs.len() {
+                        notes.push(format!(
+                            "LANE-STALE-LEGS pick {pick:?} stored={:?} live={effective:?}",
+                            lane.legs
+                        ));
+                    }
+                    if effective.is_empty() {
+                        (LaneCarry::None, Vec::new())
+                    } else if effective.len() == legs.len() {
+                        (LaneCarry::All, Vec::new())
+                    } else {
+                        (LaneCarry::Count(effective.len()), effective)
+                    }
+                }
+            };
+            classified.push((carry, effective, &lane.members));
+        }
+        // Consumption order: `Count` lanes by their first live leg; `All`/`None` don't consume.
+        classified.sort_by_key(|(carry, effective, _)| match carry {
+            LaneCarry::Count(_) => (
+                0,
+                legs.iter().position(|l| Some(l) == effective.first()),
+                effective.clone(),
+            ),
+            LaneCarry::All => (1, None, Vec::new()),
+            LaneCarry::None => (2, None, Vec::new()),
+        });
+        let mut consumed = 0usize;
+        for (carry, _, members) in classified {
+            let approach = match carry {
+                LaneCarry::None => Vec::new(),
+                LaneCarry::All => legs.clone(),
+                LaneCarry::Count(n) => {
+                    let run = legs
+                        .get(consumed..consumed + n)
+                        .map(<[_]>::to_vec)
+                        .unwrap_or_default();
+                    consumed += n;
+                    run
+                }
+            };
+            for &member in members {
+                derived.insert(member, approach.clone());
+            }
+        }
+    }
+    for (node, stored) in graph.anchored_refs() {
+        let kind_approach = positions::ref_approach(graph, node);
+        match derived.get(&node) {
+            Some(table_approach) if *table_approach == kind_approach => {}
+            Some(table_approach) => {
+                let name = match &graph[node] {
+                    Step::Reference { refname, .. } => format!("{refname:?}"),
+                    other => format!("{other:?}"),
+                };
+                let live = positions::resolve_to_pick(graph, stored.anchor)
+                    .map(|pick| legs_into_pick(graph, pick))
+                    .unwrap_or_default();
+                let group = group_of
+                    .get(&node)
+                    .copied()
+                    .flatten()
+                    .map(|pick| {
+                        graph
+                            .lane_table()
+                            .iter()
+                            .filter(|(key, _)| {
+                                positions::resolve_to_pick(graph, **key) == Some(pick)
+                            })
+                            .flat_map(|(_, lanes)| lanes.iter())
+                            .map(|lane| {
+                                format!(
+                                    "({:?} legs={:?} members={:?})",
+                                    lane.carry, lane.legs, lane.members
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default();
+                notes.push(format!(
+                    "TABLE-DIVERGE node {node} {name} table={table_approach:?} kind={kind_approach:?} stored-kind={:?} live-legs={live:?} group=[{group}]",
+                    stored.kind
+                ));
+            }
+            None => notes.push(format!("TABLE-MISSING node {node}")),
+        }
+    }
+}
+
 /// Round-trip the current graph through the name-keyed arrangement and report every divergence
 /// and anomaly. Empty result = this graph's positions are fully order-derivable.
 fn census(graph: &StepGraph) -> Vec<String> {
     let mut notes = Vec::new();
     let arrangement = extract(graph, &mut notes);
+    // Is rank a contiguous, duplicate-free 0..n stack index per anchor across ALL lanes?
+    // (The forest store derives rank from one global list per anchor if so.)
+    for (anchor, lanes) in &arrangement.groups {
+        let mut ranks: Vec<usize> = lanes
+            .iter()
+            .flat_map(|lane| lane.refs.iter().map(|(_, rank, _)| *rank))
+            .collect();
+        ranks.sort_unstable();
+        if !ranks.iter().copied().eq(0..ranks.len()) {
+            notes.push(format!("GLOBAL-RANK anchor {anchor} ranks {ranks:?}"));
+        }
+    }
+    census_lane_table(graph, &mut notes);
     let derived = derive(graph, &arrangement, &mut notes);
     for node in graph.node_indices() {
         let Step::Reference { refname, .. } = &graph[node] else {
