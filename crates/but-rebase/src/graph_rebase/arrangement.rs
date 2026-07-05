@@ -348,6 +348,72 @@ pub(crate) fn unhook_ref(graph: &mut StepGraph, node: StepGraphIndex, drop_legs:
     );
 }
 
+/// Which side of `at_ref` a chain split leaves with the lower part.
+pub(crate) enum SplitBoundary {
+    /// Members strictly above the ref move up; the ref stays with the lower part.
+    Above,
+    /// The ref and members above it move up; only members below stay.
+    At,
+}
+
+/// The result of splitting a chain around an interposed pick.
+pub(crate) struct ChainSplit {
+    /// The members left behind, with their pre-split anchors — settle them with
+    /// [`settle_chain_lower`] once the leg entering the lower part is known.
+    pub lower: Vec<(StepGraphIndex, StoredAnchor)>,
+    /// Whether any member moved onto the upper anchor. When none did, `at_ref` was the top
+    /// of its chain, so the chain's carried legs belong to the caller's new pick.
+    pub moved_any: bool,
+}
+
+/// Split the chain at `at_ref` around a pick interposed into it: members on the upper side
+/// of `boundary` re-key onto `upper_anchor` with ranks rebased to start at 0 (approach kinds
+/// carried verbatim), and the lower members are returned untouched for the caller to settle.
+pub(crate) fn split_chain(
+    graph: &mut StepGraph,
+    at_ref: StepGraphIndex,
+    boundary: SplitBoundary,
+    upper_anchor: StepGraphIndex,
+) -> ChainSplit {
+    let Some(stored) = graph.anchor_of(at_ref) else {
+        return ChainSplit {
+            lower: Vec::new(),
+            moved_any: false,
+        };
+    };
+    let members = positions::chain_members(graph, at_ref);
+    let (goes_up, rank_base): (fn(usize, usize) -> bool, usize) = match boundary {
+        SplitBoundary::Above => (|rank, at| rank > at, stored.rank + 1),
+        SplitBoundary::At => (|rank, at| rank >= at, stored.rank),
+    };
+    let mut lower = Vec::new();
+    let mut moved_any = false;
+    for (node, mut member) in members {
+        if goes_up(member.rank, stored.rank) {
+            member.anchor = upper_anchor;
+            member.rank -= rank_base;
+            graph.set_anchor(node, Some(member));
+            moved_any = true;
+        } else {
+            lower.push((node, member));
+        }
+    }
+    ChainSplit { lower, moved_any }
+}
+
+/// Settle the lower part of a split chain: each member keeps its anchor and rank but is now
+/// approached through `leg` — the edge descending from the interposed pick.
+pub(crate) fn settle_chain_lower(
+    graph: &mut StepGraph,
+    lower: &[(StepGraphIndex, StoredAnchor)],
+    leg: (StepGraphIndex, usize),
+) {
+    for (node, member) in lower {
+        let placed = StoredAnchor::place(graph, member.anchor, member.rank, &[leg]);
+        graph.set_anchor(*node, Some(placed));
+    }
+}
+
 /// How much of its anchor's incoming legs a lane carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LaneCarry {

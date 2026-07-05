@@ -2,7 +2,10 @@
 
 use std::collections::HashSet;
 
-use crate::graph_rebase::arrangement::{StackSlot, move_ref, place_ref, repoint_ref, unhook_ref};
+use crate::graph_rebase::arrangement::{
+    SplitBoundary, StackSlot, move_ref, place_ref, repoint_ref, settle_chain_lower, split_chain,
+    unhook_ref,
+};
 use crate::graph_rebase::step_graph::StoredAnchor;
 use crate::graph_rebase::{Direction, StepGraphIndex, positions};
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -1110,19 +1113,9 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     let parent_pick = positions::resolve_to_pick(&self.graph, parent.id)
                         .context("Segment parent should resolve to a commit")?;
                     let target_approach = positions::ref_approach(&self.graph, target.id);
-                    let members = positions::chain_members(&self.graph, target.id);
-                    let is_top = !members.iter().any(|(_, m)| m.rank > stored.rank);
-                    let mut lower_members = Vec::new();
-                    for (node, mut member) in members {
-                        if member.rank > stored.rank {
-                            member.anchor = child_pick;
-                            member.rank -= stored.rank + 1;
-                            self.graph.set_anchor(node, Some(member));
-                        } else {
-                            lower_members.push((node, member));
-                        }
-                    }
-                    if is_top {
+                    let split =
+                        split_chain(&mut self.graph, target.id, SplitBoundary::Above, child_pick);
+                    if !split.moved_any {
                         // The chain's legs now enter through the segment's child-most pick.
                         let legs: Vec<_> = self
                             .graph
@@ -1171,15 +1164,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                         );
                         orders.first().copied().unwrap_or(0)
                     };
-                    for (node, member) in lower_members {
-                        let placed = StoredAnchor::place(
-                            &self.graph,
-                            member.anchor,
-                            member.rank,
-                            &[(parent_pick, entry_slot)],
-                        );
-                        self.graph.set_anchor(node, Some(placed));
-                    }
+                    settle_chain_lower(&mut self.graph, &split.lower, (parent_pick, entry_slot));
                     return Ok(());
                 } else {
                     let edges = self
@@ -1445,25 +1430,9 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 let target_approach = positions::ref_approach(&self.graph, target.id);
                 let new_idx = self.graph.add_node(step);
                 self.graph.add_edge(new_idx, anchor_pick, Edge { order: 0 });
-                let members = positions::chain_members(&self.graph, target.id);
-                let is_top = !members.iter().any(|(_, m)| m.rank > stored.rank);
-                for (node, member) in members {
-                    if member.rank > stored.rank {
-                        let mut member = member;
-                        member.anchor = new_idx;
-                        member.rank -= stored.rank + 1;
-                        self.graph.set_anchor(node, Some(member));
-                    } else {
-                        let placed = StoredAnchor::place(
-                            &self.graph,
-                            member.anchor,
-                            member.rank,
-                            &[(new_idx, 0)],
-                        );
-                        self.graph.set_anchor(node, Some(placed));
-                    }
-                }
-                if is_top {
+                let split = split_chain(&mut self.graph, target.id, SplitBoundary::Above, new_idx);
+                settle_chain_lower(&mut self.graph, &split.lower, (new_idx, 0));
+                if !split.moved_any {
                     // The chain's legs now enter through the new pick.
                     let legs: Vec<_> = self
                         .graph
@@ -1542,23 +1511,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 let target_approach = positions::ref_approach(&self.graph, target.id);
                 let new_idx = self.graph.add_node(step);
                 self.graph.add_edge(new_idx, anchor_pick, Edge { order: 0 });
-                let members = positions::chain_members(&self.graph, target.id);
-                for (node, member) in members {
-                    if member.rank >= stored.rank {
-                        let mut member = member;
-                        member.anchor = new_idx;
-                        member.rank -= stored.rank;
-                        self.graph.set_anchor(node, Some(member));
-                    } else {
-                        let placed = StoredAnchor::place(
-                            &self.graph,
-                            member.anchor,
-                            member.rank,
-                            &[(new_idx, 0)],
-                        );
-                        self.graph.set_anchor(node, Some(placed));
-                    }
-                }
+                let split = split_chain(&mut self.graph, target.id, SplitBoundary::At, new_idx);
+                settle_chain_lower(&mut self.graph, &split.lower, (new_idx, 0));
                 // The legs enter the (moved) upper part of the chain, which now rests on the
                 // new pick.
                 let legs: Vec<_> = self
