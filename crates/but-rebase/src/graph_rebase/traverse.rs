@@ -204,7 +204,7 @@ mod test {
     /// `a ^c` must drop `base` (shared with `c`) but keep `a`, `b`.
     #[test]
     fn a_not_b_excludes_shared_ancestry() {
-        let mut g = StepGraph::new();
+        let mut g = StepGraph::default();
         let a = pick(&mut g);
         let b = pick(&mut g);
         let base = pick(&mut g);
@@ -233,7 +233,7 @@ mod test {
     /// `b`; only the two picks count. `c ^a` reaches `c`.
     #[test]
     fn count_picks_ignores_non_pick_steps() {
-        let mut g = StepGraph::new();
+        let mut g = StepGraph::default();
         let a = pick(&mut g);
         let none = g.add_node(Step::None);
         let b = pick(&mut g);

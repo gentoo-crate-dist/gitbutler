@@ -290,6 +290,11 @@ impl CommitGraph {
         self.by_id.get(&id).map(|&idx| &self.nodes[idx])
     }
 
+    /// The arena index of `id`, if present.
+    pub fn index_of(&self, id: gix::ObjectId) -> Option<CommitIdx> {
+        self.by_id.get(&id).copied()
+    }
+
     /// Every commit id in the graph, in node order.
     pub fn commit_ids(&self) -> impl Iterator<Item = gix::ObjectId> + '_ {
         self.nodes.iter().map(|n| n.commit.id)
@@ -534,6 +539,15 @@ impl CommitGraph {
         self.parent_slots[idx]
             .iter()
             .map(|slot| slot.target.expect("editor-authored slots are present"))
+            .collect()
+    }
+
+    /// The PRESENT parent targets of `idx` in slot order — absent (walk-cut) slots are
+    /// skipped, unlike [`Self::parent_indices`] which requires every slot to be present.
+    pub fn present_parent_indices(&self, idx: CommitIdx) -> Vec<CommitIdx> {
+        self.parent_slots[idx]
+            .iter()
+            .filter_map(|slot| slot.target)
             .collect()
     }
 }

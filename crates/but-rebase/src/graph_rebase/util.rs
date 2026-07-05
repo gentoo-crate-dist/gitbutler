@@ -85,7 +85,7 @@ mod test {
 
         #[test]
         fn basic_scenario() -> Result<()> {
-            let mut graph = StepGraph::new();
+            let mut graph = StepGraph::default();
             let a_id = gix::ObjectId::from_str("1000000000000000000000000000000000000000")?;
             let a = graph.add_node(Step::new_pick(a_id));
             // First parent
