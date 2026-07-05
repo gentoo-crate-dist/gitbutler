@@ -201,6 +201,11 @@ impl StepGraph {
         }
     }
 
+    /// THE arena, read-only — the write-through seam projects it after a rebase.
+    pub(crate) fn arena(&self) -> &but_graph::CommitGraph {
+        &self.arena
+    }
+
     /// Add `step` to the node arena and return its stable id. References do not belong here —
     /// use [`Self::add_reference`].
     pub(crate) fn add_node(&mut self, step: Step) -> StepGraphIndex {

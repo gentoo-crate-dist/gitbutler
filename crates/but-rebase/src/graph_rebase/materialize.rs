@@ -88,6 +88,7 @@ impl<'ws, 'graph, M: RefMetadata> SuccessfulRebase<'ws, 'graph, M> {
         let project_meta = self.workspace.graph.project_meta.clone();
         self.workspace
             .refresh_from_head(&repo, &*self.meta, project_meta)?;
+        assert_write_through_parity(&self.graph, self.workspace, &repo, &*self.meta)?;
 
         Ok(MaterializeOutcome {
             graph: self.graph,
@@ -123,6 +124,7 @@ impl<'ws, 'graph, M: RefMetadata> SuccessfulRebase<'ws, 'graph, M> {
         let project_meta = self.workspace.graph.project_meta.clone();
         self.workspace
             .refresh_from_head(&repo, &*self.meta, project_meta)?;
+        assert_write_through_parity(&self.graph, self.workspace, &repo, &*self.meta)?;
 
         Ok(MaterializeOutcome {
             graph: self.graph,
@@ -131,4 +133,69 @@ impl<'ws, 'graph, M: RefMetadata> SuccessfulRebase<'ws, 'graph, M> {
             meta: self.meta,
         })
     }
+}
+
+/// THE WRITE-THROUGH ORACLE (`BUT_REBASE_WRITE_THROUGH=assert`): projecting the editor's
+/// MUTATED arena must equal the rewalk's projection — the dissolve's parity obligation
+/// (mutate-then-project == rewalk-then-project). Compared on an index-free fingerprint of
+/// the stack shape, since segment indices differ between independently built graphs.
+fn assert_write_through_parity<M: RefMetadata>(
+    graph: &crate::graph_rebase::StepGraph,
+    rewalked: &but_graph::Workspace,
+    repo: &gix::Repository,
+    meta: &M,
+) -> anyhow::Result<()> {
+    if std::env::var_os("BUT_REBASE_WRITE_THROUGH").is_none_or(|v| v != "assert") {
+        return Ok(());
+    }
+    let Some(mutated) = but_graph::workspace_from_commit_graph(
+        graph.arena().clone(),
+        repo,
+        meta,
+        rewalked.graph.project_meta.clone(),
+        rewalked.graph.options.clone(),
+    )?
+    else {
+        // Nothing the seam can project: HEAD is unborn (e.g. its referent was deleted
+        // without a repoint) or points outside the editor's graph.
+        return Ok(());
+    };
+    let (mutated, rewalked) = (
+        projection_fingerprint(&mutated),
+        projection_fingerprint(rewalked),
+    );
+    if mutated != rewalked {
+        bail!(
+            "WRITE-THROUGH DIVERGENCE\n--- mutate-then-project\n{mutated}\n--- rewalk-then-project\n{rewalked}"
+        );
+    }
+    Ok(())
+}
+
+/// The parity view: stack ids, segment names, per-segment commit ids and bases — everything
+/// the rebase is obliged to preserve, nothing graph-index-dependent.
+fn projection_fingerprint(ws: &but_graph::Workspace) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for stack in &ws.stacks {
+        writeln!(out, "stack {:?}", stack.id).ok();
+        for segment in &stack.segments {
+            writeln!(
+                out,
+                "  {} base={:?} commits=[{}]",
+                segment
+                    .ref_name()
+                    .map_or_else(|| "<anon>".to_string(), |n| n.as_bstr().to_string()),
+                segment.base,
+                segment
+                    .commits
+                    .iter()
+                    .map(|c| c.id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )
+            .ok();
+        }
+    }
+    out
 }

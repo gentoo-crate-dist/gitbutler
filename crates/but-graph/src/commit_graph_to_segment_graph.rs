@@ -60,6 +60,81 @@ pub fn workspace_from_repository<T: but_core::RefMetadata>(
     .transpose()
 }
 
+/// Project a PROVIDED `cg` — the write-through seam: an editor-mutated commit graph projects
+/// like a fresh walk, with the enrichment (refs, target, metadata) read from the CURRENT
+/// `repo`/`meta` state. Dispatches like [`Graph::from_head`](crate::Graph::from_head):
+/// managed when the workspace ref resolves to a commit in `cg`, non-managed from `HEAD`
+/// otherwise. `None` when `HEAD`'s commit isn't in `cg` either (or is unborn).
+pub fn workspace_from_commit_graph<T: but_core::RefMetadata>(
+    mut cg: CommitGraph,
+    repo: &gix::Repository,
+    meta: &T,
+    project_meta: but_core::ref_metadata::ProjectMeta,
+    options: crate::init::Options,
+) -> anyhow::Result<Option<crate::Workspace>> {
+    let (overlay_repo, overlay_meta, _entrypoint) =
+        crate::init::Overlay::default().into_parts(repo, meta);
+    let ws_ref: gix::refs::FullName = but_core::WORKSPACE_REF_NAME.try_into()?;
+    let ws_commit = overlay_repo
+        .try_find_reference(ws_ref.as_ref())?
+        .and_then(|mut r| r.peel_to_commit().ok())
+        .map(|c| c.id().detach())
+        .filter(|c| cg.node(*c).is_some());
+    let ref_prefixes = || {
+        ["refs/heads/", "refs/remotes/"]
+            .into_iter()
+            .chain(options.collect_tags.then_some("refs/tags/"))
+    };
+    if let Some(ws_commit) = ws_commit {
+        let mut refs_by_id =
+            overlay_repo.collect_ref_mapping_by_prefix(ref_prefixes(), &[ws_ref.as_ref()])?;
+        let worktree_by_branch = overlay_repo.worktree_branches(Some(ws_ref.as_ref()))?;
+        cg.refresh_refs(&mut refs_by_id, &worktree_by_branch);
+        let graph = assemble_managed(
+            cg,
+            repo,
+            &overlay_repo,
+            &overlay_meta,
+            &ws_ref,
+            ws_commit,
+            ws_commit,
+            None,
+            Some(&ws_ref),
+            project_meta,
+            options,
+        )?;
+        if graph.entrypoint.is_none() {
+            return Ok(None);
+        }
+        return graph.into_workspace().map(Some);
+    }
+    let head = repo.head()?;
+    let entrypoint_ref = head.referent_name().map(|n| n.to_owned());
+    let Some(head_tip) = head
+        .id()
+        .map(|id| id.detach())
+        .filter(|c| cg.node(*c).is_some())
+    else {
+        return Ok(None);
+    };
+    let mut refs_by_id = overlay_repo.collect_ref_mapping_by_prefix(ref_prefixes(), &[])?;
+    let worktree_by_branch =
+        overlay_repo.worktree_branches(entrypoint_ref.as_ref().map(|r| r.as_ref()))?;
+    cg.refresh_refs(&mut refs_by_id, &worktree_by_branch);
+    assemble_unmanaged(
+        cg,
+        repo,
+        &overlay_repo,
+        &overlay_meta,
+        head_tip,
+        entrypoint_ref,
+        project_meta,
+        options,
+    )?
+    .into_workspace()
+    .map(Some)
+}
+
 /// Like [`graph_from_repository`], but serving `overlay` refs and metadata from memory — the flip
 /// counterpart of [`Graph::redo_traversal_with_overlay`](crate::Graph::redo_traversal_with_overlay).
 pub(crate) fn graph_from_repository_with_overlay<T: but_core::RefMetadata>(

@@ -285,6 +285,31 @@ impl CommitGraph {
         self.managed_ws_commits.contains(&id)
     }
 
+    /// Replace every node's attached refs with the CURRENT `refs_by_id` state — the
+    /// write-through seam's enrichment refresh: an editor-mutated graph still carries
+    /// walk-time refs, but materialization has moved them. Matched entries are consumed.
+    pub(crate) fn refresh_refs(
+        &mut self,
+        refs_by_id: &mut crate::init::walk::RefsById,
+        worktree_by_branch: &crate::init::walk::WorktreeByBranch,
+    ) {
+        for (idx, node) in self.nodes.iter_mut().enumerate() {
+            if self.tombstoned[idx] {
+                node.commit.refs.clear();
+                continue;
+            }
+            let id = node.commit.id;
+            let mut refs: Vec<crate::RefInfo> = refs_by_id
+                .remove(&id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|rn| crate::RefInfo::from_ref(rn, id, worktree_by_branch))
+                .collect();
+            refs.sort_by(|a, b| a.ref_name.cmp(&b.ref_name));
+            node.commit.refs = refs;
+        }
+    }
+
     /// The node at `id`, if present.
     pub fn node(&self, id: gix::ObjectId) -> Option<&CommitNode> {
         self.by_id.get(&id).map(|&idx| &self.nodes[idx])
@@ -302,17 +327,54 @@ impl CommitGraph {
 
     /// The commit's CONNECTED parent list, first-parent first — parents the traversal severed
     /// (limits, integrated stop-early, display cuts) are omitted.
+    ///
+    /// An editor-dropped (TOMBSTONED) parent is substituted in place by its own parents,
+    /// recursively — the same descent the editor's parent collection performs when it turns
+    /// the structure into real commits — deduplicated along the descent, while plain
+    /// duplicate slots are all kept (dup-parent workspace commits).
     pub(crate) fn all_parent_ids(&self, id: gix::ObjectId) -> Vec<gix::ObjectId> {
-        let Some((node, slots)) = self.node(id).zip(self.slots_of(id)) else {
+        let Some(&idx) = self.by_id.get(&id) else {
             return Vec::new();
         };
-        node.commit
-            .parent_ids
+        // The CONNECTED `(raw parent id, slot target)` pairs of `idx`, in slot order.
+        let connected = |idx: CommitIdx| {
+            self.nodes[idx]
+                .commit
+                .parent_ids
+                .iter()
+                .copied()
+                .zip(&self.parent_slots[idx])
+                .filter_map(|(p, slot)| slot.connected.then_some((p, slot.target)))
+                .collect::<Vec<_>>()
+        };
+        let mut potential: Vec<(gix::ObjectId, Option<CommitIdx>)> =
+            connected(idx).into_iter().rev().collect();
+        let mut seen_idx: HashSet<CommitIdx> = potential.iter().filter_map(|(_, t)| *t).collect();
+        let mut seen_raw: HashSet<gix::ObjectId> = potential
             .iter()
-            .copied()
-            .zip(slots)
-            .filter_map(|(p, slot)| slot.connected.then_some(p))
-            .collect()
+            .filter_map(|(p, t)| t.is_none().then_some(*p))
+            .collect();
+        let mut parents = Vec::new();
+        while let Some((raw, target)) = potential.pop() {
+            match target {
+                Some(t) if self.tombstoned[t] => {
+                    for (p_raw, p_target) in connected(t).into_iter().rev() {
+                        let unseen = match p_target {
+                            Some(pt) => seen_idx.insert(pt),
+                            None => seen_raw.insert(p_raw),
+                        };
+                        if unseen {
+                            potential.push((p_raw, p_target));
+                        }
+                    }
+                }
+                // A live target's CURRENT payload id is authoritative (raw agrees via
+                // set_commit_id's child patching; this needs no such guarantee).
+                Some(t) => parents.push(self.nodes[t].commit.id),
+                None => parents.push(raw),
+            }
+        }
+        parents
     }
 
     /// All ancestors of `tip` (inclusive), following CONNECTED parent edges — history the

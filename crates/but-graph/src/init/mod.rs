@@ -10,7 +10,7 @@ use tracing::instrument;
 
 use crate::{CommitFlags, CommitIndex, Connection, Graph, SegmentIndex, SegmentMetadata};
 
-mod walk;
+pub(crate) mod walk;
 use walk::*;
 
 pub(crate) mod types;
