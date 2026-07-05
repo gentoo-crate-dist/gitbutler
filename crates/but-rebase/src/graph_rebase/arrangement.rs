@@ -1,6 +1,6 @@
 //! The name-keyed arrangement table — the seed of the position model's end-state.
 //!
-//! Everything a [`StoredAnchor`](crate::graph_rebase::step_graph::StoredAnchor) records is keyed
+//! Everything a [`RefPosition`](crate::graph_rebase::step_graph::RefPosition) records is keyed
 //! by graph coordinates (node ids, parent slots) that churn under mutation, which is why positions
 //! need incremental maintenance (`rewrite_approach_leg`, `apply_chain_join`, the preserve-vs-reclassify
 //! flag). The intended replacement keys the same information by REF NAMES, which mutation never
@@ -22,8 +22,8 @@
 
 use std::collections::HashMap;
 
-use crate::graph_rebase::positions::{self, legs_into_pick, ref_position};
-use crate::graph_rebase::step_graph::{LaneCarry, StoredAnchor};
+use crate::graph_rebase::positions::{self, legs_into_pick};
+use crate::graph_rebase::step_graph::{LaneCarry, RefPosition};
 use crate::graph_rebase::{Direction, Step, StepGraph, StepGraphIndex};
 
 /// A position in a commit's reference stack, named by intent.
@@ -535,7 +535,7 @@ pub(crate) enum SplitBoundary {
 pub(crate) struct ChainSplit {
     /// The members left behind, with their pre-split anchors — settle them with
     /// [`settle_chain_lower`] once the leg entering the lower part is known.
-    pub lower: Vec<(StepGraphIndex, StoredAnchor)>,
+    pub lower: Vec<(StepGraphIndex, RefPosition)>,
     /// Whether any member moved onto the upper anchor. When none did, `at_ref` was the top
     /// of its chain, so the chain's carried legs belong to the caller's new pick.
     pub moved_any: bool,
@@ -611,7 +611,7 @@ pub(crate) fn split_chain(
 /// now approached through `leg` — the edge descending from the interposed pick.
 pub(crate) fn settle_chain_lower(
     graph: &mut StepGraph,
-    lower: &[(StepGraphIndex, StoredAnchor)],
+    lower: &[(StepGraphIndex, RefPosition)],
     leg: (StepGraphIndex, usize),
 ) {
     for (node, member) in lower {
@@ -648,18 +648,21 @@ fn extract(graph: &StepGraph, notes: &mut Vec<String>) -> Arrangement {
         if let Some(previous) = seen_names.insert(refname.clone(), node) {
             notes.push(format!("DUPNAME {refname:?} nodes {previous} and {node}"));
         }
-        let Some(pos) = ref_position(graph, node) else {
+        let Some(stored) = graph.anchor_of(node) else {
             continue; // no stored anchor: unborn, exempt like the standing assert
         };
-        let Some(anchor) = pos.anchor else {
+        let Some(anchor) = positions::resolve_to_pick(graph, stored.anchor) else {
             notes.push(format!("UNANCHORED {refname:?}"));
             continue;
         };
-        chains.entry((anchor, pos.approach)).or_default().push((
-            refname.clone(),
-            pos.rank,
-            pos.ambiguous,
-        ));
+        chains
+            .entry((anchor, positions::ref_approach(graph, node)))
+            .or_default()
+            .push((
+                refname.clone(),
+                positions::ref_depth(graph, node),
+                stored.ambiguous,
+            ));
     }
 
     type ApproachedLane = (Vec<(StepGraphIndex, usize)>, Lane);
@@ -792,20 +795,22 @@ fn census(graph: &StepGraph) -> Vec<String> {
         let Step::Reference { refname, .. } = &graph[node] else {
             continue;
         };
-        let Some(pos) = ref_position(graph, node) else {
+        let Some(stored) = graph.anchor_of(node) else {
             continue;
         };
-        let Some(anchor) = pos.anchor else {
+        let Some(anchor) = positions::resolve_to_pick(graph, stored.anchor) else {
             continue;
         };
+        let rank = positions::ref_depth(graph, node);
+        let approach = positions::ref_approach(graph, node);
         match derived.get(refname) {
             Some((d_anchor, d_rank, d_approach, d_ambiguous)) => {
                 if (*d_anchor, *d_rank, d_approach, *d_ambiguous)
-                    != (anchor, pos.rank, &pos.approach, pos.ambiguous)
+                    != (anchor, rank, &approach, stored.ambiguous)
                 {
                     notes.push(format!(
-                        "DIVERGE {refname:?} stored=({anchor},{},{:?},{}) derived=({d_anchor},{d_rank},{d_approach:?},{d_ambiguous})",
-                        pos.rank, pos.approach, pos.ambiguous
+                        "DIVERGE {refname:?} stored=({anchor},{rank},{approach:?},{}) derived=({d_anchor},{d_rank},{d_approach:?},{d_ambiguous})",
+                        stored.ambiguous
                     ));
                 }
             }

@@ -70,8 +70,10 @@ impl<'graph> StepEdgeRef<'graph> {
 
 /// Where a reference sits, stored explicitly: references are POSITIONS, not topology. The
 /// approach legs live in the reference's LANE (see [`StepGraph::lane_of`]), not here.
+/// Derived reads live in `positions`: `ref_depth` (rank), `ref_approach` (legs),
+/// `resolve_to_pick` (anchor through tombstones).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StoredAnchor {
+pub(crate) struct RefPosition {
     /// The node this reference resolves to (a pick, or its tombstone after deletion) — the
     /// commit the ref points at, reached lazily through tombstones at read time.
     pub anchor: StepGraphIndex,
@@ -125,7 +127,7 @@ pub(crate) struct StepGraph {
     outgoing: Vec<Vec<StepEdgeIndex>>,
     incoming: Vec<Vec<StepEdgeIndex>>,
     /// `Some` exactly for reference nodes; carries the ref's anchor, below, and ambiguity.
-    anchors: Vec<Option<StoredAnchor>>,
+    anchors: Vec<Option<RefPosition>>,
     /// THE approach store: lane membership per STORED (unresolved) anchor value. Which legs
     /// descend into a reference's position lives here and only here — authored by
     /// [`Self::place_anchor`]/[`Self::join_lane_of`], carried by [`Self::rekey_anchor`],
@@ -149,7 +151,7 @@ impl StepGraph {
     }
 
     /// The stored position of the reference at `node`, if it is a positioned reference.
-    pub(crate) fn anchor_of(&self, node: StepGraphIndex) -> Option<StoredAnchor> {
+    pub(crate) fn anchor_of(&self, node: StepGraphIndex) -> Option<RefPosition> {
         self.anchors.get(node).cloned().flatten()
     }
 
@@ -189,7 +191,7 @@ impl StepGraph {
             self.lane_remove(node, key);
         }
         self.lane_insert(node, anchor, carry, legs);
-        self.anchors[node] = Some(StoredAnchor {
+        self.anchors[node] = Some(RefPosition {
             anchor,
             ambiguous,
             below,
@@ -223,7 +225,7 @@ impl StepGraph {
         if !joined {
             self.lane_insert(node, m.anchor, LaneCarry::All, Vec::new());
         }
-        self.anchors[node] = Some(StoredAnchor {
+        self.anchors[node] = Some(RefPosition {
             anchor: m.anchor,
             ambiguous: m.ambiguous,
             below,
@@ -357,7 +359,7 @@ impl StepGraph {
             else {
                 continue;
             };
-            self.anchors[new_node] = Some(StoredAnchor {
+            self.anchors[new_node] = Some(RefPosition {
                 anchor: new_anchor,
                 ambiguous: stored.ambiguous,
                 below: stored.below.and_then(|b| mapping.get(&b).copied()),
@@ -375,9 +377,7 @@ impl StepGraph {
     }
 
     /// All positioned references, ascending by node id.
-    pub(crate) fn anchored_refs(
-        &self,
-    ) -> impl Iterator<Item = (StepGraphIndex, StoredAnchor)> + '_ {
+    pub(crate) fn anchored_refs(&self) -> impl Iterator<Item = (StepGraphIndex, RefPosition)> + '_ {
         self.anchors
             .iter()
             .enumerate()
