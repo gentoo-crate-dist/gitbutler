@@ -743,21 +743,26 @@ pub(crate) fn lane_approaches(
     derived
 }
 
-/// TEMP (store-swap bridge): per-call probe hooked into `ref_approach` — compare the
-/// kind-derived approach a read is about to return against the table's consumption read,
+/// TEMP (store-swap bridge): per-call probe hooked into `ref_approach` — compare the lane
+/// read it is about to return against the retired kind derivation (the shadow oracle),
 /// catching MID-OP divergences the checkpoint census cannot see. Env-gated like the census.
 pub(crate) fn probe_read_divergence(
     graph: &StepGraph,
     node: StepGraphIndex,
-    kind_approach: &[(StepGraphIndex, usize)],
+    lane_approach: &[(StepGraphIndex, usize)],
 ) {
     static CENSUS_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     let Some(path) = CENSUS_PATH.get_or_init(|| std::env::var("BUT_ARRANGE_CENSUS").ok()) else {
         return;
     };
-    let mut scratch = Vec::new();
-    let table = lane_approaches(graph, &mut scratch);
-    if table.get(&node).map(Vec::as_slice) == Some(kind_approach) {
+    let kind_approach = match (graph.anchor_of(node), graph.ref_kind(node)) {
+        (Some(stored), Some(kind)) => match positions::resolve_to_pick(graph, stored.anchor) {
+            Some(pick) => positions::derive_approach(graph, pick, &kind),
+            None => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+    if kind_approach == lane_approach {
         return;
     }
     use std::io::Write as _;
@@ -777,18 +782,20 @@ pub(crate) fn probe_read_divergence(
         .collect();
     let _ = writeln!(
         file,
-        "READ-DIVERGE node {node} table={:?} kind={kind_approach:?} at {frames:?}",
-        table.get(&node)
+        "READ-DIVERGE node {node} table={lane_approach:?} kind={kind_approach:?} at {frames:?}",
     );
 }
 
-/// TEMP (store-swap bridge): compare the table's consumption read against the kind-derived
-/// `ref_approach` for every anchored reference. Divergences enumerate where mutation sites
+/// TEMP (store-swap bridge): compare the table's lane read against the retired kind
+/// derivation for every anchored reference. Divergences enumerate where mutation sites
 /// must maintain the table for the swap to hold.
 fn census_lane_table(graph: &StepGraph, notes: &mut Vec<String>) {
     let derived = lane_approaches(graph, notes);
     for (node, stored) in graph.anchored_refs() {
-        let kind_approach = positions::ref_approach(graph, node);
+        let kind_approach = match positions::resolve_to_pick(graph, stored.anchor) {
+            Some(pick) => positions::derive_approach(graph, pick, &stored.kind),
+            None => Vec::new(),
+        };
         match derived.get(&node) {
             Some(table_approach) if *table_approach == kind_approach => {}
             Some(table_approach) => {

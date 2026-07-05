@@ -22,7 +22,7 @@
 //! - **chain** — references stacked on one pick, ordered by `rank`. Chains are shallow in
 //!   practice (≤3 observed).
 
-use crate::graph_rebase::step_graph::{ApproachKind, StoredAnchor};
+use crate::graph_rebase::step_graph::{ApproachKind, LaneCarry, StoredAnchor};
 use crate::graph_rebase::{Direction, Step, StepGraph, StepGraphIndex};
 
 /// A reference's position, RESOLVED for reading — the counterpart to the stored [`StoredAnchor`].
@@ -99,19 +99,37 @@ pub(crate) fn derive_approach(
     }
 }
 
-/// The current `approach` of the reference at `node`, derived from its authored [`ApproachKind`] against
-/// the live pick edges — the read path that replaces reading `StoredAnchor::approach` directly, so a
-/// stale stored leg list never reaches a consumer.
+/// The current `approach` of the reference at `node` — the DIRECT lane read: the node's lane
+/// carries its own leg list, kept live-exact by edge surgery (see `StepGraph::remove_edge` /
+/// `move_edge` / `add_edge`), ordered and filtered by the anchor pick's live legs so a stale
+/// lane leg never reaches a consumer.
 pub(crate) fn ref_approach(
     graph: &StepGraph,
     node: StepGraphIndex,
 ) -> Vec<(StepGraphIndex, usize)> {
-    let (Some(stored), Some(kind)) = (graph.anchor_of(node), graph.ref_kind(node)) else {
+    let Some(stored) = graph.anchor_of(node) else {
         return Vec::new();
     };
-    let approach = match resolve_to_pick(graph, stored.anchor) {
-        Some(pick) => derive_approach(graph, pick, &kind),
+    let lane = graph
+        .lane_table()
+        .get(&stored.anchor)
+        .and_then(|lanes| lanes.iter().find(|lane| lane.members.contains(&node)));
+    let approach = match lane {
         None => Vec::new(),
+        Some(lane) => {
+            let legs = match resolve_to_pick(graph, stored.anchor) {
+                Some(pick) => legs_into_pick(graph, pick),
+                None => Vec::new(),
+            };
+            match lane.carry {
+                LaneCarry::None => Vec::new(),
+                LaneCarry::All => legs,
+                LaneCarry::Count(_) => legs
+                    .into_iter()
+                    .filter(|leg| lane.legs.contains(leg))
+                    .collect(),
+            }
+        }
     };
     crate::graph_rebase::arrangement::probe_read_divergence(graph, node, &approach);
     approach
