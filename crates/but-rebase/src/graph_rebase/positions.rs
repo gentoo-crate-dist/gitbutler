@@ -25,7 +25,7 @@
 //!   Chains are shallow in practice (≤3 observed).
 
 use crate::graph_rebase::step_graph::{LaneCarry, RefPosition};
-use crate::graph_rebase::{Step, StepGraph, StepGraphIndex};
+use crate::graph_rebase::{StepGraph, StepGraphIndex};
 
 /// The reference's depth above its anchor — the length of its below-chain (0 = directly on
 /// the pick). This IS the rank: order among co-located references is adjacency, not a number.
@@ -315,10 +315,7 @@ pub(crate) fn refs_reachable_with(
     // commit-equivalent across such lanes.
     let reached_ids: std::collections::HashSet<gix::ObjectId> = picks
         .iter()
-        .filter_map(|node| match &graph[*node] {
-            Step::Pick(pick) => Some(pick.id),
-            _ => None,
-        })
+        .filter_map(|node| graph.commit_id(*node))
         .collect();
     let mut out = Vec::new();
     for (node, stored) in graph.positioned_refs() {
@@ -327,10 +324,9 @@ pub(crate) fn refs_reachable_with(
         // computed (and the ruling the merge-bypass deletion rests on).
         let anchor_reached = resolve_to_pick(graph, stored.anchor).is_some_and(|anchor| {
             picks.contains(&anchor)
-                || match &graph[anchor] {
-                    Step::Pick(pick) => reached_ids.contains(&pick.id),
-                    _ => false,
-                }
+                || graph
+                    .commit_id(anchor)
+                    .is_some_and(|id| reached_ids.contains(&id))
         });
         if anchor_reached || node == start {
             out.push(node);

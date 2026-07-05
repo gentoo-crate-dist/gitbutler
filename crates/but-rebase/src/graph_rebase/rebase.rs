@@ -13,7 +13,7 @@ use gix::refs::{
 };
 
 use crate::graph_rebase::{
-    Editor, Pick, Step, StepGraph, StepGraphIndex, SuccessfulRebase,
+    Editor, Step, StepGraph, StepGraphIndex, SuccessfulRebase,
     cherry_pick::{CherryPickOutcome, cherry_pick},
     util::collect_ordered_parents,
 };
@@ -66,9 +66,9 @@ impl<'ws, 'graph, M: RefMetadata> Editor<'ws, 'graph, M> {
                                     bail!("A matching parent can't be found in the output graph");
                                 };
 
-                                match output_graph[*new_idx] {
-                                    Step::Pick(Pick { id, .. }) => Ok(id),
-                                    _ => bail!("A parent in the output graph is not a pick"),
+                                match output_graph.commit_id(*new_idx) {
+                                    Some(id) => Ok(id),
+                                    None => bail!("A parent in the output graph is not a pick"),
                                 }
                             })
                             .collect::<Result<Vec<_>>>()?,
@@ -170,9 +170,9 @@ impl<'ws, 'graph, M: RefMetadata> Editor<'ws, 'graph, M> {
                     bail!("A matching parent can't be found in the output graph");
                 };
 
-                let to_reference = match output_graph[*new_idx] {
-                    Step::Pick(Pick { id, .. }) => id,
-                    _ => bail!("A parent in the output graph is not a pick"),
+                let to_reference = match output_graph.commit_id(*new_idx) {
+                    Some(id) => id,
+                    None => bail!("A parent in the output graph is not a pick"),
                 };
 
                 let reference = self.repo.try_find_reference(&refname)?;

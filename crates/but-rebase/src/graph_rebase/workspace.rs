@@ -209,10 +209,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
 
             // The workspace commit, if present, lives somewhere in `HEAD ^target`.
             let workspace_commit = head_not_target_commit.nodes.iter().copied().find_map(|ix| {
-                let Step::Pick(Pick { id, .. }) = &self.graph[ix] else {
-                    return None;
-                };
-                let gix_commit = self.repo.find_commit(*id).ok()?;
+                let id = self.graph.commit_id(ix)?;
+                let gix_commit = self.repo.find_commit(id).ok()?;
                 is_managed_workspace_by_message(gix_commit.message_raw().ok()?).then_some(ix)
             });
 

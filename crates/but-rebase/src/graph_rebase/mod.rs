@@ -365,7 +365,7 @@ impl<'ws, 'meta, M: RefMetadata> SuccessfulRebase<'ws, 'meta, M> {
                                     &self.graph,
                                     selector.id,
                                 )
-                                && let Step::Pick(Pick { id, .. }) = self.graph[to_reference]
+                                && let Some(id) = self.graph.commit_id(to_reference)
                             {
                                 Some((id, Some(refname)))
                             } else {

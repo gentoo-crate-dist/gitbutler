@@ -13,7 +13,7 @@ use but_core::RefMetadata;
 use serde::{Deserialize, Serialize};
 
 use crate::graph_rebase::{
-    Editor, Pick, Selector, Step, ToCommitSelector, ToReferenceSelector, ToSelector,
+    Editor, Selector, Step, ToCommitSelector, ToReferenceSelector, ToSelector,
 };
 
 /// Parent-slot names captured at one instant (a frame), resolved against a store that has
@@ -316,9 +316,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     /// Get a selector to a particular commit in the graph
     pub fn try_select_commit(&self, target: gix::ObjectId) -> Option<Selector> {
         for node_idx in self.graph.node_indices() {
-            if let Step::Pick(Pick { id, .. }) = self.graph[node_idx]
-                && id == target
-            {
+            if self.graph.commit_id(node_idx) == Some(target) {
                 return Some(self.new_selector(node_idx));
             }
         }
@@ -500,7 +498,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         let old = self.graph.step_view(target.id);
         let is_ref_slot = self.graph.reference_record(target.id).is_some();
         match (is_ref_slot, step) {
-            (false, step @ (Step::Pick(_) | Step::None)) => self.graph[target.id] = step,
+            (false, step @ (Step::Pick(_) | Step::None)) => self.graph.set_step(target.id, step),
             (true, Step::Reference { refname, mutable }) => {
                 self.graph.set_reference(target.id, refname, mutable)
             }

@@ -38,7 +38,7 @@ impl<'ws, 'graph, M: RefMetadata> SuccessfulRebase<'ws, 'graph, M> {
                                 selector.id,
                             )
                             .context("No commit to reference")?;
-                            let Step::Pick(Pick { id, .. }) = self.graph[parent_step_id] else {
+                            let Some(id) = self.graph.commit_id(parent_step_id) else {
                                 bail!("resolve_to_pick should always return a commit pick");
                             };
                             (id, Some(refname))

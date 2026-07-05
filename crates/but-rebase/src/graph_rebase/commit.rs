@@ -7,7 +7,7 @@ use gix::prelude::ObjectIdExt;
 
 use crate::{
     commit::{DateMode, create},
-    graph_rebase::{Editor, Pick, Selector, Step, ToCommitSelector, ToReferenceSelector},
+    graph_rebase::{Editor, Selector, ToCommitSelector, ToReferenceSelector},
 };
 
 impl<M: RefMetadata> Editor<'_, '_, M> {
@@ -47,10 +47,10 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         let selector = self
             .history
             .normalize_selector(selector.to_commit_selector(self)?)?;
-        let Step::Pick(Pick { id, .. }) = &self.graph[selector.id] else {
+        let Some(id) = self.graph.commit_id(selector.id) else {
             bail!("BUG: Expected pick step from commit selector. This should never happen");
         };
-        Ok((selector, self.find_commit(*id)?))
+        Ok((selector, self.find_commit(id)?))
     }
 
     /// Finds the first pick parent of a reference
@@ -66,11 +66,11 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             crate::graph_rebase::positions::resolve_to_pick(&self.graph, selector.id)
                 .context("Failed to find a parent for selected reference in the step graph.")?;
 
-        let Step::Pick(pick) = &self.graph[first_parent] else {
+        let Some(id) = self.graph.commit_id(first_parent) else {
             bail!("BUG: first_ordered_parent provided a non-pick return value");
         };
 
-        Ok((self.new_selector(first_parent), self.find_commit(pick.id)?))
+        Ok((self.new_selector(first_parent), self.find_commit(id)?))
     }
 
     /// Writes a commit with correct signing to the in memory repository,
