@@ -1,12 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::graph_rebase::Direction;
 use anyhow::{Result, bail};
 use but_core::{RefMetadata, commit::SignCommit};
 use but_graph::{Commit, SegmentIndex};
 
 use crate::graph_rebase::{
-    Checkout, Edge, Editor, Pick, RevisionHistory, Selector, Step, StepGraph, StepGraphIndex,
+    Checkout, Editor, Pick, RevisionHistory, Selector, Step, StepGraph, StepGraphIndex,
     SuccessfulRebase, util,
 };
 
@@ -145,7 +144,7 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                     }
                     let ix = graph.add_reference(reference.clone(), mutable);
                     if let Some(previous_ix) = nodes.last() {
-                        graph.add_edge(*previous_ix, ix, Edge { order: 0 });
+                        graph.push_parent(*previous_ix, ix);
                     }
                     nodes.push(ix);
                 }
@@ -161,7 +160,7 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                 let ix = graph.add_node(Step::Pick(pick));
                 commit_to_pick_ix.insert(commit.id, ix);
                 if let Some(previous_ix) = nodes.last() {
-                    graph.add_edge(*previous_ix, ix, Edge { order: 0 });
+                    graph.push_parent(*previous_ix, ix);
                 }
                 nodes.push(ix);
             }
@@ -208,13 +207,16 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                 continue;
             };
 
-            // but-graph yields outgoing edges in parent order, so iterate as-is. The counter below
-            // gives commit-less empty branches distinct, increasing orders — so the StepGraph never
-            // has tied parent orders and needs no insertion-order tie-break.
+            // but-graph yields outgoing edges in parent order, so iterate as-is. The keys below
+            // rank real parents by their index in the source commit's parent array and commit-less
+            // empty branches after them (distinct, increasing) — a ranking, not final slots: the
+            // ranks can have gaps (an empty branch may stand in front of a real parent, or ALL legs
+            // may be commit-less refs over one base), so the sorted ranks compact by push order.
             let edges = workspace
                 .graph
                 .edges_directed(*sidx, but_graph::Direction::Outgoing);
             let mut empty_branch_count = 0usize;
+            let mut ranked_targets = Vec::new();
             'inner: for edge in edges {
                 let Some(target) = segments.get(&edge.target()).and_then(|n| n.nodes.first())
                 else {
@@ -225,9 +227,6 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                     continue 'inner;
                 };
 
-                // A real parent gets its index in the source commit's parent array. A dst with no
-                // commit id (a commit-less empty branch) can't be indexed, so it's placed after the
-                // real parents — and each one bumps the counter so siblings get distinct orders.
                 let parents = edge
                     .weight()
                     .src_id()
@@ -235,7 +234,7 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                 let real_parent_index = parents
                     .zip(edge.weight().dst_id())
                     .and_then(|(parents, dst)| parents.iter().position(|p| *p == dst));
-                let order = match real_parent_index {
+                let rank = match real_parent_index {
                     Some(idx) => idx,
                     None => {
                         let o = parents.map_or(0, |p| p.len()) + empty_branch_count;
@@ -243,7 +242,11 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                         o
                     }
                 };
-                graph.add_edge(*source, *target, Edge { order });
+                ranked_targets.push((rank, *target));
+            }
+            ranked_targets.sort_by_key(|(rank, _)| *rank);
+            for (_, target) in ranked_targets {
+                graph.push_parent(*source, target);
             }
         }
 
@@ -292,15 +295,8 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                     .collect::<Vec<_>>(),
             );
 
-            let outgoing_edge_ids: Vec<_> = graph
-                .edges_directed(pick_ix, Direction::Outgoing)
-                .map(|e| e.id())
-                .collect();
-            for edge_id in outgoing_edge_ids {
-                graph.remove_edge(edge_id);
-            }
-
-            'inner: for (order, parent_id) in c.parent_ids.iter().enumerate() {
+            let mut fixed_parents = Vec::with_capacity(c.parent_ids.len());
+            'inner: for parent_id in &c.parent_ids {
                 let Some(&target_ix) = commit_to_pick_ix.get(parent_id) else {
                     tracing::warn!(
                         "Dropping parent edge for commit {} (parent fix): parent {parent_id} not found in pick map",
@@ -308,12 +304,12 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                     );
                     continue 'inner;
                 };
-
-                graph.add_edge(pick_ix, target_ix, Edge { order });
+                fixed_parents.push(target_ix);
             }
+            graph.set_parents(pick_ix, fixed_parents);
         }
 
-        crate::graph_rebase::positions::initialize_anchors_and_strip_ref_edges(&mut graph);
+        crate::graph_rebase::positions::initialize_positions_and_strip_ref_edges(&mut graph);
         crate::graph_rebase::positions::debug_assert_positions_total(&graph);
         Ok(Self {
             graph,

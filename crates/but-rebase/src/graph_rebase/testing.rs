@@ -18,8 +18,6 @@ use anyhow::Result;
 use but_core::RefMetadata;
 use renderdag::{Ancestor, GraphRowRenderer, Renderer as _};
 
-#[cfg(test)]
-use crate::graph_rebase::Edge;
 use crate::graph_rebase::{
     Editor, Pick, Selector, Step, StepGraph, StepGraphIndex, SuccessfulRebase, positions,
     workspace::Subgraph,
@@ -73,13 +71,12 @@ impl TestingDot for StepGraph {
             };
             out.push_str(&format!("    {idx} [ label=\"{label}\"]\n"));
         }
-        for edge in self.edge_references() {
-            out.push_str(&format!(
-                "    {} -> {} [ label=\"order: {}\"]\n",
-                edge.source(),
-                edge.target(),
-                edge.weight().order
-            ));
+        for idx in self.node_indices() {
+            for (order, parent) in self.parents(idx).iter().enumerate() {
+                out.push_str(&format!(
+                    "    {idx} -> {parent} [ label=\"order: {order}\"]\n"
+                ));
+            }
         }
         out.push_str("}\n");
         out
@@ -137,7 +134,7 @@ type ChainKey = (StepGraphIndex, Vec<(StepGraphIndex, usize)>);
 
 fn chains(graph: &StepGraph) -> HashMap<ChainKey, Vec<StepGraphIndex>> {
     let mut out: HashMap<_, Vec<(usize, StepGraphIndex)>> = HashMap::new();
-    for (node, stored) in graph.anchored_refs() {
+    for (node, stored) in graph.positioned_refs() {
         out.entry((stored.anchor, positions::ref_approach(graph, node)))
             .or_default()
             .push((positions::ref_depth(graph, node), node));
@@ -154,8 +151,8 @@ fn chains(graph: &StepGraph) -> HashMap<ChainKey, Vec<StepGraphIndex>> {
 /// reference chains (positioned with nothing above them).
 fn find_heads(graph: &StepGraph) -> Vec<StepGraphIndex> {
     let mut has_incoming: HashSet<StepGraphIndex> = HashSet::new();
-    for edge in graph.edge_references() {
-        has_incoming.insert(edge.target());
+    for idx in graph.node_indices() {
+        has_incoming.extend(graph.parents(idx));
     }
     let chains = chains(graph);
     // Node-arena entries first, then references (the render sorts heads deterministically, so
@@ -164,7 +161,7 @@ fn find_heads(graph: &StepGraph) -> Vec<StepGraphIndex> {
     graph
         .node_indices()
         .chain(graph.ref_indices())
-        .filter(|idx| match graph.anchor_of(*idx) {
+        .filter(|idx| match graph.position_of(*idx) {
             Some(stored) => {
                 let approach = positions::ref_approach(graph, *idx);
                 approach.is_empty()
@@ -186,7 +183,7 @@ fn find_heads(graph: &StepGraph) -> Vec<StepGraphIndex> {
 /// when they were nodes.
 fn get_sorted_parents(graph: &StepGraph, node: StepGraphIndex) -> Vec<StepGraphIndex> {
     let chains = chains(graph);
-    if let Some(stored) = graph.anchor_of(node) {
+    if let Some(stored) = graph.position_of(node) {
         let chain = chains
             .get(&(stored.anchor, positions::ref_approach(graph, node)))
             .map(Vec::as_slice)
@@ -199,13 +196,11 @@ fn get_sorted_parents(graph: &StepGraph, node: StepGraphIndex) -> Vec<StepGraphI
             .unwrap_or(stored.anchor);
         return vec![below];
     }
-    let mut parents: Vec<_> = graph
-        .edges(node)
-        .map(|e| (e.weight().order, e.target()))
-        .collect();
-    parents.sort_by_key(|(order, _)| *order);
-    parents
-        .into_iter()
+    graph
+        .parents(node)
+        .iter()
+        .copied()
+        .enumerate()
         .map(|(order, target)| {
             chains
                 .iter()
@@ -336,7 +331,7 @@ where
         // A positioned reference whose anchor lies outside the set is a boundary chain the
         // edge-era walk never reached from this subgraph's heads — don't seed it.
         .filter(|n| {
-            graph.anchor_of(*n).is_none_or(|stored| {
+            graph.position_of(*n).is_none_or(|stored| {
                 crate::graph_rebase::positions::resolve_to_pick(graph, stored.anchor)
                     .is_some_and(|pick| nodes.contains(&pick))
             })
@@ -471,9 +466,11 @@ mod tests {
         )
     }
 
-    /// Helper to build a graph and add edges with order
+    /// Helper to append a parent slot; the stated order documents the intended slot and is
+    /// asserted against the push (arrays make insertion order the structure).
     fn add_edge(graph: &mut StepGraph, from: StepGraphIndex, to: StepGraphIndex, order: usize) {
-        graph.add_edge(from, to, Edge { order });
+        let slot = graph.push_parent(from, to);
+        assert_eq!(slot, order, "test builder must push parents in slot order");
     }
 
     #[test]

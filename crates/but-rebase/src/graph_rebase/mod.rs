@@ -175,17 +175,7 @@ impl Step {
     }
 }
 
-/// A parent link from a child pick to one of its parents.
-#[derive(Debug, Clone)]
-pub(crate) struct Edge {
-    /// This parent's slot in the child commit's parent list (0 = first parent).
-    ///
-    /// A child's outgoing edges must all have distinct orders; the order is what the rebase
-    /// writes out as the commit's parent ordering, so a merge's first/second parent is preserved.
-    order: usize,
-}
-
-pub(crate) use step_graph::{Direction, StepGraph, StepGraphIndex};
+pub(crate) use step_graph::{StepGraph, StepGraphIndex};
 
 /// Convert a structure to a selector for a particular editor.
 ///

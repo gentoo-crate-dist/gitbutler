@@ -194,7 +194,7 @@ fn changing_edges_rewrites_sha256_parentage() -> Result<()> {
         1,
     ]
     ");
-    editor.add_edge(a_selector, b_selector, 1)?;
+    editor.insert_edge(a_selector, b_selector, 1)?;
 
     let outcome = editor.rebase()?;
     let overlayed = graph_tree(&outcome.overlayed_graph()?).to_string();

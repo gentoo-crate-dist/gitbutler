@@ -2,7 +2,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::graph_rebase::Direction;
 use anyhow::{Context, Result, bail};
 use but_core::{RefMetadata, commit::tree_expression::TreeExpression};
 use gix::prelude::ObjectIdExt;
@@ -244,10 +243,7 @@ fn traverse_graph_for_planning<M: RefMetadata>(
     let mut seen_normal = HashSet::<StepGraphIndex>::new();
     let mut seen_target_ancestor_walk = HashSet::<StepGraphIndex>::new();
 
-    let mut roots = editor
-        .graph
-        .externals(Direction::Incoming)
-        .collect::<Vec<StepGraphIndex>>();
+    let mut roots = editor.graph.tips().collect::<Vec<StepGraphIndex>>();
     roots.sort_unstable();
 
     for root in roots {

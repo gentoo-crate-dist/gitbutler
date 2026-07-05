@@ -5,7 +5,6 @@ use std::{
     fmt::Write as _,
 };
 
-use crate::graph_rebase::Direction;
 use anyhow::{Context, Result, bail};
 use but_core::RefMetadata;
 use gix::refs::{
@@ -33,10 +32,7 @@ impl<'ws, 'graph, M: RefMetadata> Editor<'ws, 'graph, M> {
         // Every external (a node with no children) seeds the traversal so the
         // output graph keeps every commit - immutable picks are copied verbatim
         // rather than cherry-picked.
-        let rebase_heads = self
-            .graph
-            .externals(Direction::Incoming)
-            .collect::<Vec<_>>();
+        let rebase_heads = self.graph.tips().collect::<Vec<_>>();
         let steps_to_pick = order_steps_picking(&self.graph, &rebase_heads);
 
         // A 1 to 1 mapping between the incoming graph and the output graph
@@ -135,19 +131,12 @@ impl<'ws, 'graph, M: RefMetadata> Editor<'ws, 'graph, M> {
 
             graph_mapping.insert(step_idx, new_idx);
 
-            let mut edges = self
-                .graph
-                .edges_directed(step_idx, Direction::Outgoing)
-                .collect::<Vec<_>>();
-            edges.sort_by_key(|e| e.weight().order);
-            edges.reverse();
-
-            for e in edges {
-                let Some(new_parent) = graph_mapping.get(&e.target()) else {
+            // Parent arrays copy slot-for-slot, so statement names carry unchanged.
+            for parent in self.graph.parents(step_idx) {
+                let Some(new_parent) = graph_mapping.get(parent) else {
                     bail!("Failed to find corresponding parent");
                 };
-
-                output_graph.add_edge(new_idx, *new_parent, e.weight().clone());
+                output_graph.push_parent(new_idx, *new_parent);
             }
         }
 
@@ -291,15 +280,14 @@ fn order_steps_picking(graph: &StepGraph, heads: &[StepGraphIndex]) -> VecDeque<
     let mut bases = VecDeque::new();
 
     while let Some(head) = heads.pop() {
-        let edges = graph.edges_directed(head, Direction::Outgoing);
+        let parents = graph.parents(head);
 
-        if edges.clone().count() == 0 {
+        if parents.is_empty() {
             bases.push_back(head);
             continue;
         }
 
-        for edge in edges {
-            let t = edge.target();
+        for &t in parents {
             if seen.insert(t) {
                 heads.push(t);
             }
@@ -312,12 +300,9 @@ fn order_steps_picking(graph: &StepGraph, heads: &[StepGraphIndex]) -> VecDeque<
     let mut retraversed = bases.iter().cloned().collect::<HashSet<_>>();
 
     while let Some(base) = bases.pop_front() {
-        for edge in graph.edges_directed(base, Direction::Incoming) {
+        for (s, _) in graph.incoming_legs(base) {
             // We only want to queue nodes for traversing that have had all of their parents traversed.
-            let s = edge.source();
-            let mut outgoing_edges = graph.edges_directed(s, Direction::Outgoing);
-            let all_parents_seen = outgoing_edges.clone().count() == 0
-                || outgoing_edges.all(|e| retraversed.contains(&e.target()));
+            let all_parents_seen = graph.parents(s).iter().all(|t| retraversed.contains(t));
             if all_parents_seen && seen.contains(&s) && retraversed.insert(s) {
                 bases.push_back(s);
                 ordered.push_back(s);
@@ -381,7 +366,7 @@ mod test {
         use anyhow::Result;
 
         use crate::graph_rebase::{
-            Edge, Step, StepGraph, rebase::order_steps_picking, testing::render_ascii_graph,
+            Step, StepGraph, rebase::order_steps_picking, testing::render_ascii_graph,
         };
 
         #[test]
@@ -397,8 +382,8 @@ mod test {
                 "3000000000000000000000000000000000000000",
             )?));
 
-            graph.add_edge(a, b, Edge { order: 0 });
-            graph.add_edge(b, c, Edge { order: 0 });
+            graph.push_parent(a, b);
+            graph.push_parent(b, c);
 
             insta::assert_snapshot!(render_ascii_graph(&graph, |_| None), @"
             ●  1000000
@@ -450,17 +435,17 @@ mod test {
                 "1100000000000000000000000000000000000000",
             )?));
 
-            graph.add_edge(a, b, Edge { order: 0 });
-            graph.add_edge(b, c, Edge { order: 0 });
-            graph.add_edge(c, d, Edge { order: 0 });
-            graph.add_edge(d, e, Edge { order: 0 });
+            graph.push_parent(a, b);
+            graph.push_parent(b, c);
+            graph.push_parent(c, d);
+            graph.push_parent(d, e);
 
-            graph.add_edge(f, g, Edge { order: 0 });
-            graph.add_edge(g, c, Edge { order: 0 });
+            graph.push_parent(f, g);
+            graph.push_parent(g, c);
 
-            graph.add_edge(h, d, Edge { order: 0 });
+            graph.push_parent(h, d);
 
-            graph.add_edge(i, j, Edge { order: 0 });
+            graph.push_parent(i, j);
 
             insta::assert_snapshot!(render_ascii_graph(&graph, |_| None), @"
             ●  1000000
@@ -478,7 +463,7 @@ mod test {
             ");
 
             let ordered_from_a = order_steps_picking(&graph, &[f, h]);
-            assert_eq!(&ordered_from_a, &[e, d, h, c, g, f]);
+            assert_eq!(&ordered_from_a, &[e, d, c, h, g, f]);
 
             Ok(())
         }
@@ -502,12 +487,12 @@ mod test {
                 "5000000000000000000000000000000000000000",
             )?));
 
-            graph.add_edge(a, b, Edge { order: 0 });
-            graph.add_edge(b, c, Edge { order: 0 });
+            graph.push_parent(a, b);
+            graph.push_parent(b, c);
 
-            graph.add_edge(a, d, Edge { order: 1 });
-            graph.add_edge(d, e, Edge { order: 0 });
-            graph.add_edge(e, b, Edge { order: 0 });
+            graph.push_parent(a, d);
+            graph.push_parent(d, e);
+            graph.push_parent(e, b);
 
             insta::assert_snapshot!(render_ascii_graph(&graph, |_| None), @"
             ●    1000000
@@ -544,12 +529,12 @@ mod test {
                 "5000000000000000000000000000000000000000",
             )?));
 
-            graph.add_edge(a, d, Edge { order: 0 });
-            graph.add_edge(d, e, Edge { order: 0 });
-            graph.add_edge(e, b, Edge { order: 0 });
-            graph.add_edge(b, c, Edge { order: 0 });
+            graph.push_parent(a, d);
+            graph.push_parent(d, e);
+            graph.push_parent(e, b);
+            graph.push_parent(b, c);
 
-            graph.add_edge(a, b, Edge { order: 1 });
+            graph.push_parent(a, b);
 
             insta::assert_snapshot!(render_ascii_graph(&graph, |_| None), @"
             ●    1000000

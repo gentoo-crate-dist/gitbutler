@@ -6,7 +6,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::graph_rebase::Direction;
 use crate::graph_rebase::positions;
 use anyhow::Result;
 use but_core::{
@@ -681,19 +680,21 @@ fn divide_workspace_into_stacks(
     // Each parent of the workspace commit seeds a stack, flooded pick-to-pick: every outgoing
     // edge resolves through reference/tombstone steps to the pick beneath.
     let mut initial_stacks = graph
-        .edges_directed(workspace_commit_ix, Direction::Outgoing)
-        .map(|edge| {
+        .parents(workspace_commit_ix)
+        .iter()
+        .copied()
+        .map(|head| {
             let mut nodes = std::collections::HashSet::new();
             let mut tips = Vec::new();
-            if let Some(pick) = positions::resolve_to_pick(graph, edge.target())
+            if let Some(pick) = positions::resolve_to_pick(graph, head)
                 && head_not_target.nodes.contains(&pick)
             {
                 nodes.insert(pick);
                 tips.push(pick);
             }
             while let Some(tip) = tips.pop() {
-                for edge in graph.edges_directed(tip, Direction::Outgoing) {
-                    let Some(pick) = positions::resolve_to_pick(graph, edge.target()) else {
+                for &parent in graph.parents(tip) {
+                    let Some(pick) = positions::resolve_to_pick(graph, parent) else {
                         continue;
                     };
                     if !head_not_target.nodes.contains(&pick) {
@@ -705,14 +706,17 @@ fn divide_workspace_into_stacks(
                 }
             }
             NodeSet {
-                heads: vec![edge.target()],
+                heads: vec![head],
                 nodes,
             }
         })
         .collect::<Vec<_>>();
 
-    // Merge stacks that share any pick (they aren't actually distinct).
+    // Merge stacks that share any pick (they aren't actually distinct). The pop-loop takes
+    // from the back, so reverse first: stacks come out in the workspace commit's slot order,
+    // first parent first.
     let mut deduplicated = vec![];
+    initial_stacks.reverse();
     while let Some(mut out) = initial_stacks.pop() {
         for bix in (0..initial_stacks.len()).rev() {
             #[expect(clippy::indexing_slicing)]
@@ -734,7 +738,7 @@ fn divide_workspace_into_stacks(
     // anchor's stack — the workspace commit itself is in none), else the anchor pick's stack.
     // References belonging to neither (e.g. the target's own ref above the excluded target
     // commit) stay outside every stack.
-    for (node, stored) in graph.anchored_refs() {
+    for (node, stored) in graph.positioned_refs() {
         let anchor = positions::resolve_to_pick(graph, stored.anchor);
         let approach = positions::ref_approach(graph, node);
         let by_anchor = |a: Option<StepGraphIndex>| {
@@ -814,7 +818,7 @@ fn attach_flooded_refs(
     entry: Option<StepGraphIndex>,
 ) {
     let mut additions: Vec<StepGraphIndex> = graph
-        .anchored_refs()
+        .positioned_refs()
         .filter_map(|(node, _stored)| {
             // A chain any in-region leg approaches was flooded through before the walk
             // stopped at a boundary — membership is broader than lane assignment, which
@@ -829,12 +833,12 @@ fn attach_flooded_refs(
         })
         .collect();
     if let Some(entry) = entry
-        && let Some(entry_stored) = graph.anchor_of(entry)
+        && let Some(entry_stored) = graph.position_of(entry)
     {
         additions.push(entry);
         let entry_approach = positions::ref_approach(graph, entry);
         let entry_depth = positions::ref_depth(graph, entry);
-        additions.extend(graph.anchored_refs().filter_map(|(node, stored)| {
+        additions.extend(graph.positioned_refs().filter_map(|(node, stored)| {
             (stored.anchor == entry_stored.anchor
                 && positions::ref_approach(graph, node) == entry_approach
                 && positions::ref_depth(graph, node) < entry_depth)
