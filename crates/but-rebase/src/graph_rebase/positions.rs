@@ -109,10 +109,12 @@ pub(crate) fn ref_approach(
     let (Some(stored), Some(kind)) = (graph.anchor_of(node), graph.ref_kind(node)) else {
         return Vec::new();
     };
-    match resolve_to_pick(graph, stored.anchor) {
+    let approach = match resolve_to_pick(graph, stored.anchor) {
         Some(pick) => derive_approach(graph, pick, &kind),
         None => Vec::new(),
-    }
+    };
+    crate::graph_rebase::arrangement::probe_read_divergence(graph, node, &approach);
+    approach
 }
 
 /// Derive the position of the reference at `ref_node` from CHAIN TOPOLOGY — only meaningful

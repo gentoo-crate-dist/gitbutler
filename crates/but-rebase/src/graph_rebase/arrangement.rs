@@ -705,12 +705,14 @@ fn derive(
     out
 }
 
-/// TEMP (store-swap bridge): derive every anchored reference's approach from the graph's
-/// SHADOW lane table (maintained inside `set_anchor`) by consumption — merge entries by
-/// resolved pick, order `Count` lanes by their first live leg, let each consume its count
-/// from the pick's sorted legs — and compare against the kind-derived `ref_approach`.
-/// Divergences enumerate where mutation sites must maintain the table for the swap to hold.
-fn census_lane_table(graph: &StepGraph, notes: &mut Vec<String>) {
+/// TEMP (store-swap bridge): the consumption READ of the shadow lane table — every anchored
+/// reference's approach derived purely from (lane order + carry counts + live legs). Merge
+/// entries by resolved pick, order `Count` lanes by their first live leg, let each consume
+/// its count from the pick's sorted legs.
+pub(crate) fn lane_approaches(
+    graph: &StepGraph,
+    notes: &mut Vec<String>,
+) -> HashMap<StepGraphIndex, Vec<(StepGraphIndex, usize)>> {
     // Tombstoned anchors share a live pick, so merge stored keys by resolution — and merge
     // lanes with identical identity across keys: re-keying fragments one conceptual lane
     // into several table entries (same legs = same approach = same lane).
@@ -729,13 +731,7 @@ fn census_lane_table(graph: &StepGraph, notes: &mut Vec<String>) {
         }
     }
     let mut derived: HashMap<StepGraphIndex, Vec<(StepGraphIndex, usize)>> = HashMap::new();
-    let mut group_of: HashMap<StepGraphIndex, Option<StepGraphIndex>> = HashMap::new();
     for (pick, lanes) in groups {
-        for lane in &lanes {
-            for &member in &lane.members {
-                group_of.insert(member, pick);
-            }
-        }
         let legs = pick.map(|p| legs_into_pick(graph, p)).unwrap_or_default();
         // Emulate the maintenance the swap will make explicit at edge-mutating ops: legs
         // that died since write time leave a lane's carry (measured via LANE-STALE-LEGS,
@@ -799,6 +795,53 @@ fn census_lane_table(graph: &StepGraph, notes: &mut Vec<String>) {
             }
         }
     }
+    derived
+}
+
+/// TEMP (store-swap bridge): per-call probe hooked into `ref_approach` — compare the
+/// kind-derived approach a read is about to return against the table's consumption read,
+/// catching MID-OP divergences the checkpoint census cannot see. Env-gated like the census.
+pub(crate) fn probe_read_divergence(
+    graph: &StepGraph,
+    node: StepGraphIndex,
+    kind_approach: &[(StepGraphIndex, usize)],
+) {
+    static CENSUS_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let Some(path) = CENSUS_PATH.get_or_init(|| std::env::var("BUT_ARRANGE_CENSUS").ok()) else {
+        return;
+    };
+    let mut scratch = Vec::new();
+    let table = lane_approaches(graph, &mut scratch);
+    if table.get(&node).map(Vec::as_slice) == Some(kind_approach) {
+        return;
+    }
+    use std::io::Write as _;
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
+        return;
+    };
+    let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+    let frames: Vec<&str> = backtrace
+        .lines()
+        .filter(|line| line.contains("graph_rebase") && !line.contains("arrangement"))
+        .take(6)
+        .map(str::trim)
+        .collect();
+    let _ = writeln!(
+        file,
+        "READ-DIVERGE node {node} table={:?} kind={kind_approach:?} at {frames:?}",
+        table.get(&node)
+    );
+}
+
+/// TEMP (store-swap bridge): compare the table's consumption read against the kind-derived
+/// `ref_approach` for every anchored reference. Divergences enumerate where mutation sites
+/// must maintain the table for the swap to hold.
+fn census_lane_table(graph: &StepGraph, notes: &mut Vec<String>) {
+    let derived = lane_approaches(graph, notes);
     for (node, stored) in graph.anchored_refs() {
         let kind_approach = positions::ref_approach(graph, node);
         match derived.get(&node) {
@@ -811,10 +854,7 @@ fn census_lane_table(graph: &StepGraph, notes: &mut Vec<String>) {
                 let live = positions::resolve_to_pick(graph, stored.anchor)
                     .map(|pick| legs_into_pick(graph, pick))
                     .unwrap_or_default();
-                let group = group_of
-                    .get(&node)
-                    .copied()
-                    .flatten()
+                let group = positions::resolve_to_pick(graph, stored.anchor)
                     .map(|pick| {
                         graph
                             .lane_table()
