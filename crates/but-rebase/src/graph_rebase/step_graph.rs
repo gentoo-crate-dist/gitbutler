@@ -187,9 +187,23 @@ pub(crate) struct StepGraph {
 }
 
 impl StepGraph {
-    /// An empty graph.
-    pub(crate) fn new() -> Self {
-        Self::default()
+    /// Adopt `arena` wholesale as THE arena — full commit payloads (flags, refs, generation)
+    /// survive, which the write-through put-back depends on. The caller must have normalized
+    /// every parent slot to PRESENT (the editor's slot invariant) and follows up with
+    /// per-node settings via [`Self::set_step`].
+    pub(crate) fn adopt(arena: but_graph::CommitGraph) -> Self {
+        let settings = vec![PickSettings::default(); arena.node_count()];
+        Self {
+            arena,
+            settings,
+            refs: Vec::new(),
+            lanes: HashMap::new(),
+        }
+    }
+
+    /// THE arena, read-only — the write-through seam projects it after a rebase.
+    pub(crate) fn arena(&self) -> &but_graph::CommitGraph {
+        &self.arena
     }
 
     /// Add `step` to the node arena and return its stable id. References do not belong here —

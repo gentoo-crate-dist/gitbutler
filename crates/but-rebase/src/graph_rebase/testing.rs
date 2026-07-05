@@ -482,7 +482,7 @@ mod tests {
     #[test]
     fn linear_graph() {
         // Simple linear: main on B -> C -> D
-        let mut graph = StepGraph::new();
+        let mut graph = StepGraph::default();
         let b = graph.add_node(make_pick("1111111111111111111111111111111111111111"));
         let c = graph.add_node(make_pick("2222222222222222222222222222222222222222"));
         let d = graph.add_node(make_pick("3333333333333333333333333333333333333333"));
@@ -511,7 +511,7 @@ mod tests {
         // A   B
         //  \ /
         //   C
-        let mut graph = StepGraph::new();
+        let mut graph = StepGraph::default();
         let m = graph.add_node(make_pick("9999999999999999999999999999999999999999"));
         let a = graph.add_node(make_pick("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
@@ -545,7 +545,7 @@ mod tests {
         //  A  B  C
         //   \ | /
         //     D
-        let mut graph = StepGraph::new();
+        let mut graph = StepGraph::default();
         let m = graph.add_node(make_pick("9999999999999999999999999999999999999999"));
         let a = graph.add_node(make_pick("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
@@ -586,7 +586,7 @@ mod tests {
         //  X  Y  Z  \
         //   \ | /   |
         //     C-----+
-        let mut graph = StepGraph::new();
+        let mut graph = StepGraph::default();
         let m = graph.add_node(make_pick("9999999999999999999999999999999999999999"));
         let f = graph.add_node(make_pick("ffffffffffffffffffffffffffffffffffffffff")); // fork point
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
@@ -634,7 +634,7 @@ mod tests {
     #[test]
     fn four_way_merge() {
         // Four-way merge
-        let mut graph = StepGraph::new();
+        let mut graph = StepGraph::default();
         let m = graph.add_node(make_pick("9999999999999999999999999999999999999999"));
         let a = graph.add_node(make_pick("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
@@ -681,7 +681,7 @@ mod tests {
         // A3  |
         //  \ /
         //   C
-        let mut graph = StepGraph::new();
+        let mut graph = StepGraph::default();
         let m = graph.add_node(make_pick("9999999999999999999999999999999999999999"));
         let a1 = graph.add_node(make_pick("a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"));
         let a2 = graph.add_node(make_pick("a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2"));
@@ -721,7 +721,7 @@ mod tests {
         //   D   E   |
         //    \ /    |
         //     F-----+
-        let mut graph = StepGraph::new();
+        let mut graph = StepGraph::default();
         let a = graph.add_node(make_pick("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
         let c = graph.add_node(make_pick("cccccccccccccccccccccccccccccccccccccccc"));
@@ -770,7 +770,7 @@ mod tests {
         //     X Y Z  \|
         //      \|/    |
         //       D-----+
-        let mut graph = StepGraph::new();
+        let mut graph = StepGraph::default();
         let m = graph.add_node(make_pick("9999999999999999999999999999999999999999"));
         let f = graph.add_node(make_pick("ffffffffffffffffffffffffffffffffffffffff"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
@@ -832,7 +832,7 @@ mod tests {
         //   E   F     <- D forks to E and F, F is shared with C
         //    \ /
         //     base
-        let mut graph = StepGraph::new();
+        let mut graph = StepGraph::default();
         let m = graph.add_node(make_pick("9999999999999999999999999999999999999999"));
         let a = graph.add_node(make_pick("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
@@ -899,7 +899,7 @@ mod tests {
         //   |     G     <- B, C, and D's second branch merge at G
         //    \   /
         //      F        <- E and G merge at F
-        let mut graph = StepGraph::new();
+        let mut graph = StepGraph::default();
         let m = graph.add_node(make_pick("1111111111111111111111111111111111111111"));
         let a = graph.add_node(make_pick("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
@@ -963,7 +963,7 @@ mod tests {
         //  E F shared <- D forks to E, F, shared where shared comes from C
         //   \|/
         //    base
-        let mut graph = StepGraph::new();
+        let mut graph = StepGraph::default();
         let m = graph.add_node(make_pick("9999999999999999999999999999999999999999"));
         let a = graph.add_node(make_pick("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
@@ -1021,7 +1021,7 @@ mod tests {
         // main on a -> b -> base, rendering only the subgraph {a, b}.
         // `main` (positioned on `a`) and `base` (a parent of `b`) are outside
         // the set, so neither is drawn and `b` renders as a root.
-        let mut graph = StepGraph::new();
+        let mut graph = StepGraph::default();
         let a = graph.add_node(make_pick("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
         let base = graph.add_node(make_pick("0000000000000000000000000000000000000000"));
