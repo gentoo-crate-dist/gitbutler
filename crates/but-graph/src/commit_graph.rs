@@ -56,12 +56,27 @@ pub struct CommitNode {
     pub generation: u32,
 }
 
-/// A commit-first graph: an arena of commits keyed by id, with `commit → parent` edges read from
-/// each node's `parent_ids` and the reverse (`parent → child`) adjacency derived for downward walks.
+/// One `commit → parent` edge, HANDLE-based: parallel to a slot in the commit's `parent_ids`.
+/// The raw id in `parent_ids` is payload; this is the graph structure.
+#[derive(Debug, Clone, Copy)]
+struct ParentSlot {
+    /// The parent's node, when it is present in the graph. `None` = the raw parent id points
+    /// outside the graph (partial traversal — this subgraph roots here).
+    target: Option<CommitIdx>,
+    /// Whether the traversal actually FOLLOWED this link. A parent can be present in the graph
+    /// via another path while this specific edge was severed (limits, integrated stop-early).
+    connected: bool,
+}
+
+/// A commit-first graph: an arena of commits with HANDLE-based `commit → parent` edges (one
+/// [`ParentSlot`] per raw `parent_ids` entry) and the reverse (`parent → child`) adjacency derived
+/// for downward walks. `ObjectId` is pure payload; `by_id` is a rebuildable lookup index.
 #[derive(Debug, Clone, Default)]
 pub struct CommitGraph {
     nodes: Vec<CommitNode>,
     by_id: HashMap<gix::ObjectId, CommitIdx>,
+    /// Per node, one slot per `parent_ids` entry — presence and connectivity of that edge.
+    parent_slots: Vec<Vec<ParentSlot>>,
     /// `parent → children` adjacency, derived at build time so we can detect branch points and walk
     /// downward (the projection walks from the workspace tip toward the base).
     children: Vec<Vec<CommitIdx>>,
@@ -74,11 +89,6 @@ pub struct CommitGraph {
     /// [`CommitFlags`](crate::CommitFlags) so it neither perturbs the walk's goal bits nor the
     /// segment fingerprint; used to tell a real managed merge from a ws ref advanced past it.
     managed_ws_commits: HashSet<gix::ObjectId>,
-    /// `(child, parent)` pairs the traversal actually CONNECTED, when built
-    /// [from the walk](Self::from_walk). A commit's raw `parent_ids` can point past a traversal
-    /// cut (limit, integrated stop-early); connectivity accessors must not rejoin what the walk
-    /// severed. `None` for graphs built directly from commits (all raw parents count).
-    connected: Option<HashSet<(gix::ObjectId, gix::ObjectId)>>,
     /// When built [from the walk](Self::from_walk): whether the traversal stopped queueing after
     /// hitting the hard limit. Derived graphs must carry it onto the final `Graph`.
     pub(crate) hard_limit_hit: bool,
@@ -113,11 +123,25 @@ impl CommitGraph {
             .map(|(idx, n)| (n.commit.id, idx))
             .collect();
 
-        // Reverse adjacency: for each node, record it as a child of every parent that is present.
+        // The handle-based edges: one slot per raw parent entry, presence from the index, every
+        // edge connected until a walk restricts it. Reverse adjacency mirrors the present slots.
+        let parent_slots: Vec<Vec<ParentSlot>> = nodes
+            .iter()
+            .map(|n| {
+                n.commit
+                    .parent_ids
+                    .iter()
+                    .map(|parent| ParentSlot {
+                        target: by_id.get(parent).copied(),
+                        connected: true,
+                    })
+                    .collect()
+            })
+            .collect();
         let mut children = vec![Vec::new(); nodes.len()];
-        for (idx, n) in nodes.iter().enumerate() {
-            for parent in &n.commit.parent_ids {
-                if let Some(&pidx) = by_id.get(parent) {
+        for (idx, slots) in parent_slots.iter().enumerate() {
+            for slot in slots {
+                if let Some(pidx) = slot.target {
                     children[pidx].push(idx);
                 }
             }
@@ -126,11 +150,11 @@ impl CommitGraph {
         let mut graph = CommitGraph {
             nodes,
             by_id,
+            parent_slots,
             children,
             entrypoint,
             entrypoint_ref: None,
             managed_ws_commits: HashSet::new(),
-            connected: None,
             hard_limit_hit: false,
             traversal_tips: Vec::new(),
             explicit_tips: false,
@@ -139,32 +163,33 @@ impl CommitGraph {
         graph
     }
 
-    /// Restrict connectivity to the given `(child, parent)` pairs and rebuild the child adjacency
-    /// accordingly. See the `connected` field.
+    /// Restrict connectivity to the given `(child, parent)` pairs — flag every other slot as
+    /// severed — and rebuild the child adjacency from the connected, present slots.
     fn set_connected(&mut self, connected: HashSet<(gix::ObjectId, gix::ObjectId)>) {
         for children in &mut self.children {
             children.clear();
         }
         for idx in 0..self.nodes.len() {
             let id = self.nodes[idx].commit.id;
-            for pos in 0..self.nodes[idx].commit.parent_ids.len() {
+            for pos in 0..self.parent_slots[idx].len() {
                 let parent = self.nodes[idx].commit.parent_ids[pos];
-                if connected.contains(&(id, parent))
-                    && let Some(&pidx) = self.by_id.get(&parent)
+                let slot = &mut self.parent_slots[idx][pos];
+                slot.connected = connected.contains(&(id, parent));
+                if slot.connected
+                    && let Some(pidx) = slot.target
                 {
                     self.children[pidx].push(idx);
                 }
             }
         }
-        self.connected = Some(connected);
         self.recompute_generations();
     }
 
-    /// Is the `child → parent` link one the traversal actually followed?
-    fn is_connected(&self, child: gix::ObjectId, parent: gix::ObjectId) -> bool {
-        self.connected
-            .as_ref()
-            .is_none_or(|c| c.contains(&(child, parent)))
+    /// The slots of `id`'s node, when present.
+    fn slots_of(&self, id: gix::ObjectId) -> Option<&[ParentSlot]> {
+        self.by_id
+            .get(&id)
+            .map(|&idx| self.parent_slots[idx].as_slice())
     }
 
     /// Assemble from the NATIVE traversal outcome (see `init::native_walk`).
@@ -268,16 +293,16 @@ impl CommitGraph {
     /// The commit's CONNECTED parent list, first-parent first — parents the traversal severed
     /// (limits, integrated stop-early, display cuts) are omitted.
     pub(crate) fn all_parent_ids(&self, id: gix::ObjectId) -> Vec<gix::ObjectId> {
-        self.node(id)
-            .map(|n| {
-                n.commit
-                    .parent_ids
-                    .iter()
-                    .copied()
-                    .filter(|p| self.is_connected(id, *p))
-                    .collect()
-            })
-            .unwrap_or_default()
+        let Some((node, slots)) = self.node(id).zip(self.slots_of(id)) else {
+            return Vec::new();
+        };
+        node.commit
+            .parent_ids
+            .iter()
+            .copied()
+            .zip(slots)
+            .filter_map(|(p, slot)| slot.connected.then_some(p))
+            .collect()
     }
 
     /// All ancestors of `tip` (inclusive), following CONNECTED parent edges — history the
@@ -298,12 +323,8 @@ impl CommitGraph {
     /// traversal cut history here (limits, integrated stop-early), so ancestry continues
     /// beyond what the graph can see.
     pub fn has_cut_parents(&self, id: gix::ObjectId) -> bool {
-        self.node(id).is_some_and(|n| {
-            n.commit
-                .parent_ids
-                .iter()
-                .any(|p| !self.is_connected(id, *p))
-        })
+        self.slots_of(id)
+            .is_some_and(|slots| slots.iter().any(|slot| !slot.connected))
     }
 
     /// The commit that `ref_name` points at, if present in the graph.
@@ -328,20 +349,17 @@ impl CommitGraph {
 
     /// The parents of `id` that are present in this graph, first-parent first.
     pub fn parents(&self, id: gix::ObjectId) -> impl Iterator<Item = gix::ObjectId> + '_ {
-        self.node(id)
-            .into_iter()
-            .flat_map(|n| n.commit.parent_ids.iter().copied())
-            .filter(|p| self.by_id.contains_key(p))
+        self.slots_of(id)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|slot| slot.target.map(|idx| self.nodes[idx].commit.id))
     }
 
     /// The first parent of `id` (the next commit walking down first-parent), if present.
     pub fn first_parent(&self, id: gix::ObjectId) -> Option<gix::ObjectId> {
-        let n = self.node(id)?;
-        n.commit
-            .parent_ids
-            .first()
-            .copied()
-            .filter(|p| self.by_id.contains_key(p) && self.is_connected(id, *p))
+        let slot = self.slots_of(id)?.first()?;
+        let target = slot.target.filter(|_| slot.connected)?;
+        Some(self.nodes[target].commit.id)
     }
 
     /// The children of `id` (commits that list `id` as a parent). More than one means a branch point.
@@ -358,14 +376,11 @@ impl CommitGraph {
         // Process in topological order (parents before children) so a child's generation is the max
         // over its present parents + 1.
         let order = self.toposort_parents_first();
-        for id in order {
-            let idx = self.by_id[&id];
-            let generation = self.nodes[idx]
-                .commit
-                .parent_ids
+        for idx in order {
+            let generation = self.parent_slots[idx]
                 .iter()
-                .filter_map(|p| self.by_id.get(p))
-                .map(|&pidx| self.nodes[pidx].generation + 1)
+                .filter_map(|slot| slot.target)
+                .map(|pidx| self.nodes[pidx].generation + 1)
                 .max()
                 .unwrap_or(0);
             self.nodes[idx].generation = generation;
@@ -373,22 +388,17 @@ impl CommitGraph {
     }
 
     /// Topological order with parents before children (history order).
-    fn toposort_parents_first(&self) -> Vec<gix::ObjectId> {
+    fn toposort_parents_first(&self) -> Vec<CommitIdx> {
         let mut indegree = vec![0usize; self.nodes.len()];
-        for (idx, n) in self.nodes.iter().enumerate() {
-            indegree[idx] = n
-                .commit
-                .parent_ids
-                .iter()
-                .filter(|p| self.by_id.contains_key(*p))
-                .count();
+        for (idx, slots) in self.parent_slots.iter().enumerate() {
+            indegree[idx] = slots.iter().filter(|slot| slot.target.is_some()).count();
         }
         let mut queue: std::collections::VecDeque<CommitIdx> = (0..self.nodes.len())
             .filter(|&i| indegree[i] == 0)
             .collect();
         let mut out = Vec::with_capacity(self.nodes.len());
         while let Some(idx) = queue.pop_front() {
-            out.push(self.nodes[idx].commit.id);
+            out.push(idx);
             for &child in &self.children[idx] {
                 indegree[child] -= 1;
                 if indegree[child] == 0 {
