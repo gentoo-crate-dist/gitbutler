@@ -358,7 +358,7 @@ pub fn integrate_upstream_with_hints<'ws, 'meta, M: RefMetadata>(
                 // Only parent is the old target sha, and that's not the latest tip of the target ref.
                 // We need to reparent it onto the latest target ref.
                 editor.remove_edges(workspace_commit_selector, *parent_selector)?;
-                editor.add_edge(
+                editor.insert_edge(
                     workspace_commit_selector,
                     target_ref_selector,
                     *parent_order,
@@ -366,7 +366,7 @@ pub fn integrate_upstream_with_hints<'ws, 'meta, M: RefMetadata>(
             }
             [] if !fully_integrated_workspace_parents.is_empty() => {
                 // Orphaned workspace, reparent onto the target ref.
-                editor.add_edge(workspace_commit_selector, target_ref_selector, 0)?;
+                editor.insert_edge(workspace_commit_selector, target_ref_selector, 0)?;
             }
             _ => {}
         }
@@ -395,7 +395,7 @@ pub fn integrate_upstream_with_hints<'ws, 'meta, M: RefMetadata>(
                 Step::Pick(Pick::new_untracked_pick(merge_commit)),
                 insert_side,
             )?;
-            editor.add_edge(merge_commit, target_ref_selector, 1)?;
+            editor.insert_edge(merge_commit, target_ref_selector, 1)?;
         } else {
             let mut edges_to_replace = HashSet::new();
 
@@ -933,7 +933,7 @@ fn replace_direct_checkout_ref_with_fallback<M: RefMetadata>(
         false,
     )?;
     preserve_pick_parents(editor, target_tip_selector)?;
-    editor.add_edge(head_ref_selector, target_tip_selector, 0)?;
+    editor.insert_edge(head_ref_selector, target_tip_selector, 0)?;
 
     Ok((head_ref_selector, fallback_ref_name))
 }

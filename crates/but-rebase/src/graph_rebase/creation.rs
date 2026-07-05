@@ -208,13 +208,16 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                 continue;
             };
 
-            // but-graph yields outgoing edges in parent order, so iterate as-is. The counter below
-            // gives commit-less empty branches distinct, increasing orders — so the StepGraph never
-            // has tied parent orders and needs no insertion-order tie-break.
+            // but-graph yields outgoing edges in parent order, so iterate as-is. The keys below
+            // rank real parents by their index in the source commit's parent array and commit-less
+            // empty branches after them (distinct, increasing) — a ranking, not final orders: the
+            // ranks can have gaps (an empty branch may stand in front of a real parent, or ALL legs
+            // may be commit-less refs over one base), so the sorted ranks compact to dense slots.
             let edges = workspace
                 .graph
                 .edges_directed(*sidx, but_graph::Direction::Outgoing);
             let mut empty_branch_count = 0usize;
+            let mut ranked_targets = Vec::new();
             'inner: for edge in edges {
                 let Some(target) = segments.get(&edge.target()).and_then(|n| n.nodes.first())
                 else {
@@ -225,9 +228,6 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                     continue 'inner;
                 };
 
-                // A real parent gets its index in the source commit's parent array. A dst with no
-                // commit id (a commit-less empty branch) can't be indexed, so it's placed after the
-                // real parents — and each one bumps the counter so siblings get distinct orders.
                 let parents = edge
                     .weight()
                     .src_id()
@@ -235,7 +235,7 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                 let real_parent_index = parents
                     .zip(edge.weight().dst_id())
                     .and_then(|(parents, dst)| parents.iter().position(|p| *p == dst));
-                let order = match real_parent_index {
+                let rank = match real_parent_index {
                     Some(idx) => idx,
                     None => {
                         let o = parents.map_or(0, |p| p.len()) + empty_branch_count;
@@ -243,7 +243,11 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                         o
                     }
                 };
-                graph.add_edge(*source, *target, Edge { order });
+                ranked_targets.push((rank, *target));
+            }
+            ranked_targets.sort_by_key(|(rank, _)| *rank);
+            for (order, (_, target)) in ranked_targets.into_iter().enumerate() {
+                graph.add_edge(*source, target, Edge { order });
             }
         }
 

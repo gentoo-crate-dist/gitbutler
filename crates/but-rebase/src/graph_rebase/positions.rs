@@ -170,7 +170,7 @@ pub(crate) fn debug_assert_positions_total(graph: &StepGraph) {
         return;
     }
     crate::graph_rebase::arrangement::census_to_file(graph);
-    order_census_to_file(graph);
+    debug_assert_orders_dense(graph);
     debug_assert_below_wellformed(graph);
     type OrderedPositionKey = (Option<StepGraphIndex>, Vec<(StepGraphIndex, usize)>, usize);
     let mut seen: std::collections::HashMap<OrderedPositionKey, StepGraphIndex> =
@@ -197,22 +197,23 @@ pub(crate) fn debug_assert_positions_total(graph: &StepGraph) {
     }
 }
 
-/// TEMPORARY census scaffolding for the parent-array swap: are every arena node's outgoing
-/// orders DENSE (the sorted set 0..n) at the standing checkpoints? Gated on
-/// `BUT_ORDER_CENSUS=<file>`; appends one `CHECK n=<nodes-with-edges>` line per checkpoint
-/// plus a `SPARSE`/`DUP` line per violating node.
-fn order_census_to_file(graph: &StepGraph) {
-    let Ok(path) = std::env::var("BUT_ORDER_CENSUS") else {
-        return;
-    };
+/// The parent-order density invariant: every arena node's outgoing orders are DENSE (the sorted
+/// set 0..n) at the standing checkpoints. Armed unconditionally now that every writer authors
+/// exact slots — this is the ground the parent-array store swap stands on.
+///
+/// The stale-statement census below it stays report-only, gated on `BUT_ORDER_CENSUS=<file>`
+/// (one `CHECK n=<nodes-with-edges>` line per checkpoint, one `STALE` line per violation;
+/// `BUT_ORDER_STALE_PANIC=1` for attribution): statements naming dead legs still survive to
+/// checkpoints in a few adjudicated flows, and become live-exact data only at the store swap.
+fn debug_assert_orders_dense(graph: &StepGraph) {
     use std::io::Write as _;
-    let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    else {
-        return;
-    };
+    let mut file = std::env::var("BUT_ORDER_CENSUS").ok().and_then(|path| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .ok()
+    });
     let mut checked = 0usize;
     for node in graph.node_indices() {
         let mut orders: Vec<usize> = graph
@@ -224,17 +225,11 @@ fn order_census_to_file(graph: &StepGraph) {
         }
         checked += 1;
         orders.sort_unstable();
-        let dup = orders.windows(2).any(|w| w[0] == w[1]);
-        let dense = orders.iter().copied().eq(0..orders.len());
-        if dup {
-            let _ = writeln!(file, "DUP node={node} orders={orders:?}");
-            assert!(
-                std::env::var_os("BUT_ORDER_DUP_PANIC").is_none(),
-                "duplicate parent orders at node {node}: {orders:?}"
-            );
-        } else if !dense {
-            let _ = writeln!(file, "SPARSE node={node} orders={orders:?}");
-        }
+        let dense_no_dup = orders.iter().copied().eq(0..orders.len());
+        assert!(
+            dense_no_dup,
+            "parent orders at node {node} are not dense: {orders:?}"
+        );
     }
     // Stale-statement census: lane legs naming a non-live leg of their (resolved) anchor.
     // Statements are read filtered against live legs, so staleness is legal mid-op — this
@@ -254,21 +249,25 @@ fn order_census_to_file(graph: &StepGraph) {
                         leg.0,
                         leg.1
                     );
-                    let _ = writeln!(
-                        file,
-                        "STALE key={key} leg=({},{}) members={:?}",
-                        leg.0,
-                        leg.1,
-                        lane.members
-                            .iter()
-                            .map(|m| m.to_string())
-                            .collect::<Vec<_>>()
-                    );
+                    if let Some(file) = &mut file {
+                        let _ = writeln!(
+                            file,
+                            "STALE key={key} leg=({},{}) members={:?}",
+                            leg.0,
+                            leg.1,
+                            lane.members
+                                .iter()
+                                .map(|m| m.to_string())
+                                .collect::<Vec<_>>()
+                        );
+                    }
                 }
             }
         }
     }
-    let _ = writeln!(file, "CHECK n={checked}");
+    if let Some(file) = &mut file {
+        let _ = writeln!(file, "CHECK n={checked}");
+    }
 }
 
 /// Every stored `below` of a LIVE reference names a positioned reference on the SAME resolved
@@ -539,6 +538,7 @@ pub(crate) fn initialize_positions_and_strip_ref_edges(graph: &mut StepGraph) {
     // Strip: collect the full edge picture first, then rewrite.
     let mut to_remove = Vec::new();
     let mut to_add = Vec::new();
+    let mut dropped = Vec::new();
     for edge in graph.edge_references() {
         let source_is_ref = graph.is_reference(edge.source());
         let target_is_ref = graph.is_reference(edge.target());
@@ -546,8 +546,10 @@ pub(crate) fn initialize_positions_and_strip_ref_edges(graph: &mut StepGraph) {
             to_remove.push(edge.id());
         } else if target_is_ref {
             to_remove.push(edge.id());
-            if let Some(pick) = resolve_to_pick(graph, edge.target()) {
-                to_add.push((edge.source(), pick, edge.weight().clone()));
+            match resolve_to_pick(graph, edge.target()) {
+                Some(pick) => to_add.push((edge.source(), pick, edge.weight().clone())),
+                // Unborn chain: no pick to land on, so the slot is vacated and compacted below.
+                None => dropped.push((edge.source(), edge.weight().order)),
             }
         }
     }
@@ -556,6 +558,19 @@ pub(crate) fn initialize_positions_and_strip_ref_edges(graph: &mut StepGraph) {
     }
     for (source, target, weight) in to_add {
         graph.add_edge(source, target, weight);
+    }
+    // Compact the vacated slots and rename the captured approach legs to match. Safe here:
+    // the provisional positions above carry no legs, so no statement names a shifting slot.
+    for &(source, _) in &dropped {
+        graph.normalize_parent_slots(source);
+    }
+    for (_, _, approach) in &mut positions {
+        for (leg_source, order) in approach.iter_mut() {
+            *order -= dropped
+                .iter()
+                .filter(|(source, vacated)| source == leg_source && vacated < order)
+                .count();
+        }
     }
     // Author each kind against the FINAL legs: the chain edges now target picks directly, so the
     // intended approach classifies to the right `Root`/`AllLegs`/`Lane`. `ambiguous` keeps the

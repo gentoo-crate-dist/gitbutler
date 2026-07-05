@@ -378,14 +378,26 @@ pub(crate) fn unhook_ref(graph: &mut StepGraph, node: StepGraphIndex, drop_legs:
         graph.set_below(mate, unhooked.below);
     }
     if drop_legs && let Some(anchor) = positions::resolve_to_pick(graph, unhooked.anchor) {
-        for (leg, slot) in positions::ref_approach(graph, node) {
-            let removed: Vec<_> = graph
+        let removed: Vec<_> = positions::ref_approach(graph, node)
+            .into_iter()
+            .flat_map(|(leg, slot)| {
+                graph
+                    .edges_directed(leg, Direction::Outgoing)
+                    .filter(|e| e.target() == anchor && e.weight().order == slot)
+                    .map(|e| (leg, e.id()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (leg, id) in removed {
+            // Earlier removals on the same leg shift the pending edges; re-derive the
+            // current slot by edge id so the removal names the leg as the store does now.
+            graph.normalize_parent_slots(leg);
+            if let Some(slot) = graph
                 .edges_directed(leg, Direction::Outgoing)
-                .filter(|e| e.target() == anchor && e.weight().order == slot)
-                .map(|e| e.id())
-                .collect();
-            for id in removed {
-                graph.remove_edge(id);
+                .find(|e| e.id() == id)
+                .map(|e| e.weight().order)
+            {
+                graph.remove_parent(leg, slot);
             }
         }
     }
