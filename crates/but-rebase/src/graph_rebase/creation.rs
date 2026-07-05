@@ -50,16 +50,74 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
         repo: &gix::Repository,
         options: &GraphEditorOptions,
     ) -> Result<Self> {
-        // This first creates runs of nodes and associates them with the
-        // but-graph segments. We then do a second pass over all the segments
-        // and use the but_graph to connect up the runs. Finally, we validate
-        // that each Pick step's parents match the commit's actual parents,
-        // and if not, we disconnect and rewire directly to the correct
-        // parent commits.
+        // The editor graph is built NATIVELY: the ref-placement ledger derives from the
+        // segment graph and create_native builds picks straight from the carried CommitGraph.
+        // `BUT_REBASE_NATIVE=assert` additionally runs the legacy segment-walk build and
+        // panics on any canonical divergence (ledger AND graph); `=0` keeps the legacy graph
+        // (escape hatch).
+        let (graph, references, checkouts) =
+            match std::env::var("BUT_REBASE_NATIVE").ok().as_deref() {
+                Some("0") => create_via_segment_walk(workspace, repo, options)?,
+                Some("assert") => {
+                    let (old_graph, old_references, old_checkouts) =
+                        create_via_segment_walk(workspace, repo, options)?;
+                    let workspace_commit_id = workspace
+                        .graph
+                        .managed_entrypoint_commit(repo)?
+                        .map(|c| c.id);
+                    let extracted =
+                        placements::extract(&old_graph, &old_checkouts, workspace_commit_id)?;
+                    let derived = placements::derive(workspace, repo, options)?;
+                    placements::assert_ledger_parity(&extracted, &derived);
+                    let (native_graph, native_references, native_checkouts) =
+                        create_native(workspace, repo, options, &derived)?;
+                    placements::assert_native_parity(
+                        &old_graph,
+                        &old_checkouts,
+                        &old_references,
+                        &native_graph,
+                        &native_checkouts,
+                        &native_references,
+                        workspace_commit_id,
+                    )?;
+                    (native_graph, native_references, native_checkouts)
+                }
+                _ => {
+                    let ledger = placements::derive(workspace, repo, options)?;
+                    create_native(workspace, repo, options, &ledger)?
+                }
+            };
+        Ok(Self {
+            graph,
+            initial_references: references,
+            checkouts,
+            repo: repo.clone().with_object_memory(),
+            history: RevisionHistory::new(),
+            workspace,
+            meta,
+        })
+    }
+}
 
-        // TODO(CTO): Look into traversing "in workspace" segments that are not
-        // reachable from the entrypoint TODO(CTO): Look into stopping at the
-        // common base
+/// The LEGACY editor-graph build — runs of step nodes per segment, rank-ordered edges, the
+/// parent fixup, then the finalize strip. Kept only as the `BUT_REBASE_NATIVE=assert` oracle
+/// counterpart and the `=0` escape hatch; production creation is native.
+fn create_via_segment_walk(
+    workspace: &but_graph::Workspace,
+    repo: &gix::Repository,
+    options: &GraphEditorOptions,
+) -> Result<(StepGraph, Vec<gix::refs::FullName>, Vec<Checkout>)> {
+    // This first creates runs of nodes and associates them with the
+    // but-graph segments. We then do a second pass over all the segments
+    // and use the but_graph to connect up the runs. Finally, we validate
+    // that each Pick step's parents match the commit's actual parents,
+    // and if not, we disconnect and rewire directly to the correct
+    // parent commits.
+
+    // TODO(CTO): Look into traversing "in workspace" segments that are not
+    // reachable from the entrypoint TODO(CTO): Look into stopping at the
+    // common base
+    {
         let entrypoint = workspace.graph.entrypoint()?;
 
         let mut mutable_entrypoints = vec![entrypoint.segment.id];
@@ -308,7 +366,7 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
 
         // TODO(CTO): We need to eventually list all worktrees that we own
         // here so we can `safe_checkout` them too.
-        let mut checkouts: Vec<Checkout> = head_selectors
+        let checkouts: Vec<Checkout> = head_selectors
             .into_iter()
             .map(|selector| Checkout::Head {
                 selector,
@@ -316,44 +374,7 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
             })
             .collect();
 
-        // The editor graph is built NATIVELY from the carried CommitGraph plus the
-        // ref-placement ledger extracted off the segment walk above — the walk survives only
-        // as the ledger extractor until the ledger comes from plan data directly.
-        // `BUT_REBASE_NATIVE=assert` additionally compares the two builds in canonical form
-        // and panics on divergence; `=0` keeps the segment-walk graph (escape hatch).
-        match std::env::var("BUT_REBASE_NATIVE").ok().as_deref() {
-            Some("0") => {}
-            Some("assert") => {
-                let ledger = placements::extract(&graph, &checkouts, workspace_commit_id)?;
-                let (native_graph, native_references, native_checkouts) =
-                    create_native(workspace, repo, options, &ledger)?;
-                placements::assert_native_parity(
-                    &graph,
-                    &checkouts,
-                    &references,
-                    &native_graph,
-                    &native_checkouts,
-                    &native_references,
-                    workspace_commit_id,
-                )?;
-                (graph, references, checkouts) =
-                    (native_graph, native_references, native_checkouts);
-            }
-            _ => {
-                let ledger = placements::extract(&graph, &checkouts, workspace_commit_id)?;
-                (graph, references, checkouts) = create_native(workspace, repo, options, &ledger)?;
-            }
-        }
-
-        Ok(Self {
-            graph,
-            initial_references: references,
-            checkouts,
-            repo: repo.clone().with_object_memory(),
-            history: RevisionHistory::new(),
-            workspace,
-            meta,
-        })
+        Ok((graph, references, checkouts))
     }
 }
 
