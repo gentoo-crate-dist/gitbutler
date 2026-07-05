@@ -518,10 +518,6 @@ impl RevisionHistory {
         }
         Ok(selector)
     }
-
-    pub(crate) fn add_revision(&mut self, mapping: HashMap<StepGraphIndex, StepGraphIndex>) {
-        self.mappings.push(mapping);
-    }
 }
 
 /// I wanted to assert _somewhere_ the defaults for non-workspace & workspace commits. It doesn't feel like the right place to do it in integration tests because we should assert behaviour rather than details there.

@@ -243,6 +243,16 @@ impl StepGraph {
         }
     }
 
+    /// Rewrite the commit id of the pick at `node` IN PLACE — THE rebase write: the node id,
+    /// its parent array, its settings, and every position naming it all survive unchanged.
+    pub(crate) fn set_commit_id(&mut self, node: StepGraphIndex, id: gix::ObjectId) {
+        let StepGraphIndex::Node(i) = node else {
+            panic!("BUG: only picks carry commit ids");
+        };
+        debug_assert!(self.ids[i].is_some(), "tombstones have no commit id");
+        self.ids[i] = Some(id);
+    }
+
     /// Overwrite the preserved parents of the pick at `node` (see
     /// [`Pick::preserved_parents`]).
     pub(crate) fn set_preserved_parents(
@@ -533,64 +543,6 @@ impl StepGraph {
     /// (unresolved) anchor value.
     pub(crate) fn lane_table(&self) -> &HashMap<StepGraphIndex, Vec<LaneRec>> {
         &self.lanes
-    }
-
-    /// Carry every position from `source` into this graph, ids mapped through `mapping`
-    /// (an isomorphic rebuild): the lane table wholesale — members, carry, and legs as
-    /// surgery maintained them, never re-derived — and each position alongside. Members,
-    /// anchors, and leg sources that did not survive the rebuild are dropped; stale leg
-    /// statements carry verbatim — retention is deliberate, and a dead name stays equally
-    /// dead under any numbering (slots are dense on both sides of the rebuild).
-    pub(crate) fn carry_positions_mapped(
-        &mut self,
-        source: &StepGraph,
-        mapping: &HashMap<StepGraphIndex, StepGraphIndex>,
-    ) {
-        for (key, lanes) in &source.lanes {
-            let Some(&new_key) = mapping.get(key) else {
-                continue;
-            };
-            let mut carried = Vec::new();
-            for lane in lanes {
-                let members: Vec<_> = lane
-                    .members
-                    .iter()
-                    .filter_map(|member| mapping.get(member).copied())
-                    .collect();
-                if members.is_empty() {
-                    continue;
-                }
-                let legs: Vec<_> = lane
-                    .legs
-                    .iter()
-                    .filter_map(|&(src, slot)| Some((*mapping.get(&src)?, slot)))
-                    .collect();
-                let carry = match lane.carry {
-                    LaneCarry::Count(_) => LaneCarry::Count(legs.len()),
-                    ref other => other.clone(),
-                };
-                carried.push(LaneRec {
-                    members,
-                    carry,
-                    legs,
-                });
-            }
-            if !carried.is_empty() {
-                self.lanes.insert(new_key, carried);
-            }
-        }
-        for (node, stored) in source.positioned_refs() {
-            let (Some(&new_node), Some(&new_anchor)) =
-                (mapping.get(&node), mapping.get(&stored.anchor))
-            else {
-                continue;
-            };
-            *self.position_slot(new_node) = Some(RefPosition {
-                anchor: new_anchor,
-                ambiguous: stored.ambiguous,
-                below: stored.below.and_then(|b| mapping.get(&b).copied()),
-            });
-        }
     }
 
     /// The lane containing the reference at `node`, if it holds a position.
