@@ -63,7 +63,7 @@ mod with_workspace {
 
         insta::assert_snapshot!(visualize_commit_graph_all(&repo)?, @"* 3183e43 (HEAD -> gitbutler/workspace, main) M1");
 
-        let graph = but_graph::Graph::from_head(
+        let ws = but_graph::Workspace::from_head(
             &repo,
             &meta,
             project_meta(&meta),
@@ -72,7 +72,6 @@ mod with_workspace {
                 ..Options::limited()
             },
         )?;
-        let ws = graph.into_workspace()?;
 
         // And even though setting an extra-target works like it should, i.e a simulated target
         // which we can store in absence of a selected target branch…
@@ -84,9 +83,8 @@ mod with_workspace {
             .as_mut()
             .expect("always set to have workspace")
             .sha = gix::hash::Kind::Sha1.null();
-        let graph =
-            but_graph::Graph::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
-        let ws = graph.into_workspace()?;
+        let ws =
+            but_graph::Workspace::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️⚠️:1:gitbutler/workspace[🌳] <> ✓!
         └── ≡:0:main
@@ -122,9 +120,8 @@ mod with_workspace {
 
         insta::assert_snapshot!(visualize_commit_graph_all(&repo)?, @"* 3183e43 (HEAD -> gitbutler/workspace, origin/main, main) M1");
 
-        let graph =
-            but_graph::Graph::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
-        let ws = graph.into_workspace()?;
+        let ws =
+            but_graph::Workspace::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
 
         insta::assert_snapshot!(graph_workspace(&ws), @"📕🏘️⚠️:1:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43");
 
@@ -236,9 +233,8 @@ mod with_workspace {
         let path = meta.path().to_owned();
         drop(meta);
         let meta = VirtualBranchesTomlMetadata::from_path(path)?;
-        let graph =
-            but_graph::Graph::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
-        let ws = graph.into_workspace()?;
+        let ws =
+            but_graph::Workspace::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️⚠️:1:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
         ├── ≡📙:2:above-A on 3183e43 {41}
@@ -265,9 +261,8 @@ mod with_workspace {
         * 3183e43 M1
         ");
 
-        let graph =
-            but_graph::Graph::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
-        let ws = graph.into_workspace()?;
+        let ws =
+            but_graph::Workspace::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
 
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
@@ -559,9 +554,8 @@ mod with_workspace {
         let path = meta.path().to_owned();
         drop(meta);
         let meta = VirtualBranchesTomlMetadata::from_path(path)?;
-        let graph =
-            but_graph::Graph::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
-        let ws = graph.into_workspace()?;
+        let ws =
+            but_graph::Workspace::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
         ├── ≡📙:4:above-A on bce0c5e {4cf}
@@ -602,9 +596,8 @@ mod with_workspace {
 
         add_stack_with_segments(&mut meta, 0, "A", StackState::InWorkspace, &[]);
 
-        let graph =
-            but_graph::Graph::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
-        let ws = graph.into_workspace()?;
+        let ws =
+            but_graph::Workspace::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
 
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️⚠️:2:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
@@ -896,9 +889,8 @@ mod with_workspace {
         let path = meta.path().to_owned();
         drop(meta);
         let meta = VirtualBranchesTomlMetadata::from_path(path)?;
-        let graph =
-            but_graph::Graph::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
-        let ws = graph.into_workspace()?;
+        let ws =
+            but_graph::Workspace::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️⚠️:3:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
         ├── ≡📙:4:above-A on 3183e43 {0}
@@ -937,9 +929,8 @@ mod with_workspace {
 
         add_stack_with_segments(&mut meta, 0, "A", StackState::InWorkspace, &[]);
 
-        let graph =
-            but_graph::Graph::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
-        let ws = graph.into_workspace()?;
+        let ws =
+            but_graph::Workspace::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
 
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️⚠️:2:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
@@ -990,9 +981,8 @@ mod with_workspace {
         add_stack_with_segments(&mut meta, 0, "A", StackState::InWorkspace, &[]);
         add_stack_with_segments(&mut meta, 1, "B", StackState::InWorkspace, &[]);
 
-        let graph =
-            but_graph::Graph::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
-        let ws = graph.into_workspace()?;
+        let ws =
+            but_graph::Workspace::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
 
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
@@ -1071,9 +1061,8 @@ mod with_workspace {
 
         add_stack_with_segments(&mut meta, 0, "A", StackState::InWorkspace, &[]);
 
-        let graph =
-            but_graph::Graph::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
-        let ws = graph.into_workspace()?;
+        let ws =
+            but_graph::Workspace::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
         └── ≡📙:1:A on bce0c5e {0}
@@ -1212,9 +1201,8 @@ mod with_workspace {
         let path = meta.path().to_owned();
         drop(meta);
         let meta = VirtualBranchesTomlMetadata::from_path(path)?;
-        let graph =
-            but_graph::Graph::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
-        let ws = graph.into_workspace()?;
+        let ws =
+            but_graph::Workspace::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on bce0c5e
         └── ≡📙:4:above-A on bce0c5e {0}
@@ -1242,9 +1230,8 @@ mod with_workspace {
         let (_tmp, repo, mut meta) = named_writable_scenario("single-branch-no-ws-commit")?;
         insta::assert_snapshot!(visualize_commit_graph_all(&repo)?, @"* 3183e43 (HEAD -> gitbutler/workspace, origin/main, main) M1");
 
-        let graph =
-            but_graph::Graph::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
-        let ws = graph.into_workspace()?;
+        let ws =
+            but_graph::Workspace::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
 
         let a_ref = r("refs/heads/A");
         let ws = but_workspace::branch::create_reference(
@@ -1320,9 +1307,8 @@ mod with_workspace {
             .sha = gix::hash::Kind::Sha1.null();
         add_stack_with_segments(&mut meta, 0, "main", StackState::InWorkspace, &[]);
 
-        let graph =
-            but_graph::Graph::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
-        let ws = graph.into_workspace()?;
+        let ws =
+            but_graph::Workspace::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️⚠️:1:gitbutler/workspace[🌳] <> ✓!
         └── ≡📙:0:main {0}
@@ -1377,9 +1363,8 @@ mod with_workspace {
         add_stack_with_segments(&mut meta, 0, "A", StackState::InWorkspace, &[]);
         add_stack_with_segments(&mut meta, 1, "B", StackState::InWorkspace, &[]);
 
-        let graph =
-            but_graph::Graph::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
-        let ws = graph.into_workspace()?;
+        let ws =
+            but_graph::Workspace::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
         ├── ≡📙:2:B on 3183e43 {1}
@@ -1421,9 +1406,8 @@ mod with_workspace {
     #[test]
     fn at_reference_errors() -> anyhow::Result<()> {
         let (_tmp, repo, mut meta) = named_writable_scenario("single-branch-4-commits")?;
-        let graph =
-            but_graph::Graph::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
-        let ws = graph.into_workspace()?;
+        let ws =
+            but_graph::Workspace::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
 
         // The anchor must be a segment within the workspace.
         let new_ref = r("refs/heads/new");
@@ -1479,9 +1463,12 @@ mod with_workspace {
         * 3183e43 (origin/main) M1
         ");
 
-        let graph =
-            but_graph::Graph::from_head(&repo, &*meta, project_meta(&*meta), Options::limited())?;
-        let ws = graph.into_workspace()?;
+        let ws = but_graph::Workspace::from_head(
+            &repo,
+            &*meta,
+            project_meta(&*meta),
+            Options::limited(),
+        )?;
 
         insta::assert_snapshot!(graph_workspace(&ws), @"📕🏘️⚠️:1:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on bce0c5e");
 
@@ -1540,9 +1527,12 @@ mod with_workspace {
 
         add_stack_with_segments(&mut meta, 0, "A", StackState::InWorkspace, &[]);
 
-        let graph =
-            but_graph::Graph::from_head(&repo, &*meta, project_meta(&*meta), Options::limited())?;
-        let ws = graph.into_workspace()?;
+        let ws = but_graph::Workspace::from_head(
+            &repo,
+            &*meta,
+            project_meta(&*meta),
+            Options::limited(),
+        )?;
 
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️⚠️:2:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main on 3183e43
@@ -1689,9 +1679,8 @@ mod with_workspace {
         // `A` is applied (in the workspace), based at M1.
         add_stack_with_segments(&mut meta, 0, "A", StackState::InWorkspace, &[]);
 
-        let graph =
-            but_graph::Graph::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
-        let ws = graph.into_workspace()?;
+        let ws =
+            but_graph::Workspace::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
         insta::assert_snapshot!(graph_workspace(&ws), @"
         📕🏘️:0:gitbutler/workspace[🌳] <> ✓refs/remotes/origin/main⇣1 on 3183e43
         └── ≡📙:1:A on 3183e43 {0}
@@ -1747,13 +1736,12 @@ mod with_workspace {
 #[test]
 fn errors() -> anyhow::Result<()> {
     let (repo, mut meta) = named_read_only_in_memory_scenario("unborn-empty", "")?;
-    let graph = but_graph::Graph::from_head(
+    let ws = but_graph::Workspace::from_head(
         &repo,
         &*meta,
         but_core::ref_metadata::ProjectMeta::default(),
         Options::limited(),
     )?;
-    let ws = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&ws), @"
     ⌂:0:main[🌳] <> ✓!
     └── ≡:0:main[🌳] {1}
@@ -1785,9 +1773,8 @@ fn errors() -> anyhow::Result<()> {
     * c166d42 (HEAD -> main) init-integration
     ");
 
-    let graph =
-        but_graph::Graph::from_head(&repo, &*meta, project_meta(&*meta), Options::limited())?;
-    let ws = graph.into_workspace()?;
+    let ws =
+        but_graph::Workspace::from_head(&repo, &*meta, project_meta(&*meta), Options::limited())?;
 
     insta::assert_snapshot!(graph_workspace(&ws), @"
     ⌂:0:main[🌳] <> ✓! on c166d42
@@ -1890,14 +1877,13 @@ fn errors() -> anyhow::Result<()> {
         );
     }
 
-    let graph = but_graph::Graph::from_commit_traversal(
+    let ws = but_graph::Workspace::from_commit_traversal(
         a_id,
         a_ref,
         &*meta,
         but_core::ref_metadata::ProjectMeta::default(),
         Options::limited(),
     )?;
-    let ws = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&ws), @"
     ⌂:0:A <> ✓!
     └── ≡:0:A {1}
@@ -1939,7 +1925,7 @@ fn errors() -> anyhow::Result<()> {
         );
     }
 
-    let graph = but_graph::Graph::from_commit_traversal(
+    let ws = but_graph::Workspace::from_commit_traversal(
         a_id,
         a_ref.to_owned(),
         &*meta,
@@ -1950,7 +1936,6 @@ fn errors() -> anyhow::Result<()> {
             ..Options::limited()
         },
     )?;
-    let ws = graph.into_workspace()?;
     insta::assert_snapshot!(graph_workspace(&ws), @"
     ⌂:0:A <> ✓! on 89cc2d3
     └── ≡:0:A {1}
@@ -1997,9 +1982,8 @@ fn errors() -> anyhow::Result<()> {
 fn at_reference_requires_managed_workspace() -> anyhow::Result<()> {
     let (repo, mut meta) =
         named_read_only_in_memory_scenario("with-remotes-no-workspace", "remote")?;
-    let graph =
-        but_graph::Graph::from_head(&repo, &*meta, project_meta(&*meta), Options::limited())?;
-    let ws = graph.into_workspace()?;
+    let ws =
+        but_graph::Workspace::from_head(&repo, &*meta, project_meta(&*meta), Options::limited())?;
     insta::assert_snapshot!(graph_workspace(&ws), @"
     ⌂:0:main[🌳] <> ✓! on c166d42
     └── ≡:0:main[🌳] {1}
@@ -2043,13 +2027,12 @@ fn journey_with_commits() -> anyhow::Result<()> {
     * 3d57fc1 1
     ");
 
-    let graph = but_graph::Graph::from_head(
+    let ws = but_graph::Workspace::from_head(
         &repo,
         &meta,
         but_core::ref_metadata::ProjectMeta::default(),
         but_graph::init::Options::default(),
     )?;
-    let ws = graph.into_workspace()?;
 
     insta::assert_snapshot!(graph_workspace(&ws), @"
     ⌂:0:main[🌳] <> ✓!
@@ -2218,8 +2201,8 @@ fn journey_with_commits() -> anyhow::Result<()> {
 #[test]
 fn existing_git_ref_inside_workspace_is_adopted() -> anyhow::Result<()> {
     let (_tmp, repo, mut meta) = named_writable_scenario("single-branch-4-commits")?;
-    let graph = but_graph::Graph::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
-    let ws = graph.into_workspace()?;
+    let ws =
+        but_graph::Workspace::from_head(&repo, &meta, project_meta(&meta), Options::limited())?;
 
     let test_ref = r("refs/heads/created-with-git");
     let target_id = id_by_rev(&repo, ":/A1").detach();
@@ -2269,14 +2252,13 @@ fn journey_anon_workspace() -> anyhow::Result<()> {
     ");
 
     let id = id_by_rev(&repo, "@~1");
-    let graph = but_graph::Graph::from_commit_traversal(
+    let ws = but_graph::Workspace::from_commit_traversal(
         id,
         None,
         &meta,
         but_core::ref_metadata::ProjectMeta::default(),
         but_graph::init::Options::default(),
     )?;
-    let ws = graph.into_workspace()?;
 
     insta::assert_snapshot!(graph_workspace(&ws), @"
     ⌂:0:DETACHED <> ✓!
@@ -2369,7 +2351,7 @@ fn journey_anon_workspace() -> anyhow::Result<()> {
     assert!(repo.try_find_reference(new)?.is_none());
 
     // Give the graph a base
-    let graph = but_graph::Graph::from_commit_traversal(
+    let ws = but_graph::Workspace::from_commit_traversal(
         id,
         None,
         &meta,
@@ -2379,7 +2361,6 @@ fn journey_anon_workspace() -> anyhow::Result<()> {
             ..Default::default()
         },
     )?;
-    let ws = graph.into_workspace()?;
     // And the extra-target serves as base also in single-branch mode.
     insta::assert_snapshot!(graph_workspace(&ws), @"
     ⌂:0:second <> ✓! on 3d57fc1

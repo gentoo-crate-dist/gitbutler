@@ -335,6 +335,16 @@ impl<'ws, 'meta, M: RefMetadata> SuccessfulRebase<'ws, 'meta, M> {
     /// in-memory repository owned by this [`SuccessfulRebase`] (`self.repo`),
     /// since they might exist only in memory.
     pub fn overlayed_graph(&self) -> Result<but_graph::Graph> {
+        self.workspace.graph.redo_traversal_with_overlay(
+            &self.repo,
+            self.meta,
+            self.rebase_overlay()?,
+        )
+    }
+
+    /// The overlay describing this rebase's outcome: updated/dropped refs plus the requested
+    /// checkout as the entrypoint.
+    fn rebase_overlay(&self) -> Result<Overlay> {
         let dropped_refs = self.ref_edits.iter().filter_map(|edit| match &edit.change {
             gix::refs::transaction::Change::Delete { .. } => Some(edit.name.clone()),
             _ => None,
@@ -381,18 +391,16 @@ impl<'ws, 'meta, M: RefMetadata> SuccessfulRebase<'ws, 'meta, M> {
             bail!("BUG: Tried to construct rebase engine graph overlay with no entrypoints");
         };
 
-        let overlay = Overlay::default()
+        Ok(Overlay::default()
             .with_references(updated_refs)
             .with_dropped_references(dropped_refs)
-            .with_entrypoint(entrypoint_id, entrypoint_refname);
-        self.workspace
-            .graph
-            .redo_traversal_with_overlay(&self.repo, self.meta, overlay)
+            .with_entrypoint(entrypoint_id, entrypoint_refname))
     }
 
     /// Like [`Self::overlayed_graph`], but projected onto the workspace view most callers want.
     pub fn overlayed_workspace(&self) -> Result<but_graph::Workspace> {
-        self.overlayed_graph()?.into_workspace()
+        self.workspace
+            .redo_with_overlay(&self.repo, self.meta, self.rebase_overlay()?)
     }
 }
 

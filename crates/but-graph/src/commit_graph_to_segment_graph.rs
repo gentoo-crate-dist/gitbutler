@@ -38,6 +38,28 @@ pub fn graph_from_repository<T: but_core::RefMetadata>(
     )
 }
 
+/// [`graph_from_repository`] with the workspace projection applied — the flip test seam for
+/// asserting projection-level parity. `None` on the same non-managed fall-through.
+pub fn workspace_from_repository<T: but_core::RefMetadata>(
+    repo: &gix::Repository,
+    meta: &T,
+    entrypoint: Option<gix::ObjectId>,
+    entrypoint_ref: Option<gix::refs::FullName>,
+    project_meta: but_core::ref_metadata::ProjectMeta,
+    options: crate::init::Options,
+) -> anyhow::Result<Option<crate::Workspace>> {
+    graph_from_repository(
+        repo,
+        meta,
+        entrypoint,
+        entrypoint_ref,
+        project_meta,
+        options,
+    )?
+    .map(crate::Graph::into_workspace)
+    .transpose()
+}
+
 /// Like [`graph_from_repository`], but serving `overlay` refs and metadata from memory — the flip
 /// counterpart of [`Graph::redo_traversal_with_overlay`](crate::Graph::redo_traversal_with_overlay).
 pub(crate) fn graph_from_repository_with_overlay<T: but_core::RefMetadata>(
