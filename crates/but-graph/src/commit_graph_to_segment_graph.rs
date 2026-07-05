@@ -87,7 +87,7 @@ pub fn workspace_from_commit_graph<T: but_core::RefMetadata>(
     let ws_meta = overlay_meta.workspace_opt(ws_ref.as_ref())?;
     let ws_has_meta = ws_meta.is_some();
     let ws_exists = ws_has_meta && ws_tip_on_disk.is_some();
-    // A target anchor the editor dropped or rewrote away is still external context on disk —
+    // A target tip the editor dropped or rewrote away is still external context on disk —
     // the walk seeds it as an integrated tip whenever the commit exists, so re-represent it.
     // The stored target commit and the target REF tip only count when a workspace exists (the
     // walk pushes them per discovered workspace); the extra target is seeded unconditionally.
@@ -98,7 +98,7 @@ pub fn workspace_from_commit_graph<T: but_core::RefMetadata>(
             .map(|c| c.id().detach()),
         None => None,
     };
-    let target_anchors = || {
+    let target_tips = || {
         project_meta
             .target_commit_id
             .filter(|_| ws_exists)
@@ -106,13 +106,8 @@ pub fn workspace_from_commit_graph<T: but_core::RefMetadata>(
             .chain(options.extra_target_commit_id)
             .chain(target_ref_tip)
     };
-    for anchor in target_anchors() {
-        ensure_anchor_region(
-            &mut cg,
-            &overlay_repo,
-            anchor,
-            crate::CommitFlags::Integrated,
-        )?;
+    for tip in target_tips() {
+        ensure_tip_region(&mut cg, &overlay_repo, tip, crate::CommitFlags::Integrated)?;
     }
     ensure_remote_regions(&mut cg, repo, &overlay_repo, &project_meta)?;
     let head = repo.head()?;
@@ -121,13 +116,13 @@ pub fn workspace_from_commit_graph<T: but_core::RefMetadata>(
     // HEAD is external context too: the editor's graph need not contain the checked-out commit
     // (e.g. an edit-mode WIP commit) — the walk always traverses the entrypoint's region.
     if let Some(tip) = head_tip {
-        ensure_anchor_region(&mut cg, &overlay_repo, tip, crate::CommitFlags::empty())?;
+        ensure_tip_region(&mut cg, &overlay_repo, tip, crate::CommitFlags::empty())?;
     }
     let head_tip = head_tip.filter(|c| cg.node(*c).is_some());
     // Reconcile edges LAST: the region steps above revive tombstones, and a revival flips
     // effective parents that must then be re-validated against the odb.
     complete_parents_from_odb(&mut cg, &overlay_repo)?;
-    cg.recompute_integrated(target_anchors());
+    cg.recompute_integrated(target_tips());
     cg.recompute_in_workspace(ws_commit.filter(|_| ws_has_meta));
     // `NotInRemote` mirrors the walk's seeding: only tips the walk QUEUES seed it — HEAD,
     // and for a discovered workspace its tip, the target's local tracking branch, and the
@@ -281,21 +276,21 @@ fn complete_parents_from_odb(cg: &mut CommitGraph, repo: &OverlayRepo<'_>) -> an
     Ok(())
 }
 
-/// The write-through seam's external-context refresh: `anchor` (a stored/extra target, or a
+/// The write-through seam's external-context refresh: `tip` (a stored/extra target, or a
 /// remote-tracking tip) still exists on disk even when the editor dropped its node (tombstoned)
 /// or rewrote it in place (the node now holds the rewritten id, while e.g. the remote ref still
 /// points at the old commit). Revive tombstones, and append any missing region — walking the odb
-/// from `anchor` down to commits the graph knows — with `flags` (Integrated for target-seeded
-/// tips, empty for remote-ahead regions, the walk's conventions). A stale anchor (unresolvable
+/// from `tip` down to commits the graph knows — with `flags` (Integrated for target-seeded
+/// tips, empty for remote-ahead regions, the walk's conventions). A stale tip (unresolvable
 /// commit) is ignored, like the walk does.
-fn ensure_anchor_region(
+fn ensure_tip_region(
     cg: &mut CommitGraph,
     repo: &OverlayRepo<'_>,
-    anchor: gix::ObjectId,
+    tip: gix::ObjectId,
     flags: crate::CommitFlags,
 ) -> anyhow::Result<()> {
     let mut to_add = Vec::new();
-    let mut queue = vec![anchor];
+    let mut queue = vec![tip];
     let mut seen = HashSet::new();
     while let Some(id) = queue.pop() {
         if !seen.insert(id) || cg.index_of(id).is_some() {
@@ -357,7 +352,7 @@ fn ensure_remote_regions(
         else {
             continue;
         };
-        ensure_anchor_region(cg, overlay_repo, remote_tip, crate::CommitFlags::empty())?;
+        ensure_tip_region(cg, overlay_repo, remote_tip, crate::CommitFlags::empty())?;
     }
     Ok(())
 }

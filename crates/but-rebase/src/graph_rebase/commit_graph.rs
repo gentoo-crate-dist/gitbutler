@@ -5,7 +5,7 @@
 //! (a reverse scan of the parent arrays), never stored. Nothing is ever removed (a removed
 //! pick becomes a `None` payload, a removed reference goes dead in place), so ids are
 //! stable by construction. [`Step`] and [`Pick`] are BOUNDARY VALUE types: synthesized by
-//! [`StepGraph::step_view`], decomposed by [`StepGraph::add_node`]/[`StepGraph::set_step`].
+//! [`CommitGraph::step_view`], decomposed by [`CommitGraph::add_node`]/[`CommitGraph::set_step`].
 
 use std::collections::{HashMap, HashSet};
 
@@ -16,22 +16,22 @@ use crate::graph_rebase::{
     cherry_pick::{PickMode, TreeMergeMode},
 };
 
-/// The stable identifier of a step-graph entry. Two namespaces, one id type: `Node` points
+/// The stable identifier of a commit-graph entry. Two namespaces, one id type: `Node` points
 /// into the pick arena (its parent array is its truth), `Ref` into the reference table (a
 /// position is its truth) — so a selector can address either without knowing which.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) enum StepGraphIndex {
+pub(crate) enum CommitGraphIndex {
     /// A pick or its tombstone in the node arena.
     Node(usize),
     /// A reference (live or dead) in the ref table.
     Ref(usize),
 }
 
-impl std::fmt::Display for StepGraphIndex {
+impl std::fmt::Display for CommitGraphIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            StepGraphIndex::Node(i) => write!(f, "n{i}"),
-            StepGraphIndex::Ref(i) => write!(f, "r{i}"),
+            CommitGraphIndex::Node(i) => write!(f, "n{i}"),
+            CommitGraphIndex::Ref(i) => write!(f, "r{i}"),
         }
     }
 }
@@ -39,21 +39,21 @@ impl std::fmt::Display for StepGraphIndex {
 /// One incoming child leg of a pick, named POSITIONALLY as `(source pick, parent-slot)`.
 /// Lanes state legs by this name so a leg removed and re-created at the same coordinates is
 /// the SAME statement — see [`LaneRec::legs`].
-pub(crate) type Leg = (StepGraphIndex, usize);
+pub(crate) type Leg = (CommitGraphIndex, usize);
 
 /// Where a reference sits, stored explicitly: references are POSITIONS, not topology. The
-/// approach legs live in the reference's LANE (see [`StepGraph::lane_of`]), not here.
+/// approach legs live in the reference's LANE (see [`CommitGraph::lane_of`]), not here.
 /// Derived reads live in `positions`: `ref_depth` (rank), `ref_approach` (legs),
-/// `resolve_to_pick` (anchor through tombstones).
+/// `resolve_to_pick` (the node, followed through tombstones).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RefPosition {
     /// The node this reference resolves to (a pick, or its tombstone after deletion) — the
     /// commit the ref points at, reached lazily through tombstones at read time.
-    pub anchor: StepGraphIndex,
-    /// The reference directly underneath in the physical stack (`None` = sits on the anchor).
+    pub on: CommitGraphIndex,
+    /// The reference directly underneath in the physical stack (`None` = sits directly on the node).
     /// Rank is DERIVED: a reference's depth is the length of its below-chain
     /// (`positions::ref_depth`).
-    pub below: Option<StepGraphIndex>,
+    pub below: Option<CommitGraphIndex>,
     /// The entry into this position converged — more than one thing (legs and/or refs stacked
     /// above) met here (a merge). A creation-time signal distinct from `approach.len() > 1` (a position
     /// can converge yet resolve to a single leg), so it is stored and PRESERVED, not re-derived.
@@ -136,12 +136,12 @@ impl Default for PickSettings {
     }
 }
 
-/// How much of its anchor's incoming legs a lane carries.
+/// How much of its node's incoming legs a lane carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LaneCarry {
     /// Nothing descends into this lane (a root chain: remote above a tip, empty top).
     None,
-    /// Every leg into the anchor descends through this lane (a plain chain, or a shared
+    /// Every leg into the node descends through this lane (a plain chain, or a shared
     /// chain all merge lanes converge on).
     All,
     /// This lane carries exactly the legs its [`LaneRec::legs`] statement names — one lane
@@ -149,44 +149,44 @@ pub(crate) enum LaneCarry {
     Count(usize),
 }
 
-/// One lane above a stored anchor: the references sharing an approach at one position.
+/// One lane above a stored node: the references sharing an approach at one position.
 /// Membership only — order among members stays the below-chain's job.
 #[derive(Debug, Clone)]
 pub(crate) struct LaneRec {
     /// The reference nodes in this lane, unordered (order by below-chain depth to read).
-    pub members: Vec<StepGraphIndex>,
-    /// How much of the anchor's legs this lane carries.
+    pub members: Vec<CommitGraphIndex>,
+    /// How much of the node's legs this lane carries.
     pub carry: LaneCarry,
     /// The legs this lane STATES it carries (`Count` lanes only). Keyed by the full
-    /// `(source-pick, parent-slot)` leg: two distinct sources can feed one anchor at the
+    /// `(source-pick, parent-slot)` leg: two distinct sources can feed one node at the
     /// same slot (and one source at two slots), so both coordinates are needed. Read
-    /// filtered against the anchor's LIVE legs, so a stale entry is inert — and reclaims
+    /// filtered against the node's LIVE legs, so a stale entry is inert — and reclaims
     /// its leg by itself when surgery revives the same coordinates.
     pub legs: Vec<Leg>,
 }
 
-/// The rebase step graph: a [`but_graph::CommitGraph`] arena where PICKS carry ordered
+/// The editor's commit graph: a [`but_graph::CommitGraph`] arena where PICKS carry ordered
 /// parent slots, plus a table of [`RefRecord`]s where REFERENCES carry explicit positions —
-/// the CommitGraph is the truth for commits, positions the truth for refs, with no overlap.
+/// the arena is the truth for commits, positions the truth for refs, with no overlap.
 /// References are edgeless: native creation authors their positions straight from the
 /// placement ledger.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct StepGraph {
-    /// THE arena: `StepGraphIndex::Node(i)` IS `CommitIdx` `i`. Commit ids are the payload
+pub(crate) struct CommitGraph {
+    /// THE arena: `CommitGraphIndex::Node(i)` IS `CommitIdx` `i`. Commit ids are the payload
     /// (tombstoning flags a node in place, the node id survives every rewrite), parent
     /// slots are the ordered structure.
     arena: but_graph::CommitGraph,
     /// Each node's pick options, parallel to the arena.
     settings: Vec<PickSettings>,
     refs: Vec<RefRecord>,
-    /// THE approach store: lane membership per STORED (unresolved) anchor value. Which legs
+    /// THE approach store: lane membership per STORED (unresolved) `on` value. Which legs
     /// descend into a reference's position lives here and only here — authored by
     /// [`Self::set_position`]/[`Self::join_lane_of`], carried by [`Self::rekey_position`],
     /// renamed by [`Self::rename_legs`], read via `positions::ref_approach`.
-    lanes: HashMap<StepGraphIndex, Vec<LaneRec>>,
+    lanes: HashMap<CommitGraphIndex, Vec<LaneRec>>,
 }
 
-impl StepGraph {
+impl CommitGraph {
     /// Adopt `arena` wholesale as THE arena — full commit payloads (flags, refs, generation)
     /// survive, which the write-through put-back depends on. The caller must have normalized
     /// every parent slot to PRESENT (the editor's slot invariant) and follows up with
@@ -208,7 +208,7 @@ impl StepGraph {
 
     /// Add `step` to the node arena and return its stable id. References do not belong here —
     /// use [`Self::add_reference`].
-    pub(crate) fn add_node(&mut self, step: Step) -> StepGraphIndex {
+    pub(crate) fn add_node(&mut self, step: Step) -> CommitGraphIndex {
         let (id, settings) = match step {
             Step::Pick(pick) => {
                 let (id, settings) = PickSettings::split(pick);
@@ -226,13 +226,13 @@ impl StepGraph {
             self.arena.node_count(),
             "settings table fell out of step with the arena"
         );
-        StepGraphIndex::Node(i)
+        CommitGraphIndex::Node(i)
     }
 
     /// Replace the node payload at `node` with `step` — a pick decomposes into id and
     /// settings, [`Step::None`] tombstones the payload (settings go stale, not cleared).
-    pub(crate) fn set_step(&mut self, node: StepGraphIndex, step: Step) {
-        let StepGraphIndex::Node(i) = node else {
+    pub(crate) fn set_step(&mut self, node: CommitGraphIndex, step: Step) {
+        let CommitGraphIndex::Node(i) = node else {
             panic!("BUG: references live in the ref table, not the step arena");
         };
         match step {
@@ -250,17 +250,17 @@ impl StepGraph {
 
     /// The commit id of the pick at `node` — `None` for tombstones and references. THE fast
     /// payload read; whole-step consumers use [`Self::step_view`].
-    pub(crate) fn commit_id(&self, node: StepGraphIndex) -> Option<gix::ObjectId> {
+    pub(crate) fn commit_id(&self, node: CommitGraphIndex) -> Option<gix::ObjectId> {
         match node {
-            StepGraphIndex::Node(i) => self.arena.node_payload(i),
-            StepGraphIndex::Ref(_) => None,
+            CommitGraphIndex::Node(i) => self.arena.node_payload(i),
+            CommitGraphIndex::Ref(_) => None,
         }
     }
 
     /// Rewrite the commit id of the pick at `node` IN PLACE — THE rebase write: the node id,
     /// its parent array, its settings, and every position naming it all survive unchanged.
-    pub(crate) fn set_commit_id(&mut self, node: StepGraphIndex, id: gix::ObjectId) {
-        let StepGraphIndex::Node(i) = node else {
+    pub(crate) fn set_commit_id(&mut self, node: CommitGraphIndex, id: gix::ObjectId) {
+        let CommitGraphIndex::Node(i) = node else {
             panic!("BUG: only picks carry commit ids");
         };
         debug_assert!(
@@ -274,10 +274,10 @@ impl StepGraph {
     /// [`Pick::preserved_parents`]).
     pub(crate) fn set_preserved_parents(
         &mut self,
-        node: StepGraphIndex,
+        node: CommitGraphIndex,
         parents: Option<Vec<gix::ObjectId>>,
     ) {
-        let StepGraphIndex::Node(i) = node else {
+        let CommitGraphIndex::Node(i) = node else {
             panic!("BUG: only picks carry preserved parents");
         };
         debug_assert!(
@@ -292,19 +292,19 @@ impl StepGraph {
         &mut self,
         refname: gix::refs::FullName,
         mutable: bool,
-    ) -> StepGraphIndex {
+    ) -> CommitGraphIndex {
         self.refs.push(RefRecord {
             refname,
             mutable,
             live: true,
             position: None,
         });
-        StepGraphIndex::Ref(self.refs.len() - 1)
+        CommitGraphIndex::Ref(self.refs.len() - 1)
     }
 
     /// The reference payload at `node` — `Some` iff it names a live (non-deleted) reference.
-    pub(crate) fn reference(&self, node: StepGraphIndex) -> Option<(&gix::refs::FullName, bool)> {
-        let StepGraphIndex::Ref(i) = node else {
+    pub(crate) fn reference(&self, node: CommitGraphIndex) -> Option<(&gix::refs::FullName, bool)> {
+        let CommitGraphIndex::Ref(i) = node else {
             return None;
         };
         let record = self.refs.get(i)?;
@@ -312,49 +312,49 @@ impl StepGraph {
     }
 
     /// `true` iff `node` is a live reference.
-    pub(crate) fn is_reference(&self, node: StepGraphIndex) -> bool {
+    pub(crate) fn is_reference(&self, node: CommitGraphIndex) -> bool {
         self.reference(node).is_some()
     }
 
     /// `true` iff `node` is a pick — `false` for tombstones and references.
-    pub(crate) fn is_pick(&self, node: StepGraphIndex) -> bool {
+    pub(crate) fn is_pick(&self, node: CommitGraphIndex) -> bool {
         self.commit_id(node).is_some()
     }
 
     /// All live references, ascending by id.
     pub(crate) fn references(
         &self,
-    ) -> impl Iterator<Item = (StepGraphIndex, &gix::refs::FullName, bool)> + '_ {
+    ) -> impl Iterator<Item = (CommitGraphIndex, &gix::refs::FullName, bool)> + '_ {
         self.refs.iter().enumerate().filter_map(|(i, record)| {
             record
                 .live
-                .then_some((StepGraphIndex::Ref(i), &record.refname, record.mutable))
+                .then_some((CommitGraphIndex::Ref(i), &record.refname, record.mutable))
         })
     }
 
     /// All reference ids — live AND dead — ascending. Dead references still carry their
     /// retained name and position (see [`RefRecord`]).
-    pub(crate) fn ref_indices(&self) -> impl Iterator<Item = StepGraphIndex> + '_ {
-        (0..self.refs.len()).map(StepGraphIndex::Ref)
+    pub(crate) fn ref_indices(&self) -> impl Iterator<Item = CommitGraphIndex> + '_ {
+        (0..self.refs.len()).map(CommitGraphIndex::Ref)
     }
 
     /// The full record of the reference at `node`, including dead ones — rebuilds need the
     /// retained payload.
-    pub(crate) fn reference_record(&self, node: StepGraphIndex) -> Option<&RefRecord> {
+    pub(crate) fn reference_record(&self, node: CommitGraphIndex) -> Option<&RefRecord> {
         match node {
-            StepGraphIndex::Ref(i) => self.refs.get(i),
-            StepGraphIndex::Node(_) => None,
+            CommitGraphIndex::Ref(i) => self.refs.get(i),
+            CommitGraphIndex::Node(_) => None,
         }
     }
 
     /// Rename (or resurrect) the reference at `node` in place; its position is untouched.
     pub(crate) fn set_reference(
         &mut self,
-        node: StepGraphIndex,
+        node: CommitGraphIndex,
         refname: gix::refs::FullName,
         mutable: bool,
     ) {
-        let StepGraphIndex::Ref(i) = node else {
+        let CommitGraphIndex::Ref(i) = node else {
             panic!("BUG: only references can be renamed");
         };
         let record = &mut self.refs[i];
@@ -365,8 +365,8 @@ impl StepGraph {
 
     /// Delete the reference at `node`: it goes dead in place, RETAINING its name and
     /// position so stale selectors keep normalizing and rebuilds keep carrying it.
-    pub(crate) fn tombstone_reference(&mut self, node: StepGraphIndex) {
-        let StepGraphIndex::Ref(i) = node else {
+    pub(crate) fn tombstone_reference(&mut self, node: CommitGraphIndex) {
+        let CommitGraphIndex::Ref(i) = node else {
             panic!("BUG: only references can be tombstoned");
         };
         self.refs[i].live = false;
@@ -375,13 +375,13 @@ impl StepGraph {
     /// The step at `node` as an owned view — the read for whole-step consumers, synthesized
     /// from the payload: id plus settings make a `Step::Pick`, a `None` id a `Step::None`,
     /// a reference entry `Step::Reference` while live and `Step::None` once dead.
-    pub(crate) fn step_view(&self, node: StepGraphIndex) -> Step {
+    pub(crate) fn step_view(&self, node: CommitGraphIndex) -> Step {
         match node {
-            StepGraphIndex::Node(i) => match self.arena.node_payload(i) {
+            CommitGraphIndex::Node(i) => match self.arena.node_payload(i) {
                 Some(id) => Step::Pick(self.settings[i].pick(id)),
                 None => Step::None,
             },
-            StepGraphIndex::Ref(i) => {
+            CommitGraphIndex::Ref(i) => {
                 let record = &self.refs[i];
                 if record.live {
                     Step::Reference {
@@ -396,34 +396,34 @@ impl StepGraph {
     }
 
     /// The stored position of the reference at `node`, live or dead.
-    pub(crate) fn position_of(&self, node: StepGraphIndex) -> Option<RefPosition> {
+    pub(crate) fn position_of(&self, node: CommitGraphIndex) -> Option<RefPosition> {
         match node {
-            StepGraphIndex::Ref(i) => self.refs.get(i)?.position.clone(),
-            StepGraphIndex::Node(_) => None,
+            CommitGraphIndex::Ref(i) => self.refs.get(i)?.position.clone(),
+            CommitGraphIndex::Node(_) => None,
         }
     }
 
-    fn position_slot(&mut self, node: StepGraphIndex) -> &mut Option<RefPosition> {
+    fn position_slot(&mut self, node: CommitGraphIndex) -> &mut Option<RefPosition> {
         match node {
-            StepGraphIndex::Ref(i) => &mut self.refs[i].position,
-            StepGraphIndex::Node(_) => panic!("BUG: only references hold positions"),
+            CommitGraphIndex::Ref(i) => &mut self.refs[i].position,
+            CommitGraphIndex::Node(_) => panic!("BUG: only references hold positions"),
         }
     }
 
     /// Author a FRESH position for `node`: `approach` is the lane intent, classified against
-    /// `anchor`'s CURRENT legs — empty opens (or joins) the root lane, the whole live set the
+    /// `on`'s CURRENT legs — empty opens (or joins) the root lane, the whole live set the
     /// shared `All` lane, any other set a `Count` lane stating exactly those legs. Only
-    /// correct when the anchor's legs are already complete — never use to re-place an
+    /// correct when the node's legs are already complete — never use to re-place an
     /// existing position wholesale.
     pub(crate) fn set_position(
         &mut self,
-        node: StepGraphIndex,
-        anchor: StepGraphIndex,
-        approach: &[(StepGraphIndex, usize)],
+        node: CommitGraphIndex,
+        on: CommitGraphIndex,
+        approach: &[(CommitGraphIndex, usize)],
         ambiguous: bool,
-        below: Option<StepGraphIndex>,
+        below: Option<CommitGraphIndex>,
     ) {
-        let live = match crate::graph_rebase::positions::resolve_to_pick(self, anchor) {
+        let live = match crate::graph_rebase::positions::resolve_to_pick(self, on) {
             Some(pick) => crate::graph_rebase::positions::legs_into_pick(self, pick),
             None => Vec::new(),
         };
@@ -442,33 +442,33 @@ impl StepGraph {
             }
         };
         if let Some(previous) = self.position_of(node) {
-            self.lane_remove(node, previous.anchor);
+            self.lane_remove(node, previous.on);
         }
-        self.lane_insert(node, anchor, carry, legs);
+        self.lane_insert(node, on, carry, legs);
         *self.position_slot(node) = Some(RefPosition {
-            anchor,
+            on,
             ambiguous,
             below,
         });
     }
 
     /// Join `node` into the lane CONTAINING `mate` — direct membership, not legs-equality —
-    /// sitting on `below`, copying the mate's anchor and ambiguity.
+    /// sitting on `below`, copying the mate's `on` and ambiguity.
     pub(crate) fn join_lane_of(
         &mut self,
-        node: StepGraphIndex,
-        mate: StepGraphIndex,
-        below: Option<StepGraphIndex>,
+        node: CommitGraphIndex,
+        mate: CommitGraphIndex,
+        below: Option<CommitGraphIndex>,
     ) {
         let Some(m) = self.position_of(mate) else {
             return;
         };
         if let Some(previous) = self.position_of(node) {
-            self.lane_remove(node, previous.anchor);
+            self.lane_remove(node, previous.on);
         }
         let joined = self
             .lanes
-            .entry(m.anchor)
+            .entry(m.on)
             .or_default()
             .iter_mut()
             .find(|lane| lane.members.contains(&mate))
@@ -476,70 +476,70 @@ impl StepGraph {
             .is_some();
         debug_assert!(joined, "positioned mate {mate} must own a lane");
         if !joined {
-            self.lane_insert(node, m.anchor, LaneCarry::All, Vec::new());
+            self.lane_insert(node, m.on, LaneCarry::All, Vec::new());
         }
         *self.position_slot(node) = Some(RefPosition {
-            anchor: m.anchor,
+            on: m.on,
             ambiguous: m.ambiguous,
             below,
         });
     }
 
-    /// Re-key `node`'s position onto `new_anchor`, carrying its CURRENT lane record — the
+    /// Re-key `node`'s position onto `onto`, carrying its CURRENT lane record — the
     /// carry and legs as maintained through edge surgery. Below and ambiguity are preserved.
-    pub(crate) fn rekey_position(&mut self, node: StepGraphIndex, new_anchor: StepGraphIndex) {
+    pub(crate) fn rekey_position(&mut self, node: CommitGraphIndex, onto: CommitGraphIndex) {
         let Some(stored) = self.position_of(node) else {
             return;
         };
-        if stored.anchor == new_anchor {
+        if stored.on == onto {
             return;
         }
-        let lane_data = self.lanes.get(&stored.anchor).and_then(|lanes| {
+        let lane_data = self.lanes.get(&stored.on).and_then(|lanes| {
             lanes
                 .iter()
                 .find(|lane| lane.members.contains(&node))
                 .map(|lane| (lane.carry.clone(), lane.legs.clone()))
         });
-        self.lane_remove(node, stored.anchor);
+        self.lane_remove(node, stored.on);
         match lane_data {
-            Some((carry, legs)) => self.lane_insert(node, new_anchor, carry, legs),
+            Some((carry, legs)) => self.lane_insert(node, onto, carry, legs),
             None => {
                 debug_assert!(false, "positioned node {node} must own a lane");
-                self.lane_insert(node, new_anchor, LaneCarry::All, Vec::new());
+                self.lane_insert(node, onto, LaneCarry::All, Vec::new());
             }
         }
         if let Some(a) = self.position_slot(node).as_mut() {
-            a.anchor = new_anchor;
+            a.on = onto;
         }
     }
 
-    /// Re-hang `node` onto `below` — an adjacency statement only; anchor and lane
+    /// Re-hang `node` onto `below` — an adjacency statement only; `on` and lane
     /// membership are untouched.
-    pub(crate) fn set_below(&mut self, node: StepGraphIndex, below: Option<StepGraphIndex>) {
+    pub(crate) fn set_below(&mut self, node: CommitGraphIndex, below: Option<CommitGraphIndex>) {
         if let Some(stored) = self.position_slot(node).as_mut() {
             stored.below = below;
         }
     }
 
-    /// Point a DEAD reference's retained position at `anchor` — the bare retention pointer
+    /// Point a DEAD reference's retained position at `on` — the bare retention pointer
     /// stale selectors normalize through. Lane membership, below, and ambiguity are dropped;
-    /// live references re-anchor via the arrangement machinery instead.
-    pub(crate) fn set_retained_anchor(&mut self, node: StepGraphIndex, anchor: StepGraphIndex) {
+    /// live references re-place via the arrangement machinery instead.
+    pub(crate) fn set_retained_position(&mut self, node: CommitGraphIndex, on: CommitGraphIndex) {
         debug_assert!(
-            !self.is_reference(node) && matches!(node, StepGraphIndex::Ref(_)),
-            "retained anchors belong to dead references"
+            !self.is_reference(node) && matches!(node, CommitGraphIndex::Ref(_)),
+            "retained positions belong to dead references"
         );
         if let Some(stored) = self.position_of(node) {
-            self.lane_remove(node, stored.anchor);
+            self.lane_remove(node, stored.on);
         }
         *self.position_slot(node) = Some(RefPosition {
-            anchor,
+            on,
             below: None,
             ambiguous: false,
         });
     }
 
-    fn lane_remove(&mut self, node: StepGraphIndex, key: StepGraphIndex) {
+    fn lane_remove(&mut self, node: CommitGraphIndex, key: CommitGraphIndex) {
         let Some(lanes) = self.lanes.get_mut(&key) else {
             return;
         };
@@ -554,10 +554,10 @@ impl StepGraph {
 
     fn lane_insert(
         &mut self,
-        node: StepGraphIndex,
-        key: StepGraphIndex,
+        node: CommitGraphIndex,
+        key: CommitGraphIndex,
         carry: LaneCarry,
-        legs: Vec<(StepGraphIndex, usize)>,
+        legs: Vec<(CommitGraphIndex, usize)>,
     ) {
         let lanes = self.lanes.entry(key).or_default();
         let existing = lanes.iter_mut().find(|lane| match carry {
@@ -577,19 +577,19 @@ impl StepGraph {
     }
 
     /// The lane table: every positioned reference's approach statement, keyed by the STORED
-    /// (unresolved) anchor value.
-    pub(crate) fn lane_table(&self) -> &HashMap<StepGraphIndex, Vec<LaneRec>> {
+    /// (unresolved) `on` value.
+    pub(crate) fn lane_table(&self) -> &HashMap<CommitGraphIndex, Vec<LaneRec>> {
         &self.lanes
     }
 
     /// The lane containing the reference at `node`, if it holds a position.
-    pub(crate) fn lane_of(&self, node: StepGraphIndex) -> Option<&LaneRec> {
+    pub(crate) fn lane_of(&self, node: CommitGraphIndex) -> Option<&LaneRec> {
         let stored = match node {
-            StepGraphIndex::Ref(i) => self.refs.get(i)?.position.as_ref()?,
-            StepGraphIndex::Node(_) => return None,
+            CommitGraphIndex::Ref(i) => self.refs.get(i)?.position.as_ref()?,
+            CommitGraphIndex::Node(_) => return None,
         };
         self.lanes
-            .get(&stored.anchor)?
+            .get(&stored.on)?
             .iter()
             .find(|lane| lane.members.contains(&node))
     }
@@ -597,11 +597,13 @@ impl StepGraph {
     /// All positioned references — live AND dead — ascending by id.
     pub(crate) fn positioned_refs(
         &self,
-    ) -> impl Iterator<Item = (StepGraphIndex, RefPosition)> + '_ {
-        self.refs
-            .iter()
-            .enumerate()
-            .filter_map(|(i, record)| record.position.clone().map(|p| (StepGraphIndex::Ref(i), p)))
+    ) -> impl Iterator<Item = (CommitGraphIndex, RefPosition)> + '_ {
+        self.refs.iter().enumerate().filter_map(|(i, record)| {
+            record
+                .position
+                .clone()
+                .map(|p| (CommitGraphIndex::Ref(i), p))
+        })
     }
 
     /// The leg `old` is now called `new` — its slot renumbered (or re-sourced onto another
@@ -643,15 +645,15 @@ impl StepGraph {
 
     /// The ordered parents of `node` — slot position is the parent order. References are
     /// edgeless by construction.
-    pub(crate) fn parents(&self, node: StepGraphIndex) -> Vec<StepGraphIndex> {
+    pub(crate) fn parents(&self, node: CommitGraphIndex) -> Vec<CommitGraphIndex> {
         match node {
-            StepGraphIndex::Node(i) => self
+            CommitGraphIndex::Node(i) => self
                 .arena
                 .parent_indices(i)
                 .into_iter()
-                .map(StepGraphIndex::Node)
+                .map(CommitGraphIndex::Node)
                 .collect(),
-            StepGraphIndex::Ref(_) => Vec::new(),
+            CommitGraphIndex::Ref(_) => Vec::new(),
         }
     }
 
@@ -659,24 +661,24 @@ impl StepGraph {
     /// flows through into the arena's slot write.
     fn update_parents<R>(
         &mut self,
-        child: StepGraphIndex,
-        f: impl FnOnce(&mut Vec<StepGraphIndex>) -> R,
+        child: CommitGraphIndex,
+        f: impl FnOnce(&mut Vec<CommitGraphIndex>) -> R,
     ) -> R {
-        let StepGraphIndex::Node(i) = child else {
+        let CommitGraphIndex::Node(i) = child else {
             panic!("references are edgeless — no parent array");
         };
-        let mut parents: Vec<StepGraphIndex> = self
+        let mut parents: Vec<CommitGraphIndex> = self
             .arena
             .parent_indices(i)
             .into_iter()
-            .map(StepGraphIndex::Node)
+            .map(CommitGraphIndex::Node)
             .collect();
         let result = f(&mut parents);
         let targets = parents
             .into_iter()
             .map(|parent| match parent {
-                StepGraphIndex::Node(j) => j,
-                StepGraphIndex::Ref(_) => {
+                CommitGraphIndex::Node(j) => j,
+                CommitGraphIndex::Ref(_) => {
                     panic!("references are edgeless — they cannot be parents")
                 }
             })
@@ -686,18 +688,18 @@ impl StepGraph {
     }
 
     /// How many parent slots `node` has.
-    pub(crate) fn parent_count(&self, node: StepGraphIndex) -> usize {
+    pub(crate) fn parent_count(&self, node: CommitGraphIndex) -> usize {
         self.parents(node).len()
     }
 
     /// Every parent-array entry naming `node`, as `(child, slot)` legs, sorted — the derived
     /// children read.
-    pub(crate) fn incoming_legs(&self, node: StepGraphIndex) -> Vec<Leg> {
+    pub(crate) fn incoming_legs(&self, node: CommitGraphIndex) -> Vec<Leg> {
         let mut legs = Vec::new();
         for i in 0..self.arena.node_count() {
-            let child = StepGraphIndex::Node(i);
+            let child = CommitGraphIndex::Node(i);
             for (slot, parent) in self.arena.parent_indices(i).into_iter().enumerate() {
-                if StepGraphIndex::Node(parent) == node {
+                if CommitGraphIndex::Node(parent) == node {
                     legs.push((child, slot));
                 }
             }
@@ -707,7 +709,11 @@ impl StepGraph {
     }
 
     /// Append `parent` as `child`'s last parent slot; returns the slot.
-    pub(crate) fn push_parent(&mut self, child: StepGraphIndex, parent: StepGraphIndex) -> usize {
+    pub(crate) fn push_parent(
+        &mut self,
+        child: CommitGraphIndex,
+        parent: CommitGraphIndex,
+    ) -> usize {
         self.update_parents(child, |parents| {
             parents.push(parent);
             parents.len() - 1
@@ -718,9 +724,9 @@ impl StepGraph {
     /// with their statements. Returns the slot actually used.
     pub(crate) fn insert_parent(
         &mut self,
-        child: StepGraphIndex,
+        child: CommitGraphIndex,
         slot: usize,
-        parent: StepGraphIndex,
+        parent: CommitGraphIndex,
     ) -> usize {
         let len = self.parent_count(child);
         let slot = slot.min(len);
@@ -734,9 +740,9 @@ impl StepGraph {
     /// statements, and statements naming the removed slot are dropped.
     pub(crate) fn remove_parent(
         &mut self,
-        child: StepGraphIndex,
+        child: CommitGraphIndex,
         slot: usize,
-    ) -> Option<StepGraphIndex> {
+    ) -> Option<CommitGraphIndex> {
         let len = self.parent_count(child);
         if slot >= len {
             return None;
@@ -754,9 +760,9 @@ impl StepGraph {
     /// statement name — is untouched: chains stated on the leg follow it to its new target.
     pub(crate) fn replace_parent(
         &mut self,
-        child: StepGraphIndex,
+        child: CommitGraphIndex,
         slot: usize,
-        new_parent: StepGraphIndex,
+        new_parent: CommitGraphIndex,
     ) {
         self.update_parents(child, |parents| match parents.get_mut(slot) {
             Some(entry) => *entry = new_parent,
@@ -766,7 +772,7 @@ impl StepGraph {
 
     /// Move `from`'s whole parent array onto `to` (which must have none); statements follow
     /// slot-for-slot.
-    pub(crate) fn transplant_parents(&mut self, from: StepGraphIndex, to: StepGraphIndex) {
+    pub(crate) fn transplant_parents(&mut self, from: CommitGraphIndex, to: CommitGraphIndex) {
         debug_assert_eq!(
             self.parent_count(to),
             0,
@@ -780,9 +786,9 @@ impl StepGraph {
 
     /// Re-target every parent-array entry naming `from` onto `to`, slots preserved —
     /// statement names are `(source, slot)`, so they stay valid untouched.
-    pub(crate) fn redirect_children(&mut self, from: StepGraphIndex, to: StepGraphIndex) {
+    pub(crate) fn redirect_children(&mut self, from: CommitGraphIndex, to: CommitGraphIndex) {
         for i in 0..self.arena.node_count() {
-            let child = StepGraphIndex::Node(i);
+            let child = CommitGraphIndex::Node(i);
             if !self.parents(child).contains(&from) {
                 continue;
             }
@@ -799,7 +805,7 @@ impl StepGraph {
     /// Empty `child`'s parent array, returning it. Lane statements naming the drained slots
     /// are DELIBERATELY untouched: the caller re-states the orphaned names onto their new
     /// carrier itself (the below-insert path renames them onto the segment's parent-most).
-    pub(crate) fn drain_parents(&mut self, child: StepGraphIndex) -> Vec<StepGraphIndex> {
+    pub(crate) fn drain_parents(&mut self, child: CommitGraphIndex) -> Vec<CommitGraphIndex> {
         self.update_parents(child, std::mem::take)
     }
 
@@ -820,20 +826,20 @@ impl StepGraph {
 
     /// All node-arena ids (picks and tombstones), ascending. References are NOT included —
     /// see [`Self::references`] and [`Self::ref_indices`].
-    pub(crate) fn node_indices(&self) -> impl Iterator<Item = StepGraphIndex> + '_ {
-        (0..self.arena.node_count()).map(StepGraphIndex::Node)
+    pub(crate) fn node_indices(&self) -> impl Iterator<Item = CommitGraphIndex> + '_ {
+        (0..self.arena.node_count()).map(CommitGraphIndex::Node)
     }
 
     /// The ARENA nodes no parent array names — the child-less tips, ascending. References
     /// never appear here: they are edgeless by construction, and the consumers
     /// (head discovery) want picks and tombstones only.
-    pub(crate) fn tips(&self) -> impl Iterator<Item = StepGraphIndex> + '_ {
-        let referenced: HashSet<StepGraphIndex> = (0..self.arena.node_count())
+    pub(crate) fn tips(&self) -> impl Iterator<Item = CommitGraphIndex> + '_ {
+        let referenced: HashSet<CommitGraphIndex> = (0..self.arena.node_count())
             .flat_map(|i| self.arena.parent_indices(i))
-            .map(StepGraphIndex::Node)
+            .map(CommitGraphIndex::Node)
             .collect();
         (0..self.arena.node_count())
-            .map(StepGraphIndex::Node)
+            .map(CommitGraphIndex::Node)
             .filter(move |node| !referenced.contains(node))
     }
 }

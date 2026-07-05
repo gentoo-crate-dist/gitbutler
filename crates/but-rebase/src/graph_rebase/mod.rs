@@ -6,7 +6,7 @@
 //!
 //! ---
 //!
-//! A graph-based rebase engine. The workspace is loaded into an `Editor` as a `StepGraph`: an
+//! A graph-based rebase engine. The workspace is loaded into an `Editor` as a `CommitGraph`: an
 //! arena of `Step`s where a `Pick` is a commit to cherry-pick and a `Reference` is a branch.
 //! Callers mutate the graph (insert/move/remove picks, create/move references), then
 //! `Editor::rebase` replays it — cherry-picking every mutable pick onto its new parents and
@@ -15,11 +15,11 @@
 //! References are POSITIONS, not nodes with edges — see the `positions` module for the model.
 
 mod arrangement;
+mod commit_graph;
 mod creation;
 mod placements;
 mod positions;
 pub mod rebase;
-mod step_graph;
 pub mod traverse;
 use std::collections::BTreeMap;
 
@@ -176,7 +176,7 @@ impl Step {
     }
 }
 
-pub(crate) use step_graph::{StepGraph, StepGraphIndex};
+pub(crate) use commit_graph::{CommitGraph, CommitGraphIndex};
 
 /// Convert a structure to a selector for a particular editor.
 ///
@@ -211,7 +211,7 @@ pub trait ToReferenceSelector {
 /// never dangles, though it may point at a tombstone.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct Selector {
-    id: StepGraphIndex,
+    id: CommitGraphIndex,
 }
 
 impl ToCommitSelector for Selector {
@@ -260,7 +260,7 @@ pub(crate) enum Checkout {
 #[derive(Debug)]
 pub struct Editor<'ws, 'meta, M: RefMetadata> {
     /// The internal graph of steps
-    graph: StepGraph,
+    graph: CommitGraph,
     /// Initial references. This is used to track any references that might need
     /// deleted.
     initial_references: Vec<gix::refs::FullName>,
@@ -284,8 +284,8 @@ pub struct SuccessfulRebase<'ws, 'meta, M: RefMetadata> {
     /// Any reference edits that need to be committed as a result of the history
     /// rewrite
     pub(crate) ref_edits: Vec<RefEdit>,
-    /// The new step graph
-    pub(crate) graph: StepGraph,
+    /// The new commit graph
+    pub(crate) graph: CommitGraph,
     pub(crate) checkouts: Vec<Checkout>,
     /// Provides data about how the editor instance was transformed.
     pub history: RevisionHistory,
@@ -385,7 +385,7 @@ impl<'ws, 'meta, M: RefMetadata> SuccessfulRebase<'ws, 'meta, M> {
 /// The outcome of a materialize
 #[derive(Debug)]
 pub struct MaterializeOutcome<'ws, 'meta, M: RefMetadata> {
-    pub(crate) graph: StepGraph,
+    pub(crate) graph: CommitGraph,
     /// Provides data about how the editor instance was transformed.
     pub history: RevisionHistory,
     /// A reference to the workspace that the editor was created for.
@@ -446,7 +446,7 @@ pub struct RevisionHistory {
 }
 
 impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
-    pub(crate) fn new_selector(&self, id: StepGraphIndex) -> Selector {
+    pub(crate) fn new_selector(&self, id: CommitGraphIndex) -> Selector {
         Selector { id }
     }
 }

@@ -4,7 +4,7 @@ use anyhow::{Context as _, Result, bail};
 use but_core::{RefMetadata, commit::SignCommit};
 
 use crate::graph_rebase::{
-    Checkout, Editor, Pick, RevisionHistory, Selector, Step, StepGraph, StepGraphIndex,
+    Checkout, CommitGraph, CommitGraphIndex, Editor, Pick, RevisionHistory, Selector, Step,
     SuccessfulRebase, placements,
 };
 
@@ -75,7 +75,7 @@ fn create_native(
     repo: &gix::Repository,
     options: &GraphEditorOptions,
     ledger: &placements::RefPlacements,
-) -> Result<(StepGraph, Vec<gix::refs::FullName>, Vec<Checkout>)> {
+) -> Result<(CommitGraph, Vec<gix::refs::FullName>, Vec<Checkout>)> {
     let Some(cg) = workspace.graph.commit_graph() else {
         bail!("native creation requires the graph to carry its CommitGraph");
     };
@@ -111,9 +111,9 @@ fn create_native(
         }
     }
 
-    let mut graph = StepGraph::adopt(arena);
+    let mut graph = CommitGraph::adopt(arena);
     for (i, id) in cg.commit_ids().enumerate() {
-        let ix = StepGraphIndex::Node(i);
+        let ix = CommitGraphIndex::Node(i);
         let mut pick = if workspace_commit_id == Some(id) {
             Pick::new_workspace_pick(id)
         } else {
@@ -130,19 +130,19 @@ fn create_native(
 
     // Two passes: refs stack top-down in the ledger (a ref's `below` has a HIGHER index), so
     // every node must exist before positions can name it.
-    let mut ref_by_name = HashMap::<gix::refs::FullName, StepGraphIndex>::new();
+    let mut ref_by_name = HashMap::<gix::refs::FullName, CommitGraphIndex>::new();
     for placed in &ledger.refs {
         let ix = graph.add_reference(placed.name.clone(), placed.mutable);
         ref_by_name.insert(placed.name.clone(), ix);
     }
     for placed in &ledger.refs {
-        // Unborn refs (no anchor) keep no stored position.
-        let Some(anchor_id) = placed.anchor else {
+        // Unborn refs (no position) keep no stored position.
+        let Some(on_id) = placed.on else {
             continue;
         };
         let node = ref_by_name[&placed.name];
-        let Some(anchor) = cg.index_of(anchor_id).map(StepGraphIndex::Node) else {
-            bail!("ledger anchor {anchor_id} is not a commit in the graph");
+        let Some(on) = cg.index_of(on_id).map(CommitGraphIndex::Node) else {
+            bail!("ledger position {on_id} is not a commit in the graph");
         };
         let below =
             match &placed.below {
@@ -153,12 +153,12 @@ fn create_native(
             };
         let mut approach = Vec::with_capacity(placed.approach.len());
         for (source, slot) in &placed.approach {
-            let Some(source_ix) = cg.index_of(*source).map(StepGraphIndex::Node) else {
+            let Some(source_ix) = cg.index_of(*source).map(CommitGraphIndex::Node) else {
                 bail!("ledger approach source {source} is not a commit in the graph");
             };
             approach.push((source_ix, *slot));
         }
-        graph.set_position(node, anchor, &approach, placed.ambiguous, below);
+        graph.set_position(node, on, &approach, placed.ambiguous, below);
     }
 
     let references = ledger
