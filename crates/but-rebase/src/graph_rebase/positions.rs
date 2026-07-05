@@ -338,9 +338,8 @@ pub(crate) fn apply_chain_join(
         if !approach.contains(&leg) {
             approach.push(leg);
         }
-        let mut placed = StoredAnchor::place(graph, member.anchor, member.rank, &approach);
-        placed.ambiguous = member.ambiguous || approach.len() > 1;
-        graph.set_anchor(*node, Some(placed));
+        let ambiguous = member.ambiguous || approach.len() > 1;
+        graph.place_anchor(*node, member.anchor, member.rank, &approach, ambiguous);
     }
 }
 
@@ -364,16 +363,13 @@ pub(crate) fn reanchor_refs_at(
             (resolve_to_pick(graph, stored.anchor) == Some(from_pick)).then_some((node, stored))
         })
         .collect();
-    for (node, mut stored) in moves {
+    for (node, stored) in moves {
         if reclassify {
             let approach = ref_approach(graph, node);
-            let ambiguous = stored.ambiguous;
-            stored = StoredAnchor::place(graph, to_pick, stored.rank, &approach);
-            stored.ambiguous = ambiguous;
+            graph.place_anchor(node, to_pick, stored.rank, &approach, stored.ambiguous);
         } else {
-            stored.anchor = to_pick;
+            graph.rekey_anchor(node, to_pick);
         }
-        graph.set_anchor(node, Some(stored));
     }
 }
 
@@ -502,15 +498,7 @@ pub(crate) fn initialize_anchors_and_strip_ref_edges(graph: &mut StepGraph) {
     // Set anchors provisionally with the correct anchor (so the strip's `resolve_to_pick` works);
     // the kind is authored below against the STRIPPED legs.
     for (node, anchor, rank, _, _) in &positions {
-        graph.set_anchor(
-            *node,
-            Some(StoredAnchor {
-                anchor: *anchor,
-                rank: *rank,
-                kind: ApproachKind::Root,
-                ambiguous: false,
-            }),
-        );
+        graph.place_anchor(*node, *anchor, *rank, &[], false);
     }
     // Strip: collect the full edge picture first, then rewrite.
     let mut to_remove = Vec::new();
@@ -537,8 +525,6 @@ pub(crate) fn initialize_anchors_and_strip_ref_edges(graph: &mut StepGraph) {
     // intended approach classifies to the right `Root`/`AllLegs`/`Lane`. `ambiguous` keeps the
     // convergence signal from the chain topology (distinct from `approach.len()`).
     for (node, anchor, rank, approach, ambiguous) in &positions {
-        let mut stored = StoredAnchor::place(graph, *anchor, *rank, approach);
-        stored.ambiguous = *ambiguous;
-        graph.set_anchor(*node, Some(stored));
+        graph.place_anchor(*node, *anchor, *rank, approach, *ambiguous);
     }
 }

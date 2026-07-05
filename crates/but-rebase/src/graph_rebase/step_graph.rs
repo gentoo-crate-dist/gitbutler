@@ -207,6 +207,102 @@ impl StepGraph {
         self.anchors[node] = anchor;
     }
 
+    /// Author a FRESH position for `node`: `approach` is the lane intent, classified against
+    /// `anchor`'s CURRENT legs for the kind oracle and opening (or joining, when a lane already
+    /// carries exactly these legs) the matching lane. Only correct when the anchor's legs are
+    /// already complete — never use to re-place an existing position wholesale.
+    pub(crate) fn place_anchor(
+        &mut self,
+        node: StepGraphIndex,
+        anchor: StepGraphIndex,
+        rank: usize,
+        approach: &[(StepGraphIndex, usize)],
+        ambiguous: bool,
+    ) {
+        let mut stored = StoredAnchor::place(self, anchor, rank, approach);
+        stored.ambiguous = ambiguous;
+        self.set_anchor(node, Some(stored));
+    }
+
+    /// Join `node` into the lane CONTAINING `mate` — direct membership, not legs-equality —
+    /// at `rank`, copying the mate's anchor, kind, and ambiguity.
+    pub(crate) fn join_lane_of(&mut self, node: StepGraphIndex, mate: StepGraphIndex, rank: usize) {
+        let Some(m) = self.anchor_of(mate) else {
+            return;
+        };
+        if let Some(previous) = &self.anchors[node] {
+            let key = previous.anchor;
+            self.lane_remove(node, key);
+        }
+        let joined = self
+            .lanes
+            .entry(m.anchor)
+            .or_default()
+            .iter_mut()
+            .find(|lane| lane.members.contains(&mate))
+            .map(|lane| lane.members.push(node))
+            .is_some();
+        if !joined {
+            self.lane_insert(node, m.anchor, &m.kind);
+        }
+        self.anchors[node] = Some(StoredAnchor {
+            anchor: m.anchor,
+            rank,
+            kind: m.kind,
+            ambiguous: m.ambiguous,
+        });
+    }
+
+    /// Re-key `node`'s position onto `new_anchor`, carrying its CURRENT lane record — the
+    /// carry and legs as maintained through edge surgery, NOT re-derived from the stored kind.
+    /// Rank, kind, and ambiguity are preserved.
+    pub(crate) fn rekey_anchor(&mut self, node: StepGraphIndex, new_anchor: StepGraphIndex) {
+        let Some(stored) = self.anchor_of(node) else {
+            return;
+        };
+        if stored.anchor == new_anchor {
+            return;
+        }
+        let lane_data = self.lanes.get(&stored.anchor).and_then(|lanes| {
+            lanes
+                .iter()
+                .find(|lane| lane.members.contains(&node))
+                .map(|lane| (lane.carry.clone(), lane.legs.clone()))
+        });
+        self.lane_remove(node, stored.anchor);
+        match lane_data {
+            Some((carry, legs)) => {
+                let lanes = self.lanes.entry(new_anchor).or_default();
+                let existing = lanes.iter_mut().find(|lane| match carry {
+                    LaneCarry::Count(_) => {
+                        matches!(lane.carry, LaneCarry::Count(_)) && lane.legs == legs
+                    }
+                    _ => lane.carry == carry,
+                });
+                match existing {
+                    Some(lane) => lane.members.push(node),
+                    None => lanes.push(LaneRec {
+                        members: vec![node],
+                        carry,
+                        legs,
+                    }),
+                }
+            }
+            None => self.lane_insert(node, new_anchor, &stored.kind),
+        }
+        if let Some(a) = self.anchors[node].as_mut() {
+            a.anchor = new_anchor;
+        }
+    }
+
+    /// Change `node`'s rank only — pure chain reordering. The anchor key and lane membership
+    /// are untouched (no lane rebuild, unlike a full re-store).
+    pub(crate) fn set_rank(&mut self, node: StepGraphIndex, rank: usize) {
+        if let Some(stored) = self.anchors[node].as_mut() {
+            stored.rank = rank;
+        }
+    }
+
     fn lane_remove(&mut self, node: StepGraphIndex, key: StepGraphIndex) {
         let Some(lanes) = self.lanes.get_mut(&key) else {
             return;
