@@ -174,6 +174,7 @@ pub(crate) fn debug_assert_positions_total(graph: &StepGraph) {
         return;
     }
     crate::graph_rebase::arrangement::census_to_file(graph);
+    order_census_to_file(graph);
     debug_assert_below_wellformed(graph);
     type OrderedPositionKey = (Option<StepGraphIndex>, Vec<(StepGraphIndex, usize)>, usize);
     let mut seen: std::collections::HashMap<OrderedPositionKey, StepGraphIndex> =
@@ -198,6 +199,44 @@ pub(crate) fn debug_assert_positions_total(graph: &StepGraph) {
             );
         }
     }
+}
+
+/// TEMPORARY census scaffolding for the parent-array swap: are every arena node's outgoing
+/// orders DENSE (the sorted set 0..n) at the standing checkpoints? Gated on
+/// `BUT_ORDER_CENSUS=<file>`; appends one `CHECK n=<nodes-with-edges>` line per checkpoint
+/// plus a `SPARSE`/`DUP` line per violating node.
+fn order_census_to_file(graph: &StepGraph) {
+    let Ok(path) = std::env::var("BUT_ORDER_CENSUS") else {
+        return;
+    };
+    use std::io::Write as _;
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
+        return;
+    };
+    let mut checked = 0usize;
+    for node in graph.node_indices() {
+        let mut orders: Vec<usize> = graph
+            .edges_directed(node, Direction::Outgoing)
+            .map(|e| e.weight().order)
+            .collect();
+        if orders.is_empty() {
+            continue;
+        }
+        checked += 1;
+        orders.sort_unstable();
+        let dup = orders.windows(2).any(|w| w[0] == w[1]);
+        let dense = orders.iter().copied().eq(0..orders.len());
+        if dup {
+            let _ = writeln!(file, "DUP node={node} orders={orders:?}");
+        } else if !dense {
+            let _ = writeln!(file, "SPARSE node={node} orders={orders:?}");
+        }
+    }
+    let _ = writeln!(file, "CHECK n={checked}");
 }
 
 /// Every stored `below` of a LIVE reference names a positioned reference on the SAME resolved
@@ -349,7 +388,7 @@ pub(crate) fn apply_chain_join(
             approach.push(leg);
         }
         let ambiguous = member.ambiguous || approach.len() > 1;
-        graph.place_position(*node, member.anchor, &approach, ambiguous, member.below);
+        graph.set_position(*node, member.anchor, &approach, ambiguous, member.below);
     }
 }
 
@@ -376,7 +415,7 @@ pub(crate) fn reanchor_refs_at(
     for (node, stored) in moves {
         if reclassify {
             let approach = ref_approach(graph, node);
-            graph.place_position(node, to_pick, &approach, stored.ambiguous, stored.below);
+            graph.set_position(node, to_pick, &approach, stored.ambiguous, stored.below);
         } else {
             graph.rekey_position(node, to_pick);
         }
@@ -466,7 +505,7 @@ pub(crate) fn initialize_positions_and_strip_ref_edges(graph: &mut StepGraph) {
     // Set anchors provisionally with the correct anchor (so the strip's `resolve_to_pick` works);
     // the lane is authored below against the STRIPPED legs.
     for (node, pos, _) in &positions {
-        graph.place_position(*node, pos.anchor, &[], false, pos.below);
+        graph.set_position(*node, pos.anchor, &[], false, pos.below);
     }
     // Strip: collect the full edge picture first, then rewrite.
     let mut to_remove = Vec::new();
@@ -493,6 +532,6 @@ pub(crate) fn initialize_positions_and_strip_ref_edges(graph: &mut StepGraph) {
     // intended approach classifies to the right `Root`/`AllLegs`/`Lane`. `ambiguous` keeps the
     // convergence signal from the chain topology (distinct from `approach.len()`).
     for (node, pos, approach) in &positions {
-        graph.place_position(*node, pos.anchor, approach, pos.ambiguous, pos.below);
+        graph.set_position(*node, pos.anchor, approach, pos.ambiguous, pos.below);
     }
 }

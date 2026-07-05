@@ -168,7 +168,7 @@ pub(crate) struct StepGraph {
     ref_incoming: Vec<Vec<StepEdgeIndex>>,
     /// THE approach store: lane membership per STORED (unresolved) anchor value. Which legs
     /// descend into a reference's position lives here and only here — authored by
-    /// [`Self::place_position`]/[`Self::join_lane_of`], carried by [`Self::rekey_position`],
+    /// [`Self::set_position`]/[`Self::join_lane_of`], carried by [`Self::rekey_position`],
     /// renamed by [`Self::rename_legs`], read via `positions::ref_approach`.
     lanes: HashMap<StepGraphIndex, Vec<LaneRec>>,
 }
@@ -321,7 +321,7 @@ impl StepGraph {
     /// shared `All` lane, any other set a `Count` lane stating exactly those legs. Only
     /// correct when the anchor's legs are already complete — never use to re-place an
     /// existing position wholesale.
-    pub(crate) fn place_position(
+    pub(crate) fn set_position(
         &mut self,
         node: StepGraphIndex,
         anchor: StepGraphIndex,

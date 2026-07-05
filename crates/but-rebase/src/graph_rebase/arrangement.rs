@@ -93,7 +93,7 @@ pub(crate) fn place_ref(graph: &mut StepGraph, node: StepGraphIndex, slot: Stack
             for mate in rehang {
                 graph.set_below(mate, Some(node));
             }
-            graph.place_position(node, pick, &approach, approach.len() > 1, None);
+            graph.set_position(node, pick, &approach, approach.len() > 1, None);
         }
         StackSlot::LaneTop { pick, leg } => {
             let approach = vec![leg];
@@ -106,10 +106,10 @@ pub(crate) fn place_ref(graph: &mut StepGraph, node: StepGraphIndex, slot: Stack
                 })
                 .map(|(mate, _)| mate)
                 .max_by_key(|&mate| (positions::ref_depth(graph, mate), mate));
-            graph.place_position(node, pick, &approach, false, top);
+            graph.set_position(node, pick, &approach, false, top);
         }
         StackSlot::Root(pick) => {
-            graph.place_position(node, pick, &[], false, None);
+            graph.set_position(node, pick, &[], false, None);
         }
     }
 }
@@ -242,11 +242,11 @@ pub(crate) fn move_ref(graph: &mut StepGraph, node: StepGraphIndex, slot: StackS
                 .filter(|(mate, _)| *mate != node && positions::ref_depth(graph, *mate) <= t_depth)
                 .collect();
             for (mate, m) in mates {
-                graph.place_position(mate, m.anchor, &approach, approach.len() > 1, m.below);
+                graph.set_position(mate, m.anchor, &approach, approach.len() > 1, m.below);
             }
         }
     }
-    graph.place_position(node, anchor, &approach, approach.len() > 1, below);
+    graph.set_position(node, anchor, &approach, approach.len() > 1, below);
 }
 
 /// Splice `node` out of its physical stack: members sitting directly on it re-hang onto
@@ -344,14 +344,14 @@ pub(crate) fn repoint_ref(graph: &mut StepGraph, node: StepGraphIndex, new_ancho
                 .filter(|(mate, _)| *mate != node && !carried.contains(mate))
                 .collect();
             for (mate, member) in mates {
-                graph.place_position(mate, member.anchor, &[], false, member.below);
+                graph.set_position(mate, member.anchor, &[], false, member.below);
             }
             for &mate in &carried[1..] {
                 graph.rekey_position(mate, new_anchor);
             }
             // The reference's legs moved with it; re-classify its lane against `new_anchor`'s
             // final legs (its old `Lane` slot may not exist there).
-            graph.place_position(node, new_anchor, &approach, stored.ambiguous, below);
+            graph.set_position(node, new_anchor, &approach, stored.ambiguous, below);
         }
         _ => {
             graph.rekey_position(node, new_anchor);
@@ -389,7 +389,7 @@ pub(crate) fn unhook_ref(graph: &mut StepGraph, node: StepGraphIndex, drop_legs:
             }
         }
     }
-    graph.place_position(node, unhooked.anchor, &[], false, unhooked.below);
+    graph.set_position(node, unhooked.anchor, &[], false, unhooked.below);
 }
 
 /// Move the stack slice led by `lead_ref` — it and its below-subtree in its lane on
@@ -431,7 +431,7 @@ pub(crate) fn transfer_stack(
         // The lead lands at the bottom of the destination (its old below stays behind);
         // the rest of the slice keeps its internal stacking.
         let below = (node != lead_ref).then_some(stored.below).flatten();
-        graph.place_position(node, dest_anchor, &approach, stored.ambiguous, below);
+        graph.set_position(node, dest_anchor, &approach, stored.ambiguous, below);
     }
 }
 
@@ -486,7 +486,7 @@ pub(crate) fn land_stack_above(
     };
     let bridge = positions::legs_into_pick(graph, bridge_anchor);
     let top_depth = positions::ref_depth(graph, top);
-    graph.place_position(
+    graph.set_position(
         top,
         top_stored.anchor,
         &bridge,
@@ -505,7 +505,7 @@ pub(crate) fn land_stack_above(
         // itself when it lives on the bridge anchor, its stand-in there otherwise.
         let below =
             below.or_else(|| mate_below_depth(graph, node, bridge_anchor, depth + top_depth + 1));
-        graph.place_position(node, bridge_anchor, &bridge, bridge.len() > 1, below);
+        graph.set_position(node, bridge_anchor, &bridge, bridge.len() > 1, below);
     }
     true
 }
@@ -615,7 +615,7 @@ pub(crate) fn settle_chain_lower(
     leg: (StepGraphIndex, usize),
 ) {
     for (node, member) in lower {
-        graph.place_position(*node, member.anchor, &[leg], false, member.below);
+        graph.set_position(*node, member.anchor, &[leg], false, member.below);
     }
 }
 
