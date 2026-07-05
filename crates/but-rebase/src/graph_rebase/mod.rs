@@ -14,6 +14,7 @@
 //!
 //! References are POSITIONS, not nodes with edges — see the `positions` module for the model.
 
+mod arrangement;
 mod creation;
 mod positions;
 pub mod rebase;

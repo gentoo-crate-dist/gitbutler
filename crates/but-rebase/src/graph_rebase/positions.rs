@@ -210,6 +210,7 @@ pub(crate) fn debug_assert_positions_total(graph: &StepGraph) {
     if !cfg!(debug_assertions) {
         return;
     }
+    crate::graph_rebase::arrangement::census_to_file(graph);
     type OrderedPositionKey = (Option<StepGraphIndex>, Vec<(StepGraphIndex, usize)>, usize);
     let mut seen: std::collections::HashMap<OrderedPositionKey, StepGraphIndex> =
         Default::default();
