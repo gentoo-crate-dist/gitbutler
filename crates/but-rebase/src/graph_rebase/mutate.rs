@@ -735,8 +735,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     self.graph.add_edge(edge_source, *target, Edge { order });
                 }
                 // Surviving slots renumber; the carried chains follow onto the first
-                // fan-out slot. Two-phase so shifting slots can't collide mid-flight.
-                const TEMP: usize = usize::MAX / 2;
+                // fan-out slot.
                 let fanout_len = sorted_disconnected.len();
                 let mut moves: Vec<(usize, usize)> = survivors
                     .iter()
@@ -748,14 +747,11 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     .filter(|(old, new)| old != new)
                     .collect();
                 moves.push((edge_weight.order, insert_pos));
-                for (old, _) in &moves {
-                    self.graph
-                        .rename_leg((edge_source, *old), (edge_source, TEMP + *old));
-                }
-                for (old, new) in &moves {
-                    self.graph
-                        .rename_leg((edge_source, TEMP + *old), (edge_source, *new));
-                }
+                let renames: Vec<_> = moves
+                    .iter()
+                    .map(|&(old, new)| ((edge_source, old), (edge_source, new)))
+                    .collect();
+                self.graph.rename_legs(&renames);
             } else {
                 // Reconnect the child node to all the disconnected parents.
                 self.reconnect_edges_to_parents(&disconnected_parent_edges, edge_source);
@@ -905,16 +901,12 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                 }
             }
         }
-        // Two-phase approach rewrite so shifting slots can't collide mid-flight.
-        const TEMP: usize = usize::MAX / 2;
-        for (old, _) in renumbered.iter().filter(|(old, new)| old != new) {
-            self.graph
-                .rename_leg((child_node, *old), (child_node, TEMP + *old));
-        }
-        for (old, new) in renumbered.iter().filter(|(old, new)| old != new) {
-            self.graph
-                .rename_leg((child_node, TEMP + *old), (child_node, *new));
-        }
+        let renames: Vec<_> = renumbered
+            .iter()
+            .filter(|(old, new)| old != new)
+            .map(|&(old, new)| ((child_node, old), (child_node, new)))
+            .collect();
+        self.graph.rename_legs(&renames);
         new_orders
     }
 

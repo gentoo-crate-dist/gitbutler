@@ -15,6 +15,11 @@ pub(crate) type StepGraphIndex = usize;
 /// The stable identifier of an edge slot.
 pub(crate) type StepEdgeIndex = usize;
 
+/// One incoming child edge of a pick, named POSITIONALLY as `(source pick, parent-slot)`.
+/// Lanes state legs by this name (not by edge id) so a leg removed and re-created at the
+/// same coordinates is the SAME statement — see [`LaneRec::legs`].
+pub(crate) type Leg = (StepGraphIndex, usize);
+
 /// The direction of edges to look at from a node's perspective.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Direction {
@@ -104,7 +109,7 @@ pub(crate) struct LaneRec {
     /// same slot (and one source at two slots), so both coordinates are needed. Read
     /// filtered against the anchor's LIVE legs, so a stale entry is inert — and reclaims
     /// its leg by itself when surgery revives the same coordinates.
-    pub legs: Vec<(StepGraphIndex, usize)>,
+    pub legs: Vec<Leg>,
 }
 
 /// The rebase step graph: an arena of [`Step`]s where PICKS carry ordered parent edges and
@@ -117,11 +122,12 @@ pub(crate) struct StepGraph {
     edges: Vec<Option<EdgeRecord>>,
     outgoing: Vec<Vec<StepEdgeIndex>>,
     incoming: Vec<Vec<StepEdgeIndex>>,
-    /// `Some` exactly for reference nodes; carries the ref's anchor, rank, kind, and ambiguity.
+    /// `Some` exactly for reference nodes; carries the ref's anchor, rank, and ambiguity.
     anchors: Vec<Option<StoredAnchor>>,
-    /// TEMP (store-swap bridge): lane membership shadowing `anchors`, keyed by the STORED
-    /// (unresolved) anchor value. Maintained in [`Self::set_anchor`], read only by the
-    /// `arrangement` census to prove approach is consumption-derivable before the store swaps.
+    /// THE approach store: lane membership per STORED (unresolved) anchor value. Which legs
+    /// descend into a reference's position lives here and only here — authored by
+    /// [`Self::place_anchor`]/[`Self::join_lane_of`], carried by [`Self::rekey_anchor`],
+    /// renamed by [`Self::rename_legs`], read via `positions::ref_approach`.
     lanes: HashMap<StepGraphIndex, Vec<LaneRec>>,
 }
 
@@ -429,18 +435,24 @@ impl StepGraph {
     }
 
     /// The leg `old` is now called `new` — its edge re-slotted (or re-sourced onto another
-    /// pick) by surgery: every lane that carried `old` carries `new` instead. Callers
-    /// renaming several legs on one source must two-phase through non-colliding
-    /// temporaries, exactly as with edge orders.
-    pub(crate) fn rename_leg(
-        &mut self,
-        old: (StepGraphIndex, usize),
-        new: (StepGraphIndex, usize),
-    ) {
+    /// pick) by surgery: every lane that carried `old` carries `new` instead.
+    pub(crate) fn rename_leg(&mut self, old: Leg, new: Leg) {
+        self.rename_legs(&[(old, new)]);
+    }
+
+    /// Apply several leg renames SIMULTANEOUSLY: every lane leg is matched against the
+    /// pre-rename names once, so shifting slots in a renumber can't collide mid-flight.
+    pub(crate) fn rename_legs(&mut self, renames: &[(Leg, Leg)]) {
         for lanes in self.lanes.values_mut() {
             for lane in lanes.iter_mut() {
-                if let Some(at) = lane.legs.iter().position(|&leg| leg == old) {
-                    lane.legs[at] = new;
+                let mut changed = false;
+                for leg in lane.legs.iter_mut() {
+                    if let Some((_, new)) = renames.iter().find(|(old, _)| old == leg) {
+                        *leg = *new;
+                        changed = true;
+                    }
+                }
+                if changed {
                     lane.legs.sort_unstable();
                     lane.legs.dedup();
                     if let LaneCarry::Count(_) = lane.carry {
