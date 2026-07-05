@@ -16,6 +16,7 @@
 
 mod arrangement;
 mod creation;
+mod placements;
 mod positions;
 pub mod rebase;
 mod step_graph;
