@@ -947,13 +947,6 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
 
         match side {
             InsertSide::Above => {
-                // Find the child node of the highest order from the child-most node in the segment being inserted.
-                let highest_order_child = self
-                    .graph
-                    .edges_directed(child.id, Direction::Incoming)
-                    .map(|e| (e.id(), e.weight().to_owned(), e.source()))
-                    .max_by_key(|(_, weight, _)| weight.order);
-
                 if let Some(nodes_to_connect) = nodes_to_connect {
                     // If there were nodes to connect defined, create edges from them into the child node of the segment
                     // being inserted. `add_edge` gives the edge `node`'s next parent order and
@@ -978,7 +971,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     let split =
                         split_chain(&mut self.graph, target.id, SplitBoundary::Above, child_pick);
                     if !split.moved_any {
-                        // The chain's legs now enter through the segment's child-most pick.
+                        // The chain's legs now enter through the segment's child-most pick: each
+                        // leg keeps its slot, so its chain statement follows the name.
                         let legs: Vec<_> = self
                             .graph
                             .edge_references()
@@ -986,23 +980,17 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                                 e.target() == anchor_pick
                                     && target_approach.contains(&(e.source(), e.weight().order))
                             })
-                            .map(|e| (e.id(), e.source(), e.weight().clone()))
+                            .map(|e| (e.id(), e.source()))
                             .collect();
-                        for (edge_id, source, weight) in legs {
-                            let new_weight =
-                                if let Some((_, child_weight, _)) = highest_order_child.as_ref() {
-                                    Edge {
-                                        order: weight.order + child_weight.order + 1,
-                                    }
-                                } else {
-                                    weight.clone()
-                                };
-                            let new_order = new_weight.order;
-                            self.graph.move_edge(edge_id, child_pick, new_weight);
-                            if new_order != weight.order {
-                                self.graph
-                                    .rename_leg((source, weight.order), (source, new_order));
-                            }
+                        for (edge_id, source) in legs {
+                            self.graph.normalize_parent_slots(source);
+                            let slot = self
+                                .graph
+                                .edges_directed(source, Direction::Outgoing)
+                                .find(|e| e.id() == edge_id)
+                                .map(|e| e.weight().order)
+                                .context("BUG: chain leg vanished during segment insert")?;
+                            self.graph.replace_parent(source, slot, child_pick);
                         }
                     }
                     // Connect the parent-most node to the reference's anchor; a reference
@@ -1028,29 +1016,20 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     let edges = self
                         .graph
                         .edges_directed(target.id, Direction::Incoming)
-                        .map(|e| (e.id(), e.weight().to_owned(), e.source()))
+                        .map(|e| (e.id(), e.source()))
                         .collect::<Vec<_>>();
 
-                    // Connect all target's children with the child-most node in the given segment.
-                    for (edge_id, edge_weight, edge_source) in edges {
-                        // Avoid weight collision by adding the order value of the highest order child plus one,
-                        // accommodating for order 0.
-                        let new_weight =
-                            if let Some((_, child_weight, _)) = highest_order_child.as_ref() {
-                                Edge {
-                                    order: edge_weight.order + child_weight.order + 1,
-                                }
-                            } else {
-                                edge_weight.clone()
-                            };
-                        let new_order = new_weight.order;
-                        self.graph.move_edge(edge_id, child.id, new_weight);
-                        if new_order != edge_weight.order {
-                            self.graph.rename_leg(
-                                (edge_source, edge_weight.order),
-                                (edge_source, new_order),
-                            );
-                        }
+                    // The segment's child-most takes the target's place in each child's parent
+                    // array: the slot — and any statement on it — is untouched.
+                    for (edge_id, edge_source) in edges {
+                        self.graph.normalize_parent_slots(edge_source);
+                        let slot = self
+                            .graph
+                            .edges_directed(edge_source, Direction::Outgoing)
+                            .find(|e| e.id() == edge_id)
+                            .map(|e| e.weight().order)
+                            .context("BUG: child edge vanished during segment insert")?;
+                        self.graph.replace_parent(edge_source, slot, child.id);
                     }
                     // The target's chains slide under the segment: refs anchored on the target
                     // move up onto the segment's child-most pick.
@@ -1128,28 +1107,19 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     nodes
                 };
 
-                // Connect the target to the child-most node in the given segment FIRST — before the
-                // segment gains its own downward parent edge below. A reference target re-anchors
-                // onto the child-most, dragging its approaching legs along; if the segment's fresh
-                // parent leg already existed (an `AllLegs` ref sees every leg into its anchor), that
-                // leg would be dragged too and self-loop the segment. `parents_to_add` is captured
-                // up front, so it still names the pre-re-anchor target position.
-                // Find the child node of the highest order from the child-most node in the segment being inserted.
-                let highest_order_child = self
-                    .graph
-                    .edges_directed(child.id, Direction::Incoming)
-                    .map(|e| (e.id(), e.weight().to_owned(), e.source()))
-                    .max_by_key(|(_, weight, _)| weight.order);
-
-                let new_weight = if let Some((_, child_weight, _)) = highest_order_child.as_ref() {
-                    Edge {
-                        order: child_weight.order + 1,
-                    }
-                } else {
-                    Edge { order: 0 }
-                };
-                // A reference child-most stands for its anchor, with the leg entering its chain.
-                self.add_edge(target, child, new_weight.order)?;
+                // A reference target re-anchors onto the child-most, dragging its approaching
+                // legs along, so it connects BEFORE the segment gains its own downward parent
+                // edge: if the segment's fresh parent leg already existed (an `AllLegs` ref sees
+                // every leg into its anchor), that leg would be dragged too and self-loop the
+                // segment. A plain target connects AFTER instead: its orphaned leg statements
+                // must first be renamed onto the segment's parent-most below — the connect's
+                // slot normalization would purge them. `parents_to_add` is captured up front,
+                // so it still names the pre-re-anchor target position.
+                let target_is_ref = self.graph.position_of(target.id).is_some();
+                if target_is_ref {
+                    // A reference child-most stands for its anchor, with the leg entering its chain.
+                    self.insert_edge(target, child, 0)?;
+                }
 
                 // A reference parent-most (an empty segment) has no edges — it re-anchors
                 // onto its first new parent instead of gaining edges.
@@ -1181,6 +1151,12 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                         self.graph
                             .rename_leg((target.id, *old_order), (parent.id, new_order));
                     }
+                }
+
+                if !target_is_ref {
+                    // A plain target keeps its existing parents in front; the segment appends.
+                    let slot = self.graph.parent_count(target.id);
+                    self.insert_edge(target, child, slot)?;
                 }
             }
         }
