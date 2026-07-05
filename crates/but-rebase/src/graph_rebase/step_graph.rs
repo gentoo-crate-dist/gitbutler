@@ -344,6 +344,82 @@ impl StepGraph {
         &self.lanes
     }
 
+    /// Carry every position from `source` into this graph, node ids mapped through `mapping`
+    /// (an isomorphic rebuild): the lane table wholesale — members, carry, and legs as
+    /// surgery maintained them, never re-derived — and each anchor alongside. Members,
+    /// anchors, and leg sources that did not survive the rebuild are dropped.
+    pub(crate) fn carry_positions_mapped(
+        &mut self,
+        source: &StepGraph,
+        mapping: &HashMap<StepGraphIndex, StepGraphIndex>,
+    ) {
+        for (key, lanes) in &source.lanes {
+            let Some(&new_key) = mapping.get(key) else {
+                continue;
+            };
+            let mut carried = Vec::new();
+            for lane in lanes {
+                let members: Vec<_> = lane
+                    .members
+                    .iter()
+                    .filter_map(|member| mapping.get(member).copied())
+                    .collect();
+                if members.is_empty() {
+                    continue;
+                }
+                let legs: Vec<_> = lane
+                    .legs
+                    .iter()
+                    .filter_map(|(src, slot)| mapping.get(src).map(|src| (*src, *slot)))
+                    .collect();
+                let carry = match lane.carry {
+                    LaneCarry::Count(_) => LaneCarry::Count(legs.len()),
+                    ref other => other.clone(),
+                };
+                carried.push(LaneRec {
+                    members,
+                    carry,
+                    legs,
+                });
+            }
+            if !carried.is_empty() {
+                self.lanes.insert(new_key, carried);
+            }
+        }
+        for (node, stored) in source.anchored_refs() {
+            let (Some(&new_node), Some(&new_anchor)) =
+                (mapping.get(&node), mapping.get(&stored.anchor))
+            else {
+                continue;
+            };
+            // The kind is only the shadow oracle now; a `Lane`'s legs name old-graph nodes,
+            // so remap the sources to keep it comparable.
+            let kind = match &stored.kind {
+                ApproachKind::Lane(legs) => ApproachKind::Lane(
+                    legs.iter()
+                        .filter_map(|(src, slot)| mapping.get(src).map(|src| (*src, *slot)))
+                        .collect(),
+                ),
+                other => other.clone(),
+            };
+            self.anchors[new_node] = Some(StoredAnchor {
+                anchor: new_anchor,
+                rank: stored.rank,
+                kind,
+                ambiguous: stored.ambiguous,
+            });
+        }
+    }
+
+    /// The lane containing the reference at `node`, if it holds a position.
+    pub(crate) fn lane_of(&self, node: StepGraphIndex) -> Option<&LaneRec> {
+        let stored = self.anchors.get(node)?.as_ref()?;
+        self.lanes
+            .get(&stored.anchor)?
+            .iter()
+            .find(|lane| lane.members.contains(&node))
+    }
+
     /// The [`ApproachKind`] of the reference at `node`, if it is a positioned reference.
     pub(crate) fn ref_kind(&self, node: StepGraphIndex) -> Option<ApproachKind> {
         self.anchors
@@ -364,46 +440,14 @@ impl StepGraph {
     /// Add an edge from `source` to `target` and return its stable id.
     ///
     /// A new edge can REVIVE a leg: ops like disconnect/reconnect drop a leg and later
-    /// re-create it at the same `(source, order)`, relying on the kind read to pick it back
-    /// up. The lane bridge mirrors that: any anchored reference whose authored kind names the
-    /// leg reclaims it into its lane. (Each such consult marks a site the store swap turns
-    /// into an explicit "this edge enters lane L" op statement.)
+    /// re-create it at the same `(source, order)`. Lanes keep naming dropped legs (reads
+    /// filter against the LIVE legs), so a revived leg re-enters its lanes by itself.
     pub(crate) fn add_edge(
         &mut self,
         source: StepGraphIndex,
         target: StepGraphIndex,
         weight: Edge,
     ) -> StepEdgeIndex {
-        let leg = (source, weight.order);
-        let claimants: Vec<(StepGraphIndex, StepGraphIndex)> = self
-            .anchors
-            .iter()
-            .enumerate()
-            .filter_map(|(node, stored)| {
-                let stored = stored.as_ref()?;
-                let ApproachKind::Lane(legs) = &stored.kind else {
-                    return None;
-                };
-                (legs.contains(&leg)
-                    && crate::graph_rebase::positions::resolve_to_pick(self, stored.anchor)
-                        == Some(target))
-                .then_some((node, stored.anchor))
-            })
-            .collect();
-        for (node, key) in claimants {
-            let Some(lanes) = self.lanes.get_mut(&key) else {
-                continue;
-            };
-            for lane in lanes.iter_mut() {
-                if let LaneCarry::Count(_) = lane.carry
-                    && lane.members.contains(&node)
-                    && !lane.legs.contains(&leg)
-                {
-                    lane.legs.push(leg);
-                    lane.carry = LaneCarry::Count(lane.legs.len());
-                }
-            }
-        }
         let id = self.edges.len();
         self.edges.push(Some(EdgeRecord {
             source,
@@ -415,31 +459,20 @@ impl StepGraph {
         id
     }
 
-    /// Remove the edge with `id`, returning its payload if it was still present. The dead leg
-    /// leaves every lane that carried it — the store-side maintenance that keeps lane legs
-    /// live-exact through edge surgery (a leg's `(source, order)` is unique among the source's
-    /// outgoing edges, so a global sweep can only hit the right lane or a stale twin).
+    /// Remove the edge with `id`, returning its payload if it was still present. Lanes that
+    /// named the dead leg keep naming it: lane legs are STATEMENTS, filtered against the
+    /// live legs at read time, so a stale entry is inert — and reclaims the leg by itself
+    /// if a later edge revives the same `(source, order)`.
     pub(crate) fn remove_edge(&mut self, id: StepEdgeIndex) -> Option<Edge> {
         let record = self.edges.get_mut(id)?.take()?;
         self.outgoing[record.source].retain(|&e| e != id);
         self.incoming[record.target].retain(|&e| e != id);
-        let leg = (record.source, record.weight.order);
-        for lanes in self.lanes.values_mut() {
-            for lane in lanes.iter_mut() {
-                if let LaneCarry::Count(_) = lane.carry
-                    && let Some(at) = lane.legs.iter().position(|&l| l == leg)
-                {
-                    lane.legs.remove(at);
-                    lane.carry = LaneCarry::Count(lane.legs.len());
-                }
-            }
-        }
         Some(record.weight)
     }
 
-    /// Re-target the edge with `id` (same source) — one leg MOVING, not dying and being
-    /// reborn: the leg keeps its lane ownership, which a remove+add pair would strip. An
-    /// order change renames the leg inside every lane that carries it.
+    /// Re-target the edge with `id` (same source). Renaming duties on an order change stay
+    /// with the caller ([`Self::rename_leg`]) — a target move alone leaves the leg's
+    /// `(source, order)` name intact.
     pub(crate) fn move_edge(
         &mut self,
         id: StepEdgeIndex,
@@ -451,25 +484,44 @@ impl StepGraph {
         };
         let source = record.source;
         let old_target = record.target;
-        let old_order = record.weight.order;
         record.target = new_target;
-        record.weight = new_weight.clone();
+        record.weight = new_weight;
         // Reposition in both adjacency lists exactly like a remove+add pair would (readers
-        // iterate newest-first), so only the lane bookkeeping differs from the old pattern.
+        // iterate newest-first).
         self.outgoing[source].retain(|&e| e != id);
         self.outgoing[source].push(id);
         self.incoming[old_target].retain(|&e| e != id);
         self.incoming[new_target].push(id);
-        if old_order != new_weight.order {
-            let (old_leg, new_leg) = ((source, old_order), (source, new_weight.order));
-            for lanes in self.lanes.values_mut() {
-                for lane in lanes.iter_mut() {
-                    for leg in lane.legs.iter_mut() {
-                        if *leg == old_leg {
-                            *leg = new_leg;
-                        }
+    }
+
+    /// The leg `old` is now called `new` — its edge re-slotted (or re-sourced onto another
+    /// pick) by surgery: every lane and every stored kind that carried `old` carries `new`
+    /// instead. Callers renaming several legs on one source must two-phase through
+    /// non-colliding temporaries, exactly as with edge orders.
+    pub(crate) fn rename_leg(
+        &mut self,
+        old: (StepGraphIndex, usize),
+        new: (StepGraphIndex, usize),
+    ) {
+        for lanes in self.lanes.values_mut() {
+            for lane in lanes.iter_mut() {
+                if let Some(at) = lane.legs.iter().position(|&leg| leg == old) {
+                    lane.legs[at] = new;
+                    lane.legs.sort_unstable();
+                    lane.legs.dedup();
+                    if let LaneCarry::Count(_) = lane.carry {
+                        lane.carry = LaneCarry::Count(lane.legs.len());
                     }
                 }
+            }
+        }
+        for stored in self.anchors.iter_mut().flatten() {
+            if let ApproachKind::Lane(legs) = &mut stored.kind
+                && let Some(at) = legs.iter().position(|&leg| leg == old)
+            {
+                legs[at] = new;
+                legs.sort_unstable();
+                legs.dedup();
             }
         }
     }

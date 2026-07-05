@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 
 use crate::graph_rebase::positions::{self, legs_into_pick, ref_position};
-use crate::graph_rebase::step_graph::{ApproachKind, LaneCarry, StoredAnchor};
+use crate::graph_rebase::step_graph::{LaneCarry, StoredAnchor};
 use crate::graph_rebase::{Direction, Step, StepGraph, StepGraphIndex};
 
 /// A position in a commit's reference stack, named by intent.
@@ -405,43 +405,6 @@ pub(crate) fn land_stack_above(
         );
     }
     true
-}
-
-/// Carry every reference's stored position from `source` into `output`, node ids mapped
-/// through `mapping` (an isomorphic rebuild) — positions are the truth for references, edges
-/// never encode them. References whose node or anchor did not survive the rebuild are
-/// dropped.
-pub(crate) fn carry_arrangements_mapped(
-    source: &StepGraph,
-    output: &mut StepGraph,
-    mapping: &HashMap<StepGraphIndex, StepGraphIndex>,
-) {
-    for (node, stored) in source.anchored_refs() {
-        let (Some(new_node), Some(new_anchor)) = (mapping.get(&node), mapping.get(&stored.anchor))
-        else {
-            continue;
-        };
-        // `Root`/`AllLegs` are structural and carry as-is; a `Lane`'s stored `(source, slot)`
-        // legs name old-graph nodes, so remap the source ids (slots and ordering are
-        // preserved by the isomorphic rebuild).
-        let kind = match &stored.kind {
-            ApproachKind::Lane(legs) => ApproachKind::Lane(
-                legs.iter()
-                    .filter_map(|(src, slot)| mapping.get(src).map(|s| (*s, *slot)))
-                    .collect(),
-            ),
-            other => other.clone(),
-        };
-        output.set_anchor(
-            *new_node,
-            Some(StoredAnchor {
-                anchor: *new_anchor,
-                rank: stored.rank,
-                kind,
-                ambiguous: stored.ambiguous,
-            }),
-        );
-    }
 }
 
 /// Re-key every reference whose anchor no longer resolves (it sat on removed picks) onto

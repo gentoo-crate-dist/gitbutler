@@ -206,11 +206,7 @@ impl<'ws, 'graph, M: RefMetadata> Editor<'ws, 'graph, M> {
             }
         }
 
-        crate::graph_rebase::arrangement::carry_arrangements_mapped(
-            &self.graph,
-            &mut output_graph,
-            &graph_mapping,
-        );
+        output_graph.carry_positions_mapped(&self.graph, &graph_mapping);
 
         // Find deleted references. `initial_references` only contains mutable
         // references, so immutable references are never considered for deletion.

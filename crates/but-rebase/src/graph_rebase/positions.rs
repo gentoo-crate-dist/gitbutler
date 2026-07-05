@@ -311,7 +311,10 @@ pub(crate) fn prepare_chain_join(graph: &StepGraph, ref_node: StepGraphIndex) ->
             approach: Vec::new(),
         };
     };
-    let members = if matches!(stored.kind, ApproachKind::Root) {
+    let is_root = graph
+        .lane_of(ref_node)
+        .is_some_and(|lane| lane.carry == LaneCarry::None);
+    let members = if is_root {
         vec![(ref_node, stored.clone())]
     } else {
         chain_members(graph, ref_node)
@@ -370,37 +373,6 @@ pub(crate) fn reanchor_refs_at(
         } else {
             graph.rekey_anchor(node, to_pick);
         }
-    }
-}
-
-/// A rewired leg (source `old.0`, its parent-slot renumbered from `old.1` to `new.1`) keeps
-/// carrying the chains it carried: `Lane` kinds fed at that slot re-point at the new slot.
-/// Identified by the stored `Lane` slot rather than the live `approach`, so it works even when the
-/// edge has already been removed/re-added (the fan-out renumbers edges BEFORE calling this, which
-/// would leave `ref_approach` empty). Scoped to the picks `old.0` currently feeds, so unrelated `Lane`
-/// refs elsewhere sharing the slot number are untouched. `AllLegs`/`Root` are slot-agnostic.
-pub(crate) fn rewrite_approach_leg(
-    graph: &mut StepGraph,
-    old: (StepGraphIndex, usize),
-    new: (StepGraphIndex, usize),
-) {
-    let moves: Vec<_> = graph
-        .anchored_refs()
-        .filter(
-            |(_, stored)| matches!(&stored.kind, ApproachKind::Lane(legs) if legs.contains(&old)),
-        )
-        .collect();
-    for (node, mut stored) in moves {
-        if let ApproachKind::Lane(legs) = &mut stored.kind {
-            for leg in legs.iter_mut() {
-                if *leg == old {
-                    *leg = new;
-                }
-            }
-            legs.sort_unstable();
-            legs.dedup();
-        }
-        graph.set_anchor(node, Some(stored));
     }
 }
 
