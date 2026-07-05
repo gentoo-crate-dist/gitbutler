@@ -9,7 +9,7 @@
 
 use anyhow::Result;
 use but_core::ref_metadata::ProjectMeta;
-use but_graph::Graph;
+use but_graph::Workspace;
 use but_rebase::graph_rebase::{
     Editor, Step, mutate, mutate::InsertSide, testing::rewalk_parity_report,
 };
@@ -82,9 +82,9 @@ fn canonicalize_sibling_order(s: &str) -> String {
 macro_rules! editor {
     ($fixture:literal, $repo:ident, $tmp:ident, $meta:ident, $ws:ident) => {
         let ($repo, $tmp, mut $meta) = fixture_writable($fixture)?;
-        let graph = Graph::from_head(&$repo, &*$meta, ProjectMeta::default(), standard_options())?
-            .validated()?;
-        let mut $ws = graph.into_workspace()?;
+        let mut $ws =
+            Workspace::from_head(&$repo, &*$meta, ProjectMeta::default(), standard_options())?
+                .validated()?;
     };
 }
 

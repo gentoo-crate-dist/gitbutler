@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use crate::graph_rebase::{Direction, Pick, Step, StepGraph, StepGraphIndex};
+use crate::graph_rebase::{Direction, StepGraph, StepGraphIndex};
 
 /// Find the parents of a given node that are commit - in correct parent
 /// ordering.
@@ -30,7 +30,7 @@ fn ordered_commit_parents(graph: &StepGraph, target: StepGraphIndex) -> Vec<Step
     potential_parent_edges.sort_by_key(|e| e.weight().order);
 
     let carries_chain = |edge: &crate::graph_rebase::step_graph::StepEdgeRef<'_>| {
-        matches!(graph[edge.target()], Step::Pick(_))
+        graph.is_pick(edge.target())
             && graph.anchored_refs().any(|(node, stored)| {
                 crate::graph_rebase::positions::ref_approach(graph, node)
                     .contains(&(target, edge.weight().order))
@@ -40,7 +40,7 @@ fn ordered_commit_parents(graph: &StepGraph, target: StepGraphIndex) -> Vec<Step
     };
     let plain_targets: HashSet<StepGraphIndex> = potential_parent_edges
         .iter()
-        .filter(|e| matches!(graph[e.target()], Step::Pick(_)) && !carries_chain(e))
+        .filter(|e| graph.is_pick(e.target()) && !carries_chain(e))
         .map(|e| e.target())
         .collect();
     let mut emitted_carrying = HashSet::new();
@@ -58,7 +58,7 @@ fn ordered_commit_parents(graph: &StepGraph, target: StepGraphIndex) -> Vec<Step
     let mut parents = vec![];
 
     while let Some((node, carrying)) = potential.pop() {
-        if let Step::Pick(Pick { .. }) = graph[node] {
+        if graph.is_pick(node) {
             if carrying && (plain_targets.contains(&node) || !emitted_carrying.insert(node)) {
                 continue;
             }
@@ -101,7 +101,7 @@ mod test {
             let b_id = gix::ObjectId::from_str("1000000000000000000000000000000000000000")?;
             let b = graph.add_node(Step::new_pick(b_id));
             // Second parent - is a reference
-            let c = graph.add_node(Step::new_reference("refs/heads/foobar".try_into()?));
+            let c = graph.add_reference("refs/heads/foobar".try_into()?, true);
             // Second parent's first child
             let d_id = gix::ObjectId::from_str("3000000000000000000000000000000000000000")?;
             let d = graph.add_node(Step::new_pick(d_id));
@@ -136,7 +136,7 @@ mod test {
             let b_id = gix::ObjectId::from_str("1000000000000000000000000000000000000000")?;
             let b = graph.add_node(Step::new_pick(b_id));
             // Second parent - is a reference
-            let c = graph.add_node(Step::new_reference("refs/heads/foobar".try_into()?));
+            let c = graph.add_reference("refs/heads/foobar".try_into()?, true);
             // Second parent's second child
             let d_id = gix::ObjectId::from_str("3000000000000000000000000000000000000000")?;
             let d = graph.add_node(Step::new_pick(d_id));

@@ -230,7 +230,7 @@ pub struct Selector {
 impl ToCommitSelector for Selector {
     fn to_commit_selector(&self, editor: &Editor<impl RefMetadata>) -> Result<Selector> {
         let selector = editor.history.normalize_selector(*self)?;
-        let step = &editor.graph[selector.id];
+        let step = editor.graph.step_view(selector.id);
         if !matches!(step, Step::Pick(_)) {
             bail!("Expected selector for {step:?} to refer to a commit");
         }
@@ -242,8 +242,8 @@ impl ToCommitSelector for Selector {
 impl ToReferenceSelector for Selector {
     fn to_reference_selector(&self, editor: &Editor<impl RefMetadata>) -> Result<Selector> {
         let selector = editor.history.normalize_selector(*self)?;
-        let step = &editor.graph[selector.id];
-        if !matches!(step, Step::Reference { .. }) {
+        if !editor.graph.is_reference(selector.id) {
+            let step = editor.graph.step_view(selector.id);
             bail!("Expected selector for {step:?} to refer to a reference");
         }
 
@@ -335,6 +335,16 @@ impl<'ws, 'meta, M: RefMetadata> SuccessfulRebase<'ws, 'meta, M> {
     /// in-memory repository owned by this [`SuccessfulRebase`] (`self.repo`),
     /// since they might exist only in memory.
     pub fn overlayed_graph(&self) -> Result<but_graph::Graph> {
+        self.workspace.graph.redo_traversal_with_overlay(
+            &self.repo,
+            self.meta,
+            self.rebase_overlay()?,
+        )
+    }
+
+    /// The overlay describing this rebase's outcome: updated/dropped refs plus the requested
+    /// checkout as the entrypoint.
+    fn rebase_overlay(&self) -> Result<Overlay> {
         let dropped_refs = self.ref_edits.iter().filter_map(|edit| match &edit.change {
             gix::refs::transaction::Change::Delete { .. } => Some(edit.name.clone()),
             _ => None,
@@ -355,11 +365,10 @@ impl<'ws, 'meta, M: RefMetadata> SuccessfulRebase<'ws, 'meta, M> {
             .filter_map(|checkout| match checkout {
                 Checkout::Head { selector, .. } => {
                     let selector = self.history.normalize_selector(*selector).ok()?;
-                    let step = &self.graph[selector.id];
 
-                    match step {
+                    match self.graph.step_view(selector.id) {
                         Step::None => None,
-                        Step::Pick(Pick { id, .. }) => Some((*id, None)),
+                        Step::Pick(Pick { id, .. }) => Some((id, None)),
                         Step::Reference { refname, .. } => {
                             if let Some(to_reference) =
                                 crate::graph_rebase::positions::resolve_to_pick(
@@ -368,7 +377,7 @@ impl<'ws, 'meta, M: RefMetadata> SuccessfulRebase<'ws, 'meta, M> {
                                 )
                                 && let Step::Pick(Pick { id, .. }) = self.graph[to_reference]
                             {
-                                Some((id, Some(refname.clone())))
+                                Some((id, Some(refname)))
                             } else {
                                 None
                             }
@@ -381,18 +390,16 @@ impl<'ws, 'meta, M: RefMetadata> SuccessfulRebase<'ws, 'meta, M> {
             bail!("BUG: Tried to construct rebase engine graph overlay with no entrypoints");
         };
 
-        let overlay = Overlay::default()
+        Ok(Overlay::default()
             .with_references(updated_refs)
             .with_dropped_references(dropped_refs)
-            .with_entrypoint(entrypoint_id, entrypoint_refname);
-        self.workspace
-            .graph
-            .redo_traversal_with_overlay(&self.repo, self.meta, overlay)
+            .with_entrypoint(entrypoint_id, entrypoint_refname))
     }
 
     /// Like [`Self::overlayed_graph`], but projected onto the workspace view most callers want.
     pub fn overlayed_workspace(&self) -> Result<but_graph::Workspace> {
-        self.overlayed_graph()?.into_workspace()
+        self.workspace
+            .redo_with_overlay(&self.repo, self.meta, self.rebase_overlay()?)
     }
 }
 
@@ -450,7 +457,7 @@ impl<M: RefMetadata> LookupStep for MaterializeOutcome<'_, '_, M> {
 
 fn lookup_step(graph: &StepGraph, history: &RevisionHistory, selector: Selector) -> Result<Step> {
     let normalized = history.normalize_selector(selector)?;
-    Ok(graph[normalized.id].clone())
+    Ok(graph.step_view(normalized.id))
 }
 
 /// How node ids and commit ids moved as the editor transformed the graph.

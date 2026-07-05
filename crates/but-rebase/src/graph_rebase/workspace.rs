@@ -187,10 +187,10 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         //   If we don't find a workspace commit, all commits from HEAD are considered above the workspace.
 
         let ws_ref: gix::refs::FullName = WORKSPACE_REF_NAME.try_into()?;
-        let on_workspace = matches!(
-            &self.graph[entrypoint_ix],
-            Step::Reference { refname, .. } if *refname == ws_ref
-        );
+        let on_workspace = self
+            .graph
+            .reference(entrypoint_ix)
+            .is_some_and(|(refname, _)| *refname == ws_ref);
 
         let target_ix = self.target_selector().map(|s| s.id);
         let revision = self.history.current_revision();
@@ -734,30 +734,27 @@ fn divide_workspace_into_stacks(
     // anchor's stack — the workspace commit itself is in none), else the anchor pick's stack.
     // References belonging to neither (e.g. the target's own ref above the excluded target
     // commit) stay outside every stack.
-    for (node, _) in graph.anchored_refs() {
-        let Some(pos) = positions::ref_position(graph, node) else {
-            continue;
-        };
+    for (node, stored) in graph.anchored_refs() {
+        let anchor = positions::resolve_to_pick(graph, stored.anchor);
+        let approach = positions::ref_approach(graph, node);
         let by_anchor = |a: Option<StepGraphIndex>| {
             a.and_then(|a| deduplicated.iter().position(|s| s.nodes.contains(&a)))
         };
         // Every approaching leg must agree on the lane; a chain entered from several lanes
         // (or from the workspace commit itself) falls back to its anchor's lane. A root chain
         // (no approach) has no lane — no flood ever descended into it.
-        let anchor_in_region = pos
-            .anchor
-            .is_some_and(|a| head_not_target.nodes.contains(&a));
-        let home = match pos.approach.as_slice() {
+        let anchor_in_region = anchor.is_some_and(|a| head_not_target.nodes.contains(&a));
+        let home = match approach.as_slice() {
             // A root chain: no flood ever descended into it — no lane.
             [] => None,
             // A single approach follows its leg's lane, even onto an excluded anchor (a lane
             // bottom resting on the target); a chain hanging straight off the workspace
             // commit falls back to its anchor's lane.
-            [(child, _)] if *child != workspace_commit_ix && !pos.ambiguous => deduplicated
+            [(child, _)] if *child != workspace_commit_ix && !stored.ambiguous => deduplicated
                 .iter()
                 .position(|s| s.nodes.contains(child))
-                .or_else(|| anchor_in_region.then(|| by_anchor(pos.anchor)).flatten()),
-            [_] => anchor_in_region.then(|| by_anchor(pos.anchor)).flatten(),
+                .or_else(|| anchor_in_region.then(|| by_anchor(anchor)).flatten()),
+            [_] => anchor_in_region.then(|| by_anchor(anchor)).flatten(),
             // A shared chain: every leg must agree on the lane; otherwise it belongs to its
             // anchor's lane when that is in region, or nowhere.
             many => {
@@ -775,7 +772,7 @@ fn divide_workspace_into_stacks(
                     [Some(first), rest @ ..] if rest.iter().all(|h| *h == Some(*first)) => {
                         Some(*first)
                     }
-                    _ => anchor_in_region.then(|| by_anchor(pos.anchor)).flatten(),
+                    _ => anchor_in_region.then(|| by_anchor(anchor)).flatten(),
                 }
             }
         };

@@ -12,7 +12,7 @@
 
 use anyhow::Result;
 use but_core::{RefMetadata as _, ref_metadata::ProjectMeta};
-use but_graph::{Graph, init::Options};
+use but_graph::init::Options;
 use but_meta::{VirtualBranchesTomlMetadata, virtual_branches_legacy_types::Target};
 use but_testsupport::{gix_testtools::tempfile::TempDir, visualize_commit_graph_all};
 use but_workspace::workspace::{
@@ -47,8 +47,7 @@ fn detailed(
             .transpose()?,
         ..Default::default()
     };
-    let graph = Graph::from_head(&repo, &meta, project_meta, Options::limited())?;
-    let mut ws = graph.into_workspace()?;
+    let mut ws = but_graph::Workspace::from_head(&repo, &meta, project_meta, Options::limited())?;
     let detailed = detailed_graph_workspace(&mut ws, &mut meta, &repo)?;
     Ok((repo, detailed))
 }
@@ -75,7 +74,7 @@ fn detailed_writable(
     let project_meta = meta
         .workspace(but_core::WORKSPACE_REF_NAME.try_into()?)?
         .project_meta();
-    let graph = Graph::from_head(
+    let mut ws = but_graph::Workspace::from_head(
         &repo,
         &meta,
         project_meta,
@@ -84,7 +83,6 @@ fn detailed_writable(
             ..Options::limited()
         },
     )?;
-    let mut ws = graph.into_workspace()?;
     let detailed = detailed_graph_workspace(&mut ws, &mut meta, &repo)?;
     Ok((tmp, detailed))
 }
@@ -1038,7 +1036,7 @@ fn commit_state_uses_similarity_for_local_and_remote() -> Result<()> {
     let target_sha = project_meta
         .target_commit_id
         .context("scenario should configure a target")?;
-    let graph = Graph::from_head(
+    let mut ws = but_graph::Workspace::from_head(
         &repo,
         &*meta,
         project_meta,
@@ -1047,7 +1045,6 @@ fn commit_state_uses_similarity_for_local_and_remote() -> Result<()> {
             ..Options::limited()
         },
     )?;
-    let mut ws = graph.into_workspace()?;
     let detailed = detailed_graph_workspace(&mut ws, &mut *meta, &repo)?;
     insta::assert_snapshot!(render_commit_state(&detailed), @"
     # Stack 0

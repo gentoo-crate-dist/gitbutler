@@ -7,7 +7,7 @@ use crate::graph_rebase::arrangement::{
     readopt_dangling_refs, repoint_ref, settle_chain_lower, splice_out, split_chain,
     transfer_stack, unhook_ref,
 };
-use crate::graph_rebase::{Direction, StepGraphIndex, positions};
+use crate::graph_rebase::{Direction, StepGraph, StepGraphIndex, positions};
 use anyhow::{Context as _, Result, anyhow, bail};
 use but_core::RefMetadata;
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,15 @@ use serde::{Deserialize, Serialize};
 use crate::graph_rebase::{
     Edge, Editor, Pick, Selector, Step, ToCommitSelector, ToReferenceSelector, ToSelector,
 };
+
+/// Route a step command to its namespace: references into the ref table, everything else
+/// into the node arena.
+fn add_step_to_graph(graph: &mut StepGraph, step: Step) -> StepGraphIndex {
+    match step {
+        Step::Reference { refname, mutable } => graph.add_reference(refname, mutable),
+        step => graph.add_node(step),
+    }
+}
 
 /// Describes where relative to the selector a step should be inserted
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -272,10 +281,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
 
     /// Get a selector to a particular reference in the graph
     pub fn try_select_reference(&self, target: &gix::refs::FullNameRef) -> Option<Selector> {
-        for node_idx in self.graph.node_indices() {
-            if let Step::Reference { refname, .. } = &self.graph[node_idx]
-                && target == refname.as_ref()
-            {
+        for (node_idx, refname, _) in self.graph.references() {
+            if target == refname.as_ref() {
                 return Some(self.new_selector(node_idx));
             }
         }
@@ -436,19 +443,34 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
 
     /// Replaces the node that the function was pointing to.
     ///
+    /// Replacement stays within its namespace: a pick can become a pick or a tombstone, a
+    /// reference can be renamed or deleted — never one into the other.
+    ///
     /// Returns the replaced step.
-    pub fn replace(&mut self, target: impl ToSelector, mut step: Step) -> Result<Step> {
+    pub fn replace(&mut self, target: impl ToSelector, step: Step) -> Result<Step> {
         let target = self.history.normalize_selector(target.to_selector(self)?)?;
-        std::mem::swap(&mut self.graph[target.id], &mut step);
-        // Replacing a reference with a non-reference (tombstoning) removes it from the physical
-        // stack: splice dependents past it. The stored anchor itself is kept for retention reads.
-        if matches!(step, Step::Reference { .. })
-            && !matches!(self.graph[target.id], Step::Reference { .. })
-            && let Some(stored) = self.graph.anchor_of(target.id)
-        {
-            splice_out(&mut self.graph, target.id, stored.below);
+        let old = self.graph.step_view(target.id);
+        let is_ref_slot = self.graph.reference_record(target.id).is_some();
+        match (is_ref_slot, step) {
+            (false, step @ (Step::Pick(_) | Step::None)) => self.graph[target.id] = step,
+            (true, Step::Reference { refname, mutable }) => {
+                self.graph.set_reference(target.id, refname, mutable)
+            }
+            // Deleting a reference removes it from the physical stack: splice dependents
+            // past it. Name and stored anchor are kept for retention reads.
+            (true, Step::None) => {
+                let was_live = self.graph.is_reference(target.id);
+                self.graph.tombstone_reference(target.id);
+                if was_live && let Some(stored) = self.graph.anchor_of(target.id) {
+                    splice_out(&mut self.graph, target.id, stored.below);
+                }
+            }
+            (false, Step::Reference { .. }) => {
+                bail!("cannot replace a commit step with a reference")
+            }
+            (true, Step::Pick(_)) => bail!("cannot replace a reference with a commit step"),
         }
-        Ok(step)
+        Ok(old)
     }
 
     /// Disconnect a segment from a parent segment.
@@ -1263,7 +1285,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     ///
     /// Almost always you really want to use `insert` function instead.
     pub fn add_step(&mut self, step: Step) -> Result<Selector> {
-        let new_idx = self.graph.add_node(step);
+        let new_idx = add_step_to_graph(&mut self.graph, step);
         Ok(self.new_selector(new_idx))
     }
 
@@ -1307,7 +1329,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             }
             (InsertSide::Above, None) => {
                 // A reference above a pick becomes the bottom of the pick's stack.
-                let new_idx = self.graph.add_node(step);
+                let new_idx = add_step_to_graph(&mut self.graph, step);
                 place_ref(&mut self.graph, new_idx, StackSlot::Bottom(target.id));
                 Ok(self.new_selector(new_idx))
             }
@@ -1344,7 +1366,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             }
             (InsertSide::Above, Some(_)) => {
                 // A reference above a reference joins its chain one rank up.
-                let new_idx = self.graph.add_node(step);
+                let new_idx = add_step_to_graph(&mut self.graph, step);
                 place_ref(&mut self.graph, new_idx, StackSlot::Above(target.id));
                 Ok(self.new_selector(new_idx))
             }
@@ -1377,7 +1399,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
                     .edges_directed(target.id, Direction::Outgoing)
                     .min_by_key(|e| e.weight().order)
                     .map(|e| (e.target(), e.weight().order));
-                let new_idx = self.graph.add_node(step);
+                let new_idx = add_step_to_graph(&mut self.graph, step);
                 if let Some((parent_pick, slot)) = first_parent {
                     place_ref(
                         &mut self.graph,
@@ -1420,7 +1442,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             (InsertSide::Below, Some(_)) => {
                 // A reference below a reference takes its position; it and everything above
                 // shift up.
-                let new_idx = self.graph.add_node(step);
+                let new_idx = add_step_to_graph(&mut self.graph, step);
                 place_ref(&mut self.graph, new_idx, StackSlot::Below(target.id));
                 Ok(self.new_selector(new_idx))
             }
@@ -1474,7 +1496,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         // tombstone carrying a stale anchor (which upstream-integration retention still reads) is
         // not a reference and must not be treated as one, or the re-anchor cascades the stale
         // position through the graph.
-        if matches!(self.graph[child.id], Step::Reference { .. }) {
+        if self.graph.is_reference(child.id) {
             let new_anchor = match self.graph.anchor_of(parent.id) {
                 Some(parent_stored) => {
                     positions::resolve_to_pick(&self.graph, parent_stored.anchor)

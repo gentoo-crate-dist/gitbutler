@@ -12,7 +12,7 @@
 
 use anyhow::Result;
 use but_core::ref_metadata::ProjectMeta;
-use but_graph::Graph;
+use but_graph::Workspace;
 use but_rebase::graph_rebase::Editor;
 use but_testsupport::visualize_commit_graph_all;
 
@@ -24,9 +24,8 @@ use crate::utils::{fixture_writable, standard_options};
 fn render(fixture: &str, target: Option<&str>) -> Result<String> {
     let (repo, _tmp, mut meta) = fixture_writable(fixture)?;
 
-    let graph =
-        Graph::from_head(&repo, &*meta, ProjectMeta::default(), standard_options())?.validated()?;
-    let mut ws = graph.into_workspace()?;
+    let mut ws = Workspace::from_head(&repo, &*meta, ProjectMeta::default(), standard_options())?
+        .validated()?;
 
     // The projection bounds stacks at the target commit, so wire it onto the
     // workspace graph that the editor reads from.

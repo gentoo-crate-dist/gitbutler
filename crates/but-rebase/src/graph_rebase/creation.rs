@@ -119,10 +119,7 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                 if mutable {
                     references.push(refname.clone());
                 }
-                let ix = graph.add_node(Step::Reference {
-                    refname: refname.clone(),
-                    mutable,
-                });
+                let ix = graph.add_reference(refname.clone(), mutable);
                 if Some(reference) == entrypoint.segment.ref_name() {
                     head_selectors.push(Selector {
                         id: ix,
@@ -146,10 +143,7 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
                     if mutable {
                         references.push(reference.to_owned());
                     }
-                    let ix = graph.add_node(Step::Reference {
-                        refname: reference.clone(),
-                        mutable,
-                    });
+                    let ix = graph.add_reference(reference.clone(), mutable);
                     if let Some(previous_ix) = nodes.last() {
                         graph.add_edge(*previous_ix, ix, Edge { order: 0 });
                     }
