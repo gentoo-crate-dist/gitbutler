@@ -1456,11 +1456,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             let mut tips = vec![parent];
 
             while let Some(tip) = tips.pop() {
-                for parent in self
-                    .graph
-                    .edges_directed(tip, Direction::Outgoing)
-                    .map(|e| e.target())
-                {
+                for parent in self.graph.parents(tip) {
                     if seen.insert(parent) {
                         tips.push(parent);
                     }

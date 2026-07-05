@@ -6,7 +6,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::graph_rebase::Direction;
 use crate::graph_rebase::positions;
 use anyhow::Result;
 use but_core::{
@@ -681,19 +680,20 @@ fn divide_workspace_into_stacks(
     // Each parent of the workspace commit seeds a stack, flooded pick-to-pick: every outgoing
     // edge resolves through reference/tombstone steps to the pick beneath.
     let mut initial_stacks = graph
-        .edges_directed(workspace_commit_ix, Direction::Outgoing)
-        .map(|edge| {
+        .parents(workspace_commit_ix)
+        .into_iter()
+        .map(|head| {
             let mut nodes = std::collections::HashSet::new();
             let mut tips = Vec::new();
-            if let Some(pick) = positions::resolve_to_pick(graph, edge.target())
+            if let Some(pick) = positions::resolve_to_pick(graph, head)
                 && head_not_target.nodes.contains(&pick)
             {
                 nodes.insert(pick);
                 tips.push(pick);
             }
             while let Some(tip) = tips.pop() {
-                for edge in graph.edges_directed(tip, Direction::Outgoing) {
-                    let Some(pick) = positions::resolve_to_pick(graph, edge.target()) else {
+                for parent in graph.parents(tip) {
+                    let Some(pick) = positions::resolve_to_pick(graph, parent) else {
                         continue;
                     };
                     if !head_not_target.nodes.contains(&pick) {
@@ -705,14 +705,17 @@ fn divide_workspace_into_stacks(
                 }
             }
             NodeSet {
-                heads: vec![edge.target()],
+                heads: vec![head],
                 nodes,
             }
         })
         .collect::<Vec<_>>();
 
-    // Merge stacks that share any pick (they aren't actually distinct).
+    // Merge stacks that share any pick (they aren't actually distinct). The pop-loop takes
+    // from the back, so reverse first: stacks come out in the workspace commit's slot order,
+    // first parent first.
     let mut deduplicated = vec![];
+    initial_stacks.reverse();
     while let Some(mut out) = initial_stacks.pop() {
         for bix in (0..initial_stacks.len()).rev() {
             #[expect(clippy::indexing_slicing)]

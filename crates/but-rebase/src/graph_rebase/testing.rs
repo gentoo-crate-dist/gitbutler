@@ -73,13 +73,12 @@ impl TestingDot for StepGraph {
             };
             out.push_str(&format!("    {idx} [ label=\"{label}\"]\n"));
         }
-        for edge in self.edge_references() {
-            out.push_str(&format!(
-                "    {} -> {} [ label=\"order: {}\"]\n",
-                edge.source(),
-                edge.target(),
-                edge.weight().order
-            ));
+        for idx in self.node_indices() {
+            for (order, parent) in self.parent_orders(idx) {
+                out.push_str(&format!(
+                    "    {idx} -> {parent} [ label=\"order: {order}\"]\n"
+                ));
+            }
         }
         out.push_str("}\n");
         out
@@ -154,8 +153,8 @@ fn chains(graph: &StepGraph) -> HashMap<ChainKey, Vec<StepGraphIndex>> {
 /// reference chains (positioned with nothing above them).
 fn find_heads(graph: &StepGraph) -> Vec<StepGraphIndex> {
     let mut has_incoming: HashSet<StepGraphIndex> = HashSet::new();
-    for edge in graph.edge_references() {
-        has_incoming.insert(edge.target());
+    for idx in graph.node_indices() {
+        has_incoming.extend(graph.parents(idx));
     }
     let chains = chains(graph);
     // Node-arena entries first, then references (the render sorts heads deterministically, so

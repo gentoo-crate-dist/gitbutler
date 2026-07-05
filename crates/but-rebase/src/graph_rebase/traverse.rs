@@ -2,7 +2,6 @@
 
 use std::collections::HashSet;
 
-use crate::graph_rebase::Direction;
 use anyhow::Result;
 use but_core::RefMetadata;
 
@@ -52,11 +51,7 @@ impl Iterator for Traversal<'_> {
             if self.excluded.contains(&n) || !self.seen.insert(n) {
                 continue;
             }
-            self.tips.extend(
-                self.graph
-                    .edges_directed(n, Direction::Outgoing)
-                    .map(|e| e.target()),
-            );
+            self.tips.extend(self.graph.parents(n));
             return Some(n);
         }
         None

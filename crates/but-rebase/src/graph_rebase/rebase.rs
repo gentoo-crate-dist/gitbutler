@@ -14,7 +14,7 @@ use gix::refs::{
 };
 
 use crate::graph_rebase::{
-    Editor, Pick, Step, StepGraph, StepGraphIndex, SuccessfulRebase,
+    Edge, Editor, Pick, Step, StepGraph, StepGraphIndex, SuccessfulRebase,
     cherry_pick::{CherryPickOutcome, cherry_pick},
     util::collect_ordered_parents,
 };
@@ -41,6 +41,8 @@ impl<'ws, 'graph, M: RefMetadata> Editor<'ws, 'graph, M> {
 
         // A 1 to 1 mapping between the incoming graph and the output graph
         let mut graph_mapping: HashMap<StepGraphIndex, StepGraphIndex> = HashMap::new();
+        // Live (source node, stored order) names to the dense slots the output graph writes.
+        let mut leg_map: HashMap<(StepGraphIndex, usize), usize> = HashMap::new();
         // The step graph with updated commit oids
         let mut output_graph = StepGraph::new();
         let mut unchanged_references = vec![];
@@ -135,19 +137,19 @@ impl<'ws, 'graph, M: RefMetadata> Editor<'ws, 'graph, M> {
 
             graph_mapping.insert(step_idx, new_idx);
 
-            let mut edges = self
-                .graph
-                .edges_directed(step_idx, Direction::Outgoing)
-                .collect::<Vec<_>>();
-            edges.sort_by_key(|e| e.weight().order);
-            edges.reverse();
-
-            for e in edges {
-                let Some(new_parent) = graph_mapping.get(&e.target()) else {
+            // Slot order (reversed to keep adjacency insertion order); the output graph gets
+            // dense orders regardless of what the input stored, live statement names
+            // following via `leg_map`.
+            let parents = self.graph.parent_orders(step_idx);
+            for (slot, (stored, parent)) in parents.into_iter().enumerate().rev() {
+                let Some(new_parent) = graph_mapping.get(&parent) else {
                     bail!("Failed to find corresponding parent");
                 };
 
-                output_graph.add_edge(new_idx, *new_parent, e.weight().clone());
+                output_graph.add_edge(new_idx, *new_parent, Edge { order: slot });
+                if stored != slot {
+                    leg_map.insert((step_idx, stored), slot);
+                }
             }
         }
 
@@ -227,7 +229,7 @@ impl<'ws, 'graph, M: RefMetadata> Editor<'ws, 'graph, M> {
             graph_mapping.insert(step_idx, new_idx);
         }
 
-        output_graph.carry_positions_mapped(&self.graph, &graph_mapping);
+        output_graph.carry_positions_mapped(&self.graph, &graph_mapping, &leg_map);
 
         // Find deleted references. `initial_references` only contains mutable
         // references, so immutable references are never considered for deletion.
@@ -291,15 +293,14 @@ fn order_steps_picking(graph: &StepGraph, heads: &[StepGraphIndex]) -> VecDeque<
     let mut bases = VecDeque::new();
 
     while let Some(head) = heads.pop() {
-        let edges = graph.edges_directed(head, Direction::Outgoing);
+        let parents = graph.parents(head);
 
-        if edges.clone().count() == 0 {
+        if parents.is_empty() {
             bases.push_back(head);
             continue;
         }
 
-        for edge in edges {
-            let t = edge.target();
+        for t in parents {
             if seen.insert(t) {
                 heads.push(t);
             }
@@ -312,12 +313,12 @@ fn order_steps_picking(graph: &StepGraph, heads: &[StepGraphIndex]) -> VecDeque<
     let mut retraversed = bases.iter().cloned().collect::<HashSet<_>>();
 
     while let Some(base) = bases.pop_front() {
-        for edge in graph.edges_directed(base, Direction::Incoming) {
+        for (s, _) in graph.incoming_legs(base) {
             // We only want to queue nodes for traversing that have had all of their parents traversed.
-            let s = edge.source();
-            let mut outgoing_edges = graph.edges_directed(s, Direction::Outgoing);
-            let all_parents_seen = outgoing_edges.clone().count() == 0
-                || outgoing_edges.all(|e| retraversed.contains(&e.target()));
+            let all_parents_seen = graph
+                .parents(s)
+                .into_iter()
+                .all(|t| retraversed.contains(&t));
             if all_parents_seen && seen.contains(&s) && retraversed.insert(s) {
                 bases.push_back(s);
                 ordered.push_back(s);
@@ -478,7 +479,7 @@ mod test {
             ");
 
             let ordered_from_a = order_steps_picking(&graph, &[f, h]);
-            assert_eq!(&ordered_from_a, &[e, d, h, c, g, f]);
+            assert_eq!(&ordered_from_a, &[e, d, c, h, g, f]);
 
             Ok(())
         }

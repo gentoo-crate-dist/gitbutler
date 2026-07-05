@@ -474,10 +474,15 @@ impl StepGraph {
     /// (an isomorphic rebuild): the lane table wholesale — members, carry, and legs as
     /// surgery maintained them, never re-derived — and each position alongside. Members,
     /// anchors, and leg sources that did not survive the rebuild are dropped.
+    ///
+    /// `leg_map` translates live `(source node, stored order)` names to the dense slots the
+    /// rebuild wrote; legs it does not name (stale statements) carry verbatim — retention is
+    /// deliberate, and a dead name stays equally dead under any numbering.
     pub(crate) fn carry_positions_mapped(
         &mut self,
         source: &StepGraph,
         mapping: &HashMap<StepGraphIndex, StepGraphIndex>,
+        leg_map: &HashMap<(StepGraphIndex, usize), usize>,
     ) {
         for (key, lanes) in &source.lanes {
             let Some(&new_key) = mapping.get(key) else {
@@ -496,7 +501,11 @@ impl StepGraph {
                 let legs: Vec<_> = lane
                     .legs
                     .iter()
-                    .filter_map(|(src, slot)| mapping.get(src).map(|src| (*src, *slot)))
+                    .filter_map(|&(src, slot)| {
+                        let new_src = mapping.get(&src)?;
+                        let new_slot = leg_map.get(&(src, slot)).copied().unwrap_or(slot);
+                        Some((*new_src, new_slot))
+                    })
                     .collect();
                 let carry = match lane.carry {
                     LaneCarry::Count(_) => LaneCarry::Count(legs.len()),
@@ -670,6 +679,30 @@ impl StepGraph {
     /// How many parent slots `node` has.
     pub(crate) fn parent_count(&self, node: StepGraphIndex) -> usize {
         self.adjacency(node, Direction::Outgoing).len()
+    }
+
+    /// `(stored order, parent)` per slot, in slot order — the bridge read for consumers that
+    /// must translate stored names to dense slots (dies with the store swap).
+    pub(crate) fn parent_orders(&self, node: StepGraphIndex) -> Vec<(usize, StepGraphIndex)> {
+        self.parent_edge_ids(node)
+            .into_iter()
+            .map(|id| {
+                let record = self.edge_ref(id);
+                (record.weight.order, record.target)
+            })
+            .collect()
+    }
+
+    /// Every edge into `node` as `(child, slot)` legs, sorted for determinism. Slots are the
+    /// children's STORED orders — align via [`Self::normalize_parent_slots`] first when a
+    /// statement-exact name is needed.
+    pub(crate) fn incoming_legs(&self, node: StepGraphIndex) -> Vec<(StepGraphIndex, usize)> {
+        let mut legs: Vec<_> = self
+            .edges_directed(node, Direction::Incoming)
+            .map(|e| (e.source(), e.weight().order))
+            .collect();
+        legs.sort_unstable();
+        legs
     }
 
     /// Renumber `child`'s parent slots to dense `0..n`, renaming live statements along and
