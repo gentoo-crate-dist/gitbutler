@@ -10,7 +10,7 @@ use super::chains::{
     insert_empty_workspace_segment,
 };
 use super::facts::{Facts, facts};
-use super::plan::{Float, chain_plan};
+use super::plan::{ChainPlan, Float, chain_plan};
 use super::remotes::{
     add_co_located_remote_empties, add_remote_segments, add_untracked_remote_segments,
     link_remote_to_local, remote_name_in_play, segment_ahead_region,
@@ -34,14 +34,19 @@ use crate::{Commit, CommitGraph, RefInfo, Segment, SegmentIndex, segment_graph::
 /// 2. **Lower bound** — the base all chains and the target converge on.
 /// 3. **Chain plan** (`chain_plan`) — the NAME each tip's segment gets (some go anonymous so an
 ///    empty named segment can float above them), decided before any segment is built.
-/// 4. **Materialize** — one local segment per tip holding its first-parent commit run, then the
-///    planned float placeholders (empty named segments) spliced above the anonymized tips.
-/// 5. **Connect** — each segment's bottom commit points at the segments owning its parents.
-/// 6. **Chain structure** — empty-workspace segment, advanced-outside branches, empty-branch
-///    splices. Runs before the remote passes so those link the chain segments at creation.
+/// 4. **Materialize** (`mint_tip_segments`, `mint_float_placeholders`) — one local segment per
+///    tip holding its first-parent commit run, then the planned float placeholders (empty named
+///    segments) spliced above the anonymized tips.
+/// 5. **Connect** (`connect_parents`) — each segment's bottom commit points at the segments
+///    owning its parents.
+/// 6. **Chain structure** (`build_chain_structure`) — empty-workspace segment, advanced-outside
+///    branches, empty-branch splices. Runs before the remote passes so those link the chain
+///    segments at creation.
 /// 7. **Remote / target / entrypoint passes** — a remote root segment per local branch whose
-///    remote tip is present; the target's own remote segment when no local tracks it; regions for
-///    an extra (older) target position, an outside checkout, and any explicit tip left uncovered.
+///    remote tip is present (`add_remote_segments`); the target's own remote segment when no
+///    local tracks it (`surface_target_remote`); regions for an extra (older) target position,
+///    an outside checkout, and any explicit tip left uncovered; then the whole-graph sweeps
+///    (entrypoint resolution, metadata, ref dedup, worktree annotation).
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(
     name = "graph_from_commit_graph",
@@ -113,17 +118,230 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
         owner_of,
         tips,
     } = f;
-    let is_boundary = |c: gix::ObjectId| boundaries.contains(&c);
 
     let mut sg = SegmentGraph::new();
-    let mut seg_of_tip: IdMap<SegmentIndex> = IdMap::default();
+    let seg_of_tip = mint_tip_segments(
+        cg,
+        &mut sg,
+        &tips,
+        &in_set,
+        &boundaries,
+        &plan,
+        remote_tracking,
+    );
+    let placeholder_of = mint_float_placeholders(&mut sg, &plan, remote_tracking);
+    connect_parents(
+        cg,
+        &mut sg,
+        &tips,
+        workspace_commit,
+        &owner_of,
+        &seg_of_tip,
+        &placeholder_of,
+        &plan,
+    );
 
-    // Create a local segment per tip, holding its first-parent commit run. Names come from the
-    // plan: floated and demoted tips start ANONYMOUS (their name never touches the segment); a
-    // float's displaced build-time name rides on the tip commit as a passive ref.
+    let (ws_empty_sidx, chain_created) = build_chain_structure(
+        cg,
+        &mut sg,
+        &seg_of_tip,
+        &in_set,
+        &pinned_commits,
+        stack_branches,
+        workspace_commit,
+        remote_tracking,
+        meta,
+        project_meta.target_ref.as_ref(),
+        empty_ws_case,
+        managed,
+        &plan,
+    );
+
+    // Remote segments: for each local segment with a remote-tracking ref whose remote tip is
+    // present, create a remote root segment (holding the remote-ahead commits) that connects into
+    // the local segment, doubly-linked via siblings. The remote passes historically ran BEFORE the
+    // chain structure and keyed on the pre-chain names — the overlay carries exactly that view
+    // (materialization names plus the passes' own renames), so the chain reorder cannot change
+    // their decisions.
+    let pre_chain_names: IdMap<gix::refs::FullName> = plan.base_name_of.clone();
+    let claimed_remote_names = claim_remote_names(
+        cg,
+        &plan,
+        &in_set,
+        remote_tracking,
+        stack_branches,
+        symbolic_remotes,
+    );
+    // Connections from a region into another creator's territory (a run stopped at a claimed
+    // remote): recorded during region creation, wired once every creator ran.
+    let mut pending_edges: Vec<(SegmentIndex, gix::ObjectId)> = Vec::new();
+    // The entrypoint is a planned boundary in every region too: a checkout inside a remote's
+    // ahead run starts its own segment at creation, never split out after the fact.
+    let region_pinned = {
+        let mut p = pinned_commits.clone();
+        p.insert(entrypoint);
+        p
+    };
+    add_remote_segments(
+        cg,
+        &mut sg,
+        &seg_of_tip,
+        &in_set,
+        &owner_of,
+        symbolic_remotes,
+        stack_branches,
+        &region_pinned,
+        remote_tracking,
+        &pre_chain_names,
+        &plan.renames,
+        &claimed_remote_names,
+        &mut pending_edges,
+    );
+    add_untracked_remote_segments(
+        cg,
+        &mut sg,
+        remote_tracking,
+        &seg_of_tip,
+        &in_set,
+        &owner_of,
+    );
+    surface_target_remote(
+        cg,
+        &mut sg,
+        project_meta.target_ref.as_ref(),
+        &in_set,
+        &owner_of,
+        &seg_of_tip,
+        &plan,
+        remote_tracking,
+        &region_pinned,
+        &claimed_remote_names,
+        &mut pending_edges,
+    );
+    add_extra_target_region(
+        cg,
+        &mut sg,
+        options.extra_target_commit_id,
+        &chain_created,
+        &in_set,
+        &seg_of_tip,
+        &owner_of,
+        remote_tracking,
+        &region_pinned,
+        &claimed_remote_names,
+        &mut pending_edges,
+    );
+    add_outside_entrypoint_region(
+        cg,
+        &mut sg,
+        entrypoint,
+        entrypoint_ref.as_ref(),
+        &chain_created,
+        &in_set,
+        &seg_of_tip,
+        &owner_of,
+        remote_tracking,
+        &region_pinned,
+        &claimed_remote_names,
+        &mut pending_edges,
+    );
+    cover_explicit_tips(
+        cg,
+        &mut sg,
+        &chain_created,
+        &in_set,
+        &seg_of_tip,
+        &owner_of,
+        remote_tracking,
+        &region_pinned,
+        &claimed_remote_names,
+        &mut pending_edges,
+    );
+
+    // The target's remote segment may have been created before its LOCAL got a segment (the
+    // local can materialize from the extra-target region above) — link them like every other
+    // creator does.
+    if let Some(tr) = project_meta.target_ref.as_ref()
+        && let Some(tr_sidx) = segment_by_ref(&sg, tr)
+    {
+        let tr = tr.clone();
+        link_remote_to_local(&mut sg, tr_sidx, &tr, remote_tracking);
+    }
+
+    add_co_located_remote_empties(&mut sg, remote_tracking);
+    wire_pending_edges(&mut sg, pending_edges);
+
+    float_remote_named_checkout(
+        &mut sg,
+        entrypoint,
+        entrypoint_ref.as_ref(),
+        workspace_commit,
+    );
+    if managed {
+        drop_suppressed_tip_links(&mut sg, &plan, &seg_of_tip);
+    }
+
+    let entrypoint_sidx = resolve_entrypoint_segment(
+        &mut sg,
+        ws_empty_sidx,
+        entrypoint,
+        entrypoint_ref.as_ref(),
+        workspace_commit,
+        remote_tracking,
+    );
+    classify_segment_metadata(&mut sg, meta);
+    strip_segment_named_refs(&mut sg);
+    annotate_worktrees(&mut sg, worktree_by_branch);
+
+    let entrypoint =
+        entrypoint_sidx.map(|sidx| (sidx, crate::EntryPointCommit::AtCommit(entrypoint)));
+
+    // Surface the extra target (an older target position) as an integrated traversal tip. The projection
+    // derives `target_commit` from the deepest integrated tip and uses it to extend the workspace base
+    // down to it — showing the commits integrated since then, exactly as the walk does. Only when the
+    // commit actually made it into a segment — validation requires every tip to be owned by one, and
+    // the traversal legitimately never reaches an extra target outside its cut.
+    let mut traversal_tips = Vec::new();
+    if let Some(extra) = options.extra_target_commit_id
+        && segment_by_commit(&sg, extra).is_some()
+    {
+        traversal_tips
+            .push(crate::init::Tip::new(extra).with_role(crate::init::TipRole::TargetRemote));
+    }
+
+    let mut graph = crate::Graph {
+        inner: sg,
+        entrypoint,
+        entrypoint_ref,
+        project_meta,
+        options,
+        traversal_tips,
+        ..crate::Graph::default()
+    };
+    // The traversal's hard-limit signal survives the derivation — consumers surface it to the user.
+    if cg.hard_limit_hit {
+        graph.set_hard_limit_hit();
+    }
+    graph
+}
+
+/// Create a local segment per tip, holding its first-parent commit run. Names come from the
+/// plan: floated and demoted tips start ANONYMOUS (their name never touches the segment); a
+/// float's displaced build-time name rides on the tip commit as a passive ref.
+fn mint_tip_segments(
+    cg: &CommitGraph,
+    sg: &mut SegmentGraph,
+    tips: &[gix::ObjectId],
+    in_set: &IdSet,
+    boundaries: &IdSet,
+    plan: &ChainPlan,
+    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
+) -> IdMap<SegmentIndex> {
+    let is_boundary = |c: gix::ObjectId| boundaries.contains(&c);
     let floated: IdMap<&Float> = plan.floats.iter().map(|fl| (fl.tip, fl)).collect();
-    for &tip in &tips {
-        let mut commits = commit_run(cg, tip, &in_set, &is_boundary);
+    let mut seg_of_tip: IdMap<SegmentIndex> = IdMap::default();
+    for &tip in tips {
+        let mut commits = commit_run(cg, tip, in_set, &is_boundary);
         let suppressed = floated.contains_key(&tip) || plan.demoted.contains(&tip);
         let named = if suppressed {
             None
@@ -167,8 +385,17 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
         sg.node_mut(sidx).expect("just added").id = sidx;
         seg_of_tip.insert(tip, sidx);
     }
-    // The planned float placeholders: empty segments carrying the floated names, spliced between
-    // the workspace and the now-anonymous shared tips (edges below).
+    seg_of_tip
+}
+
+/// The planned float placeholders: empty segments carrying the floated names, spliced between
+/// the workspace and the now-anonymous shared tips (edges below). Returns each placeholder
+/// keyed by the tip it floats above.
+fn mint_float_placeholders(
+    sg: &mut SegmentGraph,
+    plan: &ChainPlan,
+    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
+) -> IdMap<SegmentIndex> {
     let mut placeholder_of: IdMap<SegmentIndex> = IdMap::default();
     for float in &plan.floats {
         let sidx = sg.add_node(Segment {
@@ -191,11 +418,24 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
         sg.node_mut(sidx).expect("just added").id = sidx;
         placeholder_of.insert(float.tip, sidx);
     }
+    placeholder_of
+}
 
-    // Connections: for each segment, its bottom commit's parents point at the segment owning each
-    // parent, in first-parent order. The workspace's edge to a FLOATED parent routes through the
-    // placeholder instead.
-    for &tip in &tips {
+/// Connections: for each segment, its bottom commit's parents point at the segment owning each
+/// parent, in first-parent order. The workspace's edge to a FLOATED parent routes through the
+/// placeholder instead, and each placeholder connects down into its anonymized shared segment.
+#[allow(clippy::too_many_arguments)]
+fn connect_parents(
+    cg: &CommitGraph,
+    sg: &mut SegmentGraph,
+    tips: &[gix::ObjectId],
+    workspace_commit: gix::ObjectId,
+    owner_of: &IdMap<gix::ObjectId>,
+    seg_of_tip: &IdMap<SegmentIndex>,
+    placeholder_of: &IdMap<SegmentIndex>,
+    plan: &ChainPlan,
+) {
+    for &tip in tips {
         let src = seg_of_tip[&tip];
         let bottom = sg
             .node(src)
@@ -213,7 +453,7 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
                 } else {
                     seg_of_tip[&owner]
                 };
-                connect(&mut sg, src, dst);
+                connect(sg, src, dst);
             }
         }
     }
@@ -224,54 +464,75 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
         else {
             continue;
         };
-        connect(&mut sg, ph, tip_sidx);
+        connect(sg, ph, tip_sidx);
     }
+}
 
-    // The chain STRUCTURE (empty-ws segment, advanced-outside branches, empty-branch splices)
-    // precedes the remote passes, which link the chain segments at creation.
+/// The chain STRUCTURE (empty-ws segment, advanced-outside branches, empty-branch splices)
+/// precedes the remote passes, which link the chain segments at creation.
+///
+/// Returns the empty workspace segment (when one was spliced in) and the segments this pass
+/// created: the coverage gates (extra target, outside entrypoint, explicit tips) historically
+/// evaluated BEFORE any chain existed — they must not be shadowed by chain segments (e.g. an
+/// advanced-outside run swallowing the stored target position that the extra-target region
+/// must surface).
+#[allow(clippy::too_many_arguments)]
+fn build_chain_structure<T: but_core::RefMetadata>(
+    cg: &CommitGraph,
+    sg: &mut SegmentGraph,
+    seg_of_tip: &IdMap<SegmentIndex>,
+    in_set: &IdSet,
+    pinned_commits: &IdSet,
+    stack_branches: Option<&[Vec<gix::refs::FullName>]>,
+    workspace_commit: gix::ObjectId,
+    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
+    meta: &T,
+    target_ref: Option<&gix::refs::FullName>,
+    empty_ws_case: bool,
+    managed: bool,
+    plan: &ChainPlan,
+) -> (Option<SegmentIndex>, HashSet<SegmentIndex>) {
     let mut ws_empty_sidx = None;
     let before_chains: HashSet<SegmentIndex> = sg.node_indices().collect();
     if managed {
         if empty_ws_case {
-            ws_empty_sidx =
-                insert_empty_workspace_segment(&mut sg, &seg_of_tip, cg, workspace_commit);
+            ws_empty_sidx = insert_empty_workspace_segment(sg, seg_of_tip, cg, workspace_commit);
         }
         add_advanced_outside_branches(
-            &mut sg,
+            sg,
             cg,
-            &in_set,
+            in_set,
             stack_branches,
             workspace_commit,
             remote_tracking,
             meta,
-            project_meta.target_ref.as_ref(),
-            &pinned_commits,
+            target_ref,
+            pinned_commits,
         );
         let ws_sidx = ws_empty_sidx.or_else(|| seg_of_tip.get(&workspace_commit).copied());
-        insert_empty_branches(&mut sg, ws_sidx, &plan, remote_tracking);
+        insert_empty_branches(sg, ws_sidx, plan, remote_tracking);
     }
-    // Segments the chain pass creates: the coverage gates below (extra target, outside
-    // entrypoint, explicit tips) historically evaluated BEFORE any chain existed — they must not
-    // be shadowed by chain segments (e.g. an advanced-outside run swallowing the stored target
-    // position that the extra-target region must surface).
     let chain_created: HashSet<SegmentIndex> = sg
         .node_indices()
         .filter(|sidx| !before_chains.contains(sidx))
         .collect();
+    (ws_empty_sidx, chain_created)
+}
 
-    // Remote segments: for each local segment with a remote-tracking ref whose remote tip is
-    // present, create a remote root segment (holding the remote-ahead commits) that connects into
-    // the local segment, doubly-linked via siblings. The remote passes historically ran BEFORE the
-    // chain structure and keyed on the pre-chain names — the overlay carries exactly that view
-    // (materialization names plus the passes' own renames), so the chain reorder cannot change
-    // their decisions.
-    let pre_chain_names: IdMap<gix::refs::FullName> = plan.base_name_of.clone();
-    // Remote refs some creator will consume as a segment name: the region builder cuts its run
-    // at interior remote refs only when unclaimed. Plan-modeled names (`remote_used` covers the
-    // walk seeds) plus the ahead-case remotes of EVERY boundary-tip local (`add_remote_segments`
-    // regions all of them, mirroring its gates) plus explicit-tip remote names.
+/// Remote refs some creator will consume as a segment name: the region builder cuts its run
+/// at interior remote refs only when unclaimed. Plan-modeled names (`remote_used` covers the
+/// walk seeds) plus the ahead-case remotes of EVERY boundary-tip local (`add_remote_segments`
+/// regions all of them, mirroring its gates) plus explicit-tip remote names.
+fn claim_remote_names(
+    cg: &CommitGraph,
+    plan: &ChainPlan,
+    in_set: &IdSet,
+    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
+    stack_branches: Option<&[Vec<gix::refs::FullName>]>,
+    symbolic_remotes: &[String],
+) -> HashSet<gix::refs::FullName> {
     let mut claimed_remote_names: HashSet<gix::refs::FullName> = plan.remote_used.clone();
-    claimed_remote_names.extend(pre_chain_names.values().filter_map(|name| {
+    claimed_remote_names.extend(plan.base_name_of.values().filter_map(|name| {
         let rt = remote_tracking.get(name)?;
         let rt_tip = cg.commit_by_ref(rt.as_ref())?;
         let is_meta_stack_branch = stack_branches
@@ -291,212 +552,243 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
                 .filter(|r| r.as_ref().category() == Some(Category::RemoteBranch))
         }));
     }
-    // Connections from a region into another creator's territory (a run stopped at a claimed
-    // remote): recorded during region creation, wired once every creator ran.
-    let mut pending_edges: Vec<(SegmentIndex, gix::ObjectId)> = Vec::new();
-    // The entrypoint is a planned boundary in every region too: a checkout inside a remote's
-    // ahead run starts its own segment at creation, never split out after the fact.
-    let region_pinned = {
-        let mut p = pinned_commits.clone();
-        p.insert(entrypoint);
-        p
+    claimed_remote_names
+}
+
+/// The TARGET remote must surface as a segment even when no local segment tracks it — its local
+/// ref may be a mere commit-ref on a stack commit (e.g. `main` on a stack tip the metadata branch
+/// names), or absent entirely. In the workspace, the walk names the target's rejoin segment after
+/// the target and links it as sibling of the segment owning the local tracking ref's position.
+/// Outside it (ahead or fully disjoint history), the target's own commits become a standalone
+/// remote segment.
+#[allow(clippy::too_many_arguments)]
+fn surface_target_remote(
+    cg: &CommitGraph,
+    sg: &mut SegmentGraph,
+    target_ref: Option<&gix::refs::FullName>,
+    in_set: &IdSet,
+    owner_of: &IdMap<gix::ObjectId>,
+    seg_of_tip: &IdMap<SegmentIndex>,
+    plan: &ChainPlan,
+    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
+    region_pinned: &IdSet,
+    claimed_remote_names: &HashSet<gix::refs::FullName>,
+    pending_edges: &mut Vec<(SegmentIndex, gix::ObjectId)>,
+) {
+    let Some(tr) = target_ref else { return };
+    if tr.as_ref().category() != Some(Category::RemoteBranch) {
+        return;
+    }
+    let Some(tip) = cg.commit_by_ref(tr.as_ref()) else {
+        return;
     };
-    add_remote_segments(
-        cg,
-        &mut sg,
-        &seg_of_tip,
-        &in_set,
-        &owner_of,
-        symbolic_remotes,
-        stack_branches,
-        &region_pinned,
-        remote_tracking,
-        &pre_chain_names,
-        &plan.renames,
-        &claimed_remote_names,
-        &mut pending_edges,
-    );
-    add_untracked_remote_segments(
-        cg,
-        &mut sg,
-        remote_tracking,
-        &seg_of_tip,
-        &in_set,
-        &owner_of,
-    );
-    // The TARGET remote must surface as a segment even when no local segment tracks it — its local
-    // ref may be a mere commit-ref on a stack commit (e.g. `main` on a stack tip the metadata branch
-    // names), or absent entirely. In the workspace, the walk names the target's rejoin segment after
-    // the target and links it as sibling of the segment owning the local tracking ref's position.
-    // Outside it (ahead or fully disjoint history), the target's own commits become a standalone
-    // remote segment.
-    if let Some(tr) = project_meta.target_ref.as_ref()
-        && tr.as_ref().category() == Some(Category::RemoteBranch)
-        && let Some(tip) = cg.commit_by_ref(tr.as_ref())
-    {
-        if in_set.contains(&tip) {
-            let owner_tip = owner_of.get(&tip).copied().unwrap_or(tip);
-            // Materialization applied the plan's rename when the target NAMES the (previously
-            // anonymous) owner; this pass only adds the sibling link.
-            if plan.renames.get(&owner_tip).is_some_and(|(n, _)| n == tr)
-                && let Some(owner_sidx) = segment_by_commit(&sg, tip)
-            {
-                // Sibling: the segment whose FIRST commit is the local tracking ref's position.
-                let local_sidx = remote_tracking
-                    .iter()
-                    .find(|(_, r)| *r == tr)
-                    .and_then(|(local, _)| cg.commit_by_ref(local.as_ref()))
-                    .and_then(|lc| {
-                        segment_by_commit(&sg, lc).filter(|&sidx| {
-                            sidx != owner_sidx
-                                && sg
-                                    .node(sidx)
-                                    .is_some_and(|s| s.commits.first().is_some_and(|c| c.id == lc))
-                        })
-                    });
-                if let Some(local_sidx) = local_sidx
-                    && let Some(s) = sg.node_mut(owner_sidx)
-                {
-                    s.sibling_segment_id = Some(local_sidx);
-                }
-            }
-        } else if segment_by_ref(&sg, tr).is_none() {
-            // The target's own (remote) commits: segment its region like any remote's — split at
-            // merges, connect every rejoin (including a merge's second parent) back into the
-            // workspace — so the projection can find the common base. No tracking local, no links.
-            segment_ahead_region(
-                cg,
-                &mut sg,
-                Some(tr),
-                tip,
-                &in_set,
-                &seg_of_tip,
-                &owner_of,
-                remote_tracking,
-                None,
-                &region_pinned,
-                &claimed_remote_names,
-                &mut pending_edges,
-            );
-            // The target's LOCAL tracking branch can sit on the region's tip (a fully disjoint
-            // target only reached via the target tip itself). The local owns the commit — remotes
-            // never take owned commits — so the local names the segment and the remote becomes an
-            // empty segment above it, sibling-linked, exactly like the walk. Target queries then
-            // count 0 commits ahead (the remote segment is empty).
-            let local_on_tip = remote_tracking
+    if in_set.contains(&tip) {
+        let owner_tip = owner_of.get(&tip).copied().unwrap_or(tip);
+        // Materialization applied the plan's rename when the target NAMES the (previously
+        // anonymous) owner; this pass only adds the sibling link.
+        if plan.renames.get(&owner_tip).is_some_and(|(n, _)| n == tr)
+            && let Some(owner_sidx) = segment_by_commit(sg, tip)
+        {
+            // Sibling: the segment whose FIRST commit is the local tracking ref's position.
+            let local_sidx = remote_tracking
                 .iter()
-                .find(|(local, r)| *r == tr && cg.commit_by_ref(local.as_ref()) == Some(tip))
-                .map(|(local, _)| local.clone());
-            if let Some(local) = local_on_tip
-                && let Some(owner_sidx) = segment_by_commit(&sg, tip)
-                && sg.node(owner_sidx).is_some_and(|s| {
-                    s.ref_info.as_ref().is_some_and(|ri| &ri.ref_name == tr)
-                        && s.commits.first().is_some_and(|c| c.id == tip)
-                })
-            {
-                if let Some(s) = sg.node_mut(owner_sidx) {
-                    s.ref_info = Some(RefInfo {
-                        ref_name: local,
-                        commit_id: Some(tip),
-                        worktree: None,
-                    });
-                    s.remote_tracking_ref_name = Some(tr.clone());
-                }
-                let remote_sidx = sg.add_node(Segment {
-                    id: 0,
-                    ref_info: Some(RefInfo {
-                        ref_name: tr.clone(),
-                        commit_id: Some(tip),
-                        worktree: None,
-                    }),
-                    remote_tracking_ref_name: None,
-                    sibling_segment_id: Some(owner_sidx),
-                    remote_tracking_branch_segment_id: None,
-                    commits: Vec::new(),
-                    metadata: None,
-                    connections: Vec::new(),
+                .find(|(_, r)| *r == tr)
+                .and_then(|(local, _)| cg.commit_by_ref(local.as_ref()))
+                .and_then(|lc| {
+                    segment_by_commit(sg, lc).filter(|&sidx| {
+                        sidx != owner_sidx
+                            && sg
+                                .node(sidx)
+                                .is_some_and(|s| s.commits.first().is_some_and(|c| c.id == lc))
+                    })
                 });
-                sg.node_mut(remote_sidx).expect("just added").id = remote_sidx;
-                if let Some(s) = sg.node_mut(owner_sidx) {
-                    s.remote_tracking_branch_segment_id = Some(remote_sidx);
-                }
-                connect(&mut sg, remote_sidx, owner_sidx);
+            if let Some(local_sidx) = local_sidx
+                && let Some(s) = sg.node_mut(owner_sidx)
+            {
+                s.sibling_segment_id = Some(local_sidx);
             }
         }
+    } else if segment_by_ref(sg, tr).is_none() {
+        // The target's own (remote) commits: segment its region like any remote's — split at
+        // merges, connect every rejoin (including a merge's second parent) back into the
+        // workspace — so the projection can find the common base. No tracking local, no links.
+        segment_ahead_region(
+            cg,
+            sg,
+            Some(tr),
+            tip,
+            in_set,
+            seg_of_tip,
+            owner_of,
+            remote_tracking,
+            None,
+            region_pinned,
+            claimed_remote_names,
+            pending_edges,
+        );
+        // The target's LOCAL tracking branch can sit on the region's tip (a fully disjoint
+        // target only reached via the target tip itself). The local owns the commit — remotes
+        // never take owned commits — so the local names the segment and the remote becomes an
+        // empty segment above it, sibling-linked, exactly like the walk. Target queries then
+        // count 0 commits ahead (the remote segment is empty).
+        let local_on_tip = remote_tracking
+            .iter()
+            .find(|(local, r)| *r == tr && cg.commit_by_ref(local.as_ref()) == Some(tip))
+            .map(|(local, _)| local.clone());
+        if let Some(local) = local_on_tip
+            && let Some(owner_sidx) = segment_by_commit(sg, tip)
+            && sg.node(owner_sidx).is_some_and(|s| {
+                s.ref_info.as_ref().is_some_and(|ri| &ri.ref_name == tr)
+                    && s.commits.first().is_some_and(|c| c.id == tip)
+            })
+        {
+            if let Some(s) = sg.node_mut(owner_sidx) {
+                s.ref_info = Some(RefInfo {
+                    ref_name: local,
+                    commit_id: Some(tip),
+                    worktree: None,
+                });
+                s.remote_tracking_ref_name = Some(tr.clone());
+            }
+            let remote_sidx = sg.add_node(Segment {
+                id: 0,
+                ref_info: Some(RefInfo {
+                    ref_name: tr.clone(),
+                    commit_id: Some(tip),
+                    worktree: None,
+                }),
+                remote_tracking_ref_name: None,
+                sibling_segment_id: Some(owner_sidx),
+                remote_tracking_branch_segment_id: None,
+                commits: Vec::new(),
+                metadata: None,
+                connections: Vec::new(),
+            });
+            sg.node_mut(remote_sidx).expect("just added").id = remote_sidx;
+            if let Some(s) = sg.node_mut(owner_sidx) {
+                s.remote_tracking_branch_segment_id = Some(remote_sidx);
+            }
+            connect(sg, remote_sidx, owner_sidx);
+        }
     }
+}
 
-    // An EXTRA TARGET (an older target position) whose commit isn't part of any region so far — e.g.
-    // one below the workspace's own history under a traversal cut — is surfaced like a target's
-    // region, so the projection can derive `target_commit` from it.
-    if let Some(extra) = options.extra_target_commit_id
+/// An EXTRA TARGET (an older target position) whose commit isn't part of any region so far — e.g.
+/// one below the workspace's own history under a traversal cut — is surfaced like a target's
+/// region, so the projection can derive `target_commit` from it.
+#[allow(clippy::too_many_arguments)]
+fn add_extra_target_region(
+    cg: &CommitGraph,
+    sg: &mut SegmentGraph,
+    extra_target: Option<gix::ObjectId>,
+    chain_created: &HashSet<SegmentIndex>,
+    in_set: &IdSet,
+    seg_of_tip: &IdMap<SegmentIndex>,
+    owner_of: &IdMap<gix::ObjectId>,
+    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
+    region_pinned: &IdSet,
+    claimed_remote_names: &HashSet<gix::refs::FullName>,
+    pending_edges: &mut Vec<(SegmentIndex, gix::ObjectId)>,
+) {
+    if let Some(extra) = extra_target
         && cg.node(extra).is_some()
-        && segment_by_commit_excluding(&sg, extra, &chain_created).is_none()
+        && segment_by_commit_excluding(sg, extra, chain_created).is_none()
     {
         segment_ahead_region(
             cg,
-            &mut sg,
+            sg,
             None,
             extra,
-            &in_set,
-            &seg_of_tip,
-            &owner_of,
+            in_set,
+            seg_of_tip,
+            owner_of,
             remote_tracking,
             None,
-            &region_pinned,
-            &claimed_remote_names,
-            &mut pending_edges,
+            region_pinned,
+            claimed_remote_names,
+            pending_edges,
         );
     }
+}
 
-    // The entrypoint itself sits OUTSIDE the workspace (an adhoc checkout in a repository that has
-    // a managed one): its history becomes a region segmented like a remote's — split at inner
-    // merges, connected where it rejoins the workspace (a boundary via `entrypoint_outside`) — so
-    // the graph carries both components like the walk, and operations from an outside checkout
-    // still see the workspace. The projection downgrades it to the single-branch view.
+/// The entrypoint itself sits OUTSIDE the workspace (an adhoc checkout in a repository that has
+/// a managed one): its history becomes a region segmented like a remote's — split at inner
+/// merges, connected where it rejoins the workspace (a boundary via `entrypoint_outside`) — so
+/// the graph carries both components like the walk, and operations from an outside checkout
+/// still see the workspace. The projection downgrades it to the single-branch view.
+#[allow(clippy::too_many_arguments)]
+fn add_outside_entrypoint_region(
+    cg: &CommitGraph,
+    sg: &mut SegmentGraph,
+    entrypoint: gix::ObjectId,
+    entrypoint_ref: Option<&gix::refs::FullName>,
+    chain_created: &HashSet<SegmentIndex>,
+    in_set: &IdSet,
+    seg_of_tip: &IdMap<SegmentIndex>,
+    owner_of: &IdMap<gix::ObjectId>,
+    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
+    region_pinned: &IdSet,
+    claimed_remote_names: &HashSet<gix::refs::FullName>,
+    pending_edges: &mut Vec<(SegmentIndex, gix::ObjectId)>,
+) {
     if !in_set.contains(&entrypoint)
         && cg.node(entrypoint).is_some()
-        && segment_by_commit_excluding(&sg, entrypoint, &chain_created).is_none()
+        && segment_by_commit_excluding(sg, entrypoint, chain_created).is_none()
     {
         segment_ahead_region(
             cg,
-            &mut sg,
-            entrypoint_ref.as_ref(),
+            sg,
+            entrypoint_ref,
             entrypoint,
-            &in_set,
-            &seg_of_tip,
-            &owner_of,
+            in_set,
+            seg_of_tip,
+            owner_of,
             remote_tracking,
             None,
-            &region_pinned,
-            &claimed_remote_names,
-            &mut pending_edges,
+            region_pinned,
+            claimed_remote_names,
+            pending_edges,
         );
     }
+}
 
-    // The walk seeds a segment per tip, and validation requires every tip to be owned by one.
-    // An EXPLICIT traversal tip still uncovered gets its own region, named by the tip's ref; a
-    // covered one whose ref names no segment (e.g. an integrated remote target riding on an
-    // in-set commit) gets an EMPTY tip-named segment spliced above its commit's owner — the
-    // walk's tip-seeded shape, which reachability-based consumers (upstream integration,
-    // divergence classification) depend on.
+/// The walk seeds a segment per tip, and validation requires every tip to be owned by one.
+/// An EXPLICIT traversal tip still uncovered gets its own region, named by the tip's ref; a
+/// covered one whose ref names no segment (e.g. an integrated remote target riding on an
+/// in-set commit) gets an EMPTY tip-named segment spliced above its commit's owner — the
+/// walk's tip-seeded shape, which reachability-based consumers (upstream integration,
+/// divergence classification) depend on.
+#[allow(clippy::too_many_arguments)]
+fn cover_explicit_tips(
+    cg: &CommitGraph,
+    sg: &mut SegmentGraph,
+    chain_created: &HashSet<SegmentIndex>,
+    in_set: &IdSet,
+    seg_of_tip: &IdMap<SegmentIndex>,
+    owner_of: &IdMap<gix::ObjectId>,
+    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
+    region_pinned: &IdSet,
+    claimed_remote_names: &HashSet<gix::refs::FullName>,
+    pending_edges: &mut Vec<(SegmentIndex, gix::ObjectId)>,
+) {
     for t in cg.traversal_tips.iter().filter(|_| cg.explicit_tips) {
         if cg.node(t.id).is_none() {
             continue;
         }
-        match segment_by_commit_excluding(&sg, t.id, &chain_created) {
+        match segment_by_commit_excluding(sg, t.id, chain_created) {
             None => segment_ahead_region(
                 cg,
-                &mut sg,
+                sg,
                 t.ref_name.as_ref(),
                 t.id,
-                &in_set,
-                &seg_of_tip,
-                &owner_of,
+                in_set,
+                seg_of_tip,
+                owner_of,
                 remote_tracking,
                 None,
-                &region_pinned,
-                &claimed_remote_names,
-                &mut pending_edges,
+                region_pinned,
+                claimed_remote_names,
+                pending_edges,
             ),
             Some(owner_sidx) => {
                 let Some(ref_name) = t.ref_name.clone() else {
@@ -507,7 +799,7 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
                 if but_core::is_workspace_ref_name(ref_name.as_ref()) {
                     continue;
                 }
-                if segment_by_ref(&sg, &ref_name).is_some()
+                if segment_by_ref(sg, &ref_name).is_some()
                     || sg.node(owner_sidx).is_some_and(|s| {
                         s.ref_info
                             .as_ref()
@@ -544,43 +836,41 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
                     connections: Vec::new(),
                 });
                 sg.node_mut(empty_sidx).expect("just added").id = empty_sidx;
-                connect(&mut sg, empty_sidx, owner_sidx);
+                connect(sg, empty_sidx, owner_sidx);
             }
         }
     }
+}
 
-    // The target's remote segment may have been created before its LOCAL got a segment (the
-    // local can materialize from the extra-target region above) — link them like every other
-    // creator does.
-    if let Some(tr) = project_meta.target_ref.as_ref()
-        && let Some(tr_sidx) = segment_by_ref(&sg, tr)
-    {
-        let tr = tr.clone();
-        link_remote_to_local(&mut sg, tr_sidx, &tr, remote_tracking);
-    }
-
-    add_co_located_remote_empties(&mut sg, remote_tracking);
-    // Wire the stopped runs into the segments that own their territory — every creator has run,
-    // so the target of each pending connection exists (the owning creator's root, a cut segment,
-    // or a mid-run commit of one).
-    for (src, parent) in pending_edges.drain(..) {
+/// Wire the stopped runs into the segments that own their territory — every creator has run,
+/// so the target of each pending connection exists (the owning creator's root, a cut segment,
+/// or a mid-run commit of one).
+fn wire_pending_edges(sg: &mut SegmentGraph, pending_edges: Vec<(SegmentIndex, gix::ObjectId)>) {
+    for (src, parent) in pending_edges {
         let Some(dst) = sg.node_indices().find(|&sidx| {
             sg.node(sidx)
                 .is_some_and(|s| s.commits.iter().any(|c| c.id == parent))
         }) else {
             continue;
         };
-        connect(&mut sg, src, dst);
+        connect(sg, src, dst);
     }
+}
 
-    // A no-ref checkout at a REMOTE-named segment's tip: the walk's anonymous entrypoint tip owns
-    // the commits as a local segment — a remote ref never names it — and the remote's machinery
-    // re-establishes the name as an EMPTY segment above. Float the name up so the projection sees
-    // a detached view, not the remote segment. A LOCAL name stays: the walk names the entrypoint
-    // segment after it.
+/// A no-ref checkout at a REMOTE-named segment's tip: the walk's anonymous entrypoint tip owns
+/// the commits as a local segment — a remote ref never names it — and the remote's machinery
+/// re-establishes the name as an EMPTY segment above. Float the name up so the projection sees
+/// a detached view, not the remote segment. A LOCAL name stays: the walk names the entrypoint
+/// segment after it.
+fn float_remote_named_checkout(
+    sg: &mut SegmentGraph,
+    entrypoint: gix::ObjectId,
+    entrypoint_ref: Option<&gix::refs::FullName>,
+    workspace_commit: gix::ObjectId,
+) {
     if entrypoint_ref.is_none()
         && entrypoint != workspace_commit
-        && let Some(ep_sidx) = segment_by_commit(&sg, entrypoint)
+        && let Some(ep_sidx) = segment_by_commit(sg, entrypoint)
         && sg.node(ep_sidx).is_some_and(|s| {
             s.ref_info
                 .as_ref()
@@ -623,30 +913,43 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
             }
             sg.retarget_edges(sidx, ep_sidx, floated);
         }
-        connect(&mut sg, floated, ep_sidx);
+        connect(sg, floated, ep_sidx);
     }
+}
 
-    if managed {
-        // The remote/target passes link remotes against the plan's effective names — the
-        // floated/demoted name's segment carries the links, so the suppressed tip drops its own.
-        for tip in plan
-            .floats
-            .iter()
-            .map(|fl| fl.tip)
-            .chain(plan.demoted.iter().copied())
-        {
-            if let Some(s) = seg_of_tip.get(&tip).and_then(|&sidx| sg.node_mut(sidx)) {
-                s.remote_tracking_ref_name = None;
-                s.remote_tracking_branch_segment_id = None;
-            }
+/// The remote/target passes link remotes against the plan's effective names — the
+/// floated/demoted name's segment carries the links, so the suppressed tip drops its own.
+fn drop_suppressed_tip_links(
+    sg: &mut SegmentGraph,
+    plan: &ChainPlan,
+    seg_of_tip: &IdMap<SegmentIndex>,
+) {
+    for tip in plan
+        .floats
+        .iter()
+        .map(|fl| fl.tip)
+        .chain(plan.demoted.iter().copied())
+    {
+        if let Some(s) = seg_of_tip.get(&tip).and_then(|&sidx| sg.node_mut(sidx)) {
+            s.remote_tracking_ref_name = None;
+            s.remote_tracking_branch_segment_id = None;
         }
     }
+}
 
-    // A checkout inside a stack (from_commit_traversal) splits the enclosing segment so the entrypoint
-    // begins its own segment — there is always a segment starting at the entrypoint.
-    let entrypoint_sidx = if let (Some(ws_seg), None, true) = (
+/// A checkout inside a stack (from_commit_traversal) splits the enclosing segment so the entrypoint
+/// begins its own segment — there is always a segment starting at the entrypoint.
+fn resolve_entrypoint_segment(
+    sg: &mut SegmentGraph,
+    ws_empty_sidx: Option<SegmentIndex>,
+    entrypoint: gix::ObjectId,
+    entrypoint_ref: Option<&gix::refs::FullName>,
+    workspace_commit: gix::ObjectId,
+    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
+) -> Option<SegmentIndex> {
+    if let (Some(ws_seg), None, true) = (
         ws_empty_sidx,
-        entrypoint_ref.as_ref(),
+        entrypoint_ref,
         entrypoint == workspace_commit,
     ) {
         // from_head into a co-located workspace: the entrypoint is the empty workspace segment.
@@ -654,22 +957,19 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
         // an unapply preview with the branch dropped) must not claim the workspace segment while
         // remembering a commit the graph doesn't hold.
         Some(ws_seg)
-    } else if let Some(named) = entrypoint_ref.as_ref().and_then(|r| segment_by_ref(&sg, r)) {
+    } else if let Some(named) = entrypoint_ref.and_then(|r| segment_by_ref(sg, r)) {
         // The checked-out ref already names a segment — including an EMPTY one spliced in for a
         // virtual stack branch resting on the workspace base. That segment is the entrypoint, not
         // the segment owning the commit it points to.
         Some(named)
     } else {
-        name_entrypoint_segment(
-            &mut sg,
-            entrypoint,
-            entrypoint_ref.as_ref(),
-            remote_tracking,
-        )
-    };
+        name_entrypoint_segment(sg, entrypoint, entrypoint_ref, remote_tracking)
+    }
+}
 
-    // Classify each named segment by its ref's metadata: the workspace ref → Workspace, a tracked
-    // branch → Branch, others → None. Matches the walk's `extract_local_branch_metadata`.
+/// Classify each named segment by its ref's metadata: the workspace ref → Workspace, a tracked
+/// branch → Branch, others → None. Matches the walk's `extract_local_branch_metadata`.
+fn classify_segment_metadata<T: but_core::RefMetadata>(sg: &mut SegmentGraph, meta: &T) {
     for sidx in sg.node_indices().collect::<Vec<_>>() {
         let ref_name = sg
             .node(sidx)
@@ -682,10 +982,12 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
             }
         }
     }
+}
 
-    // A ref that NAMES a segment (or is a segment's remote-tracking ref) lives on that segment, so it is
-    // removed from every commit's own ref list — including an empty branch's ref that sits on another
-    // segment's commit (the walk does the same, avoiding showing it twice).
+/// A ref that NAMES a segment (or is a segment's remote-tracking ref) lives on that segment, so it is
+/// removed from every commit's own ref list — including an empty branch's ref that sits on another
+/// segment's commit (the walk does the same, avoiding showing it twice).
+fn strip_segment_named_refs(sg: &mut SegmentGraph) {
     let segment_names: HashSet<gix::refs::FullName> = sg
         .node_indices()
         .flat_map(|sidx| {
@@ -713,12 +1015,17 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
             }
         }
     }
+}
 
-    // Annotate every ref with the worktree that checks it out — the main worktree `[🌳]` (whatever
-    // ref HEAD actually points at, including the workspace ref) and linked worktrees `[📁]`. Keyed
-    // by ref name, mirroring the walk's `RefInfo::from_ref`. No hardcoded HEAD assumption: marking
-    // the workspace-commit segment unconditionally put `[🌳]` on a stack branch when HEAD was on
-    // the workspace ref, and vice versa.
+/// Annotate every ref with the worktree that checks it out — the main worktree `[🌳]` (whatever
+/// ref HEAD actually points at, including the workspace ref) and linked worktrees `[📁]`. Keyed
+/// by ref name, mirroring the walk's `RefInfo::from_ref`. No hardcoded HEAD assumption: marking
+/// the workspace-commit segment unconditionally put `[🌳]` on a stack branch when HEAD was on
+/// the workspace ref, and vice versa.
+fn annotate_worktrees(
+    sg: &mut SegmentGraph,
+    worktree_by_branch: &BTreeMap<gix::refs::FullName, Vec<crate::Worktree>>,
+) {
     let annotate = |ri: &mut RefInfo| {
         if ri.worktree.is_none()
             && let Some(wt) = worktree_by_branch.get(&ri.ref_name).and_then(|w| w.first())
@@ -737,37 +1044,6 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
             }
         }
     }
-
-    let entrypoint =
-        entrypoint_sidx.map(|sidx| (sidx, crate::EntryPointCommit::AtCommit(entrypoint)));
-
-    // Surface the extra target (an older target position) as an integrated traversal tip. The projection
-    // derives `target_commit` from the deepest integrated tip and uses it to extend the workspace base
-    // down to it — showing the commits integrated since then, exactly as the walk does. Only when the
-    // commit actually made it into a segment — validation requires every tip to be owned by one, and
-    // the traversal legitimately never reaches an extra target outside its cut.
-    let mut traversal_tips = Vec::new();
-    if let Some(extra) = options.extra_target_commit_id
-        && segment_by_commit(&sg, extra).is_some()
-    {
-        traversal_tips
-            .push(crate::init::Tip::new(extra).with_role(crate::init::TipRole::TargetRemote));
-    }
-
-    let mut graph = crate::Graph {
-        inner: sg,
-        entrypoint,
-        entrypoint_ref,
-        project_meta,
-        options,
-        traversal_tips,
-        ..crate::Graph::default()
-    };
-    // The traversal's hard-limit signal survives the derivation — consumers surface it to the user.
-    if cg.hard_limit_hit {
-        graph.set_hard_limit_hit();
-    }
-    graph
 }
 
 /// The segment starting at the `entrypoint` commit — which exists by construction: the
@@ -775,7 +1051,7 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
 /// ever contains it mid-run. A checked-out `entrypoint_ref` names it (validation requires it):
 /// an anonymous segment takes the name directly; one already named by ANOTHER ref keeps its
 /// commits and the entrypoint ref becomes an empty segment spliced in above, like the walk's.
-pub(super) fn name_entrypoint_segment(
+fn name_entrypoint_segment(
     sg: &mut SegmentGraph,
     entrypoint: gix::ObjectId,
     entrypoint_ref: Option<&gix::refs::FullName>,
