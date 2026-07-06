@@ -1,13 +1,7 @@
 #![deny(missing_docs)]
-//! Testing utilities for the commit graph.
-//!
-//! Two families of helpers:
-//! - **Rendering** — the `Testing` trait's `steps_ascii` draws the graph as an ASCII DAG for
-//!   snapshot tests, and `TestingDot` emits Graphviz `dot`. The rest of the module (chain
-//!   grouping, head finding, topological order) supports that rendering.
-//! - **Parity** — `rewalk_parity_report` is the oracle for the reference-position model:
-//!   mutating the graph and projecting it must match rebuilding ("rewalking") the graph from
-//!   scratch and projecting that. Divergence means a mutation left positions inconsistent.
+//! Testing utilities for the commit graph: the `Testing` trait's `steps_ascii` draws the
+//! graph as an ASCII DAG for snapshot tests, and `TestingDot` emits Graphviz `dot`. The rest
+//! of the module (chain grouping, head finding, topological order) supports that rendering.
 
 use std::{
     cmp::Ordering,
@@ -426,25 +420,6 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
 
         Ok(sections.join("\n\n"))
     }
-}
-
-/// The C2 parity oracle: project the mutated editor graph, then materialize, re-walk the
-/// repository, and project the fresh editor — both projections rendered with
-/// [`Editor::graph_workspace_ascii`]. Equal strings mean mutate-then-project and
-/// rewalk-then-project agree, which is the invariant that lets editor sessions live directly
-/// on the walked graph.
-///
-/// Returns `(mutated, rewalked)` so callers can census divergences before asserting.
-pub fn rewalk_parity_report<M: RefMetadata>(
-    rebase: SuccessfulRebase<'_, '_, M>,
-    repo: &gix::Repository,
-) -> Result<(String, String)> {
-    let editor = rebase.into_editor();
-    let mutated = editor.graph_workspace_ascii()?;
-    let outcome = editor.rebase()?.materialize()?;
-    let fresh = Editor::create(outcome.workspace, outcome.meta, repo)?;
-    let rewalked = fresh.graph_workspace_ascii()?;
-    Ok((mutated, rewalked))
 }
 
 #[cfg(test)]

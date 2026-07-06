@@ -17,7 +17,6 @@
 mod arrangement;
 mod creation;
 mod editor_graph;
-mod placements;
 mod positions;
 pub mod rebase;
 pub mod traverse;
