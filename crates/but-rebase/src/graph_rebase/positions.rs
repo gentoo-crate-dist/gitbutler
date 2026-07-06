@@ -9,7 +9,7 @@
 //! - `ambiguous` — whether more than one thing converged here (i.e. this position is a merge).
 //!
 //! Which of the pick's incoming child edges descend into a reference's position lives in the
-//! reference's LANE (`CommitGraph::lanes`): each lane records its members and a
+//! reference's LANE (`EditorGraph::lanes`): each lane records its members and a
 //! [`LaneCarry`] — none of the legs, all of them, or an explicit leg list.
 //!
 //! Keeping references out of the edge graph is deliberate: an edge running THROUGH a reference
@@ -24,12 +24,12 @@
 //! - **chain** — references stacked on one pick, ordered by their below-chain ([`ref_depth`]).
 //!   Chains are shallow in practice (≤3 observed).
 
-use crate::graph_rebase::commit_graph::{LaneCarry, RefPosition};
-use crate::graph_rebase::{CommitGraph, CommitGraphIndex};
+use crate::graph_rebase::editor_graph::{LaneCarry, RefPosition};
+use crate::graph_rebase::{EditorGraph, EditorGraphIndex};
 
 /// The reference's depth above its pick — the length of its below-chain (0 = directly on
 /// the pick). This IS the rank: order among co-located references is adjacency, not a number.
-pub(crate) fn ref_depth(graph: &CommitGraph, node: CommitGraphIndex) -> usize {
+pub(crate) fn ref_depth(graph: &EditorGraph, node: EditorGraphIndex) -> usize {
     let mut depth = 0usize;
     let mut cursor = graph.position_of(node).and_then(|s| s.below);
     while let Some(b) = cursor {
@@ -44,13 +44,13 @@ pub(crate) fn ref_depth(graph: &CommitGraph, node: CommitGraphIndex) -> usize {
 }
 
 /// The current `approach` of the reference at `node` — the DIRECT lane read: the node's lane
-/// carries its own leg list, kept aligned by the slot mutators (`CommitGraph::remove_parent` /
+/// carries its own leg list, kept aligned by the slot mutators (`EditorGraph::remove_parent` /
 /// `insert_parent` / `replace_parent`), ordered and filtered by the resolved pick's live legs
 /// so a stale lane leg never reaches a consumer.
 pub(crate) fn ref_approach(
-    graph: &CommitGraph,
-    node: CommitGraphIndex,
-) -> Vec<(CommitGraphIndex, usize)> {
+    graph: &EditorGraph,
+    node: EditorGraphIndex,
+) -> Vec<(EditorGraphIndex, usize)> {
     let Some(stored) = graph.position_of(node) else {
         return Vec::new();
     };
@@ -80,9 +80,9 @@ pub(crate) fn ref_approach(
 /// Every reference that RESOLVES to `pick` — its stored `on`, followed through tombstones,
 /// ends at it. Order is unspecified (ascending node id), like the node-walking predecessor.
 pub(crate) fn refs_resolving_to(
-    graph: &CommitGraph,
-    pick: CommitGraphIndex,
-) -> Vec<CommitGraphIndex> {
+    graph: &EditorGraph,
+    pick: EditorGraphIndex,
+) -> Vec<EditorGraphIndex> {
     graph
         .positioned_refs()
         .filter_map(|(node, stored)| {
@@ -100,19 +100,17 @@ pub(crate) fn refs_resolving_to(
 ///
 /// Wired at editor creation AND at rebase entry, so every graph shape the suite produces —
 /// including post-mutation shapes — continuously validates the position model.
-pub(crate) fn debug_assert_positions_total(graph: &CommitGraph) {
+pub(crate) fn debug_assert_positions_total(graph: &EditorGraph) {
     if !cfg!(debug_assertions) {
         return;
     }
-    crate::graph_rebase::arrangement::census_to_file(graph);
-    census_stale_statements(graph);
     debug_assert_below_wellformed(graph);
     type OrderedPositionKey = (
-        Option<CommitGraphIndex>,
-        Vec<(CommitGraphIndex, usize)>,
+        Option<EditorGraphIndex>,
+        Vec<(EditorGraphIndex, usize)>,
         usize,
     );
-    let mut seen: std::collections::HashMap<OrderedPositionKey, CommitGraphIndex> =
+    let mut seen: std::collections::HashMap<OrderedPositionKey, EditorGraphIndex> =
         Default::default();
     for node in graph.references().map(|(node, _, _)| node) {
         // A reference without a stored position is only legitimate when the graph holds no
@@ -136,83 +134,14 @@ pub(crate) fn debug_assert_positions_total(graph: &CommitGraph) {
     }
 }
 
-/// Stale-statement census: lane legs naming a non-live leg of their key's resolved pick.
-/// Statements are read filtered against live legs, so staleness is legal mid-op — this
-/// measures whether any survives to a checkpoint (a few adjudicated flows do, in the
-/// upstream-integration re-parent family). Report-only, gated on `BUT_ORDER_CENSUS=<file>`
-/// (one `CHECK n=<nodes-with-parents>` line per checkpoint, one `STALE` line per finding;
-/// `BUT_ORDER_STALE_PANIC=1` for attribution). Parent-order density itself is structural
-/// now — the store is an array.
-fn census_stale_statements(graph: &CommitGraph) {
-    use std::io::Write as _;
-    let mut file = std::env::var("BUT_ORDER_CENSUS").ok().and_then(|path| {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .ok()
-    });
-    let checked = graph
-        .node_indices()
-        .filter(|&node| graph.parent_count(node) > 0)
-        .count();
-    for (key, lanes) in graph.lane_table() {
-        let live = match resolve_to_pick(graph, *key) {
-            Some(pick) => legs_into_pick(graph, pick),
-            None => Vec::new(),
-        };
-        for lane in lanes {
-            for leg in &lane.legs {
-                if !live.contains(leg) {
-                    assert!(
-                        std::env::var_os("BUT_ORDER_STALE_PANIC").is_none(),
-                        "stale lane statement at rest: key={key} leg=({},{})",
-                        leg.0,
-                        leg.1
-                    );
-                    if let Some(file) = &mut file {
-                        let _ = writeln!(
-                            file,
-                            "STALE key={key} leg=({},{}) members={:?}",
-                            leg.0,
-                            leg.1,
-                            lane.members
-                                .iter()
-                                .map(|m| m.to_string())
-                                .collect::<Vec<_>>()
-                        );
-                    }
-                }
-            }
-        }
-    }
-    if let Some(file) = &mut file {
-        let _ = writeln!(file, "CHECK n={checked}");
-    }
-}
-
 /// Every stored `below` of a LIVE reference names a positioned reference resolving to the SAME
 /// pick, and the below-chain is acyclic. Tombstoned refs keep their stored position for
 /// retention reads but are spliced out of the physical stack, so only live refs are graded.
-/// `BUT_BELOW_DUMP=1` prints the full position table first.
-fn debug_assert_below_wellformed(graph: &CommitGraph) {
-    let name = |node: CommitGraphIndex| match graph.reference(node) {
+fn debug_assert_below_wellformed(graph: &EditorGraph) {
+    let name = |node: EditorGraphIndex| match graph.reference(node) {
         Some((refname, _)) => refname.to_string(),
         None => format!("{:?}", graph.step_view(node)),
     };
-    if std::env::var_os("BUT_BELOW_DUMP").is_some() {
-        for (node, stored) in graph.positioned_refs() {
-            eprintln!(
-                "POS {node} ({}) on={} resolved={:?} depth={} below={:?} ambiguous={}",
-                name(node),
-                stored.on,
-                resolve_to_pick(graph, stored.on),
-                ref_depth(graph, node),
-                stored.below,
-                stored.ambiguous,
-            );
-        }
-    }
     for (node, stored) in graph.positioned_refs() {
         if !graph.is_reference(node) {
             continue;
@@ -246,10 +175,10 @@ fn debug_assert_below_wellformed(graph: &CommitGraph) {
 /// PICK set it reached: a chain is entered when one of its legs was visited (the edge from
 /// leg to chain top), and when `start` is itself a reference, it and its chain below count.
 pub(crate) fn refs_reachable_with(
-    graph: &CommitGraph,
-    start: CommitGraphIndex,
-    picks: &std::collections::HashSet<CommitGraphIndex>,
-) -> Vec<CommitGraphIndex> {
+    graph: &EditorGraph,
+    start: EditorGraphIndex,
+    picks: &std::collections::HashSet<EditorGraphIndex>,
+) -> Vec<EditorGraphIndex> {
     // Reached commits by ID as well as node: a graph can hold one commit twice (a stack lane
     // and a target lane), and the node era's shared reference nodes made reachability
     // commit-equivalent across such lanes.
@@ -281,13 +210,13 @@ pub(crate) struct ChainJoin {
     /// The joining members: the reference and the chain-mates its below-chain rests on. Root
     /// chains (empty approach) at one pick are distinct siblings, so only the reference
     /// itself joins.
-    members: Vec<(CommitGraphIndex, RefPosition)>,
+    members: Vec<(EditorGraphIndex, RefPosition)>,
     /// The chain's shared approach at capture time.
-    approach: Vec<(CommitGraphIndex, usize)>,
+    approach: Vec<(EditorGraphIndex, usize)>,
 }
 
 /// Capture `ref_node`'s chain for a coming join — call BEFORE adding the joining leg's edge.
-pub(crate) fn prepare_chain_join(graph: &CommitGraph, ref_node: CommitGraphIndex) -> ChainJoin {
+pub(crate) fn prepare_chain_join(graph: &EditorGraph, ref_node: EditorGraphIndex) -> ChainJoin {
     let Some(stored) = graph.position_of(ref_node) else {
         return ChainJoin {
             members: Vec::new(),
@@ -326,9 +255,9 @@ pub(crate) fn prepare_chain_join(graph: &CommitGraph, ref_node: CommitGraphIndex
 /// against the pick's now-complete legs — call right AFTER the leg's edge is added. AllLegs
 /// stays AllLegs; a Lane gains the slot; a Root descends.
 pub(crate) fn apply_chain_join(
-    graph: &mut CommitGraph,
+    graph: &mut EditorGraph,
     join: &ChainJoin,
-    leg: (CommitGraphIndex, usize),
+    leg: (EditorGraphIndex, usize),
 ) {
     for (node, member) in &join.members {
         let mut approach = join.approach.clone();
@@ -350,9 +279,9 @@ pub(crate) fn apply_chain_join(
 /// per-situation, not cleanly per-caller — each call site picks based on whether the leg set
 /// should survive the move or be re-derived at the destination.
 pub(crate) fn reposition_refs(
-    graph: &mut CommitGraph,
-    from_pick: CommitGraphIndex,
-    to_pick: CommitGraphIndex,
+    graph: &mut EditorGraph,
+    from_pick: EditorGraphIndex,
+    to_pick: EditorGraphIndex,
     reclassify: bool,
 ) {
     let moves: Vec<_> = graph
@@ -374,11 +303,11 @@ pub(crate) fn reposition_refs(
 /// The members of `ref_node`'s chain — every reference with the same resolved pick and the
 /// same (derived) approach — with their stored positions.
 pub(crate) fn chain_members(
-    graph: &CommitGraph,
-    ref_node: CommitGraphIndex,
+    graph: &EditorGraph,
+    ref_node: EditorGraphIndex,
 ) -> Vec<(
-    CommitGraphIndex,
-    crate::graph_rebase::commit_graph::RefPosition,
+    EditorGraphIndex,
+    crate::graph_rebase::editor_graph::RefPosition,
 )> {
     let Some(stored) = graph.position_of(ref_node) else {
         return vec![];
@@ -399,9 +328,9 @@ pub(crate) fn chain_members(
 /// this approach — it is the chain's single entry, replicated across members so the renderer can
 /// group them by `(pick, approach)` and order them by below-chain depth.
 pub(crate) fn legs_into_pick(
-    graph: &CommitGraph,
-    pick: CommitGraphIndex,
-) -> Vec<(CommitGraphIndex, usize)> {
+    graph: &EditorGraph,
+    pick: EditorGraphIndex,
+) -> Vec<(EditorGraphIndex, usize)> {
     graph
         .incoming_legs(pick)
         .into_iter()
@@ -414,9 +343,9 @@ pub(crate) fn legs_into_pick(
 /// position — dead references via their RETAINED position, the retention pointer stale
 /// selectors normalize through (unborn refs carry none and resolve to nothing).
 pub(crate) fn resolve_to_pick(
-    graph: &CommitGraph,
-    node: CommitGraphIndex,
-) -> Option<CommitGraphIndex> {
+    graph: &EditorGraph,
+    node: EditorGraphIndex,
+) -> Option<EditorGraphIndex> {
     let mut cursor = node;
     for _ in 0..10_000 {
         if graph.is_pick(cursor) {

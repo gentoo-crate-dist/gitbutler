@@ -4,7 +4,7 @@ use anyhow::{Context as _, Result, bail};
 use but_core::{RefMetadata, commit::SignCommit};
 
 use crate::graph_rebase::{
-    Checkout, CommitGraph, CommitGraphIndex, Editor, Pick, RevisionHistory, Selector, Step,
+    Checkout, Editor, EditorGraph, EditorGraphIndex, Pick, RevisionHistory, Selector, Step,
     SuccessfulRebase, placements,
 };
 
@@ -50,7 +50,7 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
         options: &GraphEditorOptions,
     ) -> Result<Self> {
         // The editor graph is built NATIVELY: the ref-placement ledger derives from the
-        // segment graph and create_native builds picks straight from the carried CommitGraph.
+        // segment graph and create_native builds picks straight from the carried EditorGraph.
         let ledger = placements::derive(workspace, repo, options)?;
         let (graph, references, checkouts) = create_native(workspace, repo, options, &ledger)?;
         Ok(Self {
@@ -75,9 +75,9 @@ fn create_native(
     repo: &gix::Repository,
     options: &GraphEditorOptions,
     ledger: &placements::RefPlacements,
-) -> Result<(CommitGraph, Vec<gix::refs::FullName>, Vec<Checkout>)> {
+) -> Result<(EditorGraph, Vec<gix::refs::FullName>, Vec<Checkout>)> {
     let Some(cg) = workspace.graph.commit_graph() else {
-        bail!("native creation requires the graph to carry its CommitGraph");
+        bail!("native creation requires the graph to carry its EditorGraph");
     };
     let workspace_commit_id = workspace
         .graph
@@ -111,9 +111,9 @@ fn create_native(
         }
     }
 
-    let mut graph = CommitGraph::adopt(arena);
+    let mut graph = EditorGraph::adopt(arena);
     for (i, id) in cg.commit_ids().enumerate() {
-        let ix = CommitGraphIndex::Node(i);
+        let ix = EditorGraphIndex::Node(i);
         let mut pick = if workspace_commit_id == Some(id) {
             Pick::new_workspace_pick(id)
         } else {
@@ -130,7 +130,7 @@ fn create_native(
 
     // Two passes: refs stack top-down in the ledger (a ref's `below` has a HIGHER index), so
     // every node must exist before positions can name it.
-    let mut ref_by_name = HashMap::<gix::refs::FullName, CommitGraphIndex>::new();
+    let mut ref_by_name = HashMap::<gix::refs::FullName, EditorGraphIndex>::new();
     for placed in &ledger.refs {
         let ix = graph.add_reference(placed.name.clone(), placed.mutable);
         ref_by_name.insert(placed.name.clone(), ix);
@@ -141,7 +141,7 @@ fn create_native(
             continue;
         };
         let node = ref_by_name[&placed.name];
-        let Some(on) = cg.index_of(on_id).map(CommitGraphIndex::Node) else {
+        let Some(on) = cg.index_of(on_id).map(EditorGraphIndex::Node) else {
             bail!("ledger position {on_id} is not a commit in the graph");
         };
         let below =
@@ -153,7 +153,7 @@ fn create_native(
             };
         let mut approach = Vec::with_capacity(placed.approach.len());
         for (source, slot) in &placed.approach {
-            let Some(source_ix) = cg.index_of(*source).map(CommitGraphIndex::Node) else {
+            let Some(source_ix) = cg.index_of(*source).map(EditorGraphIndex::Node) else {
                 bail!("ledger approach source {source} is not a commit in the graph");
             };
             approach.push((source_ix, *slot));

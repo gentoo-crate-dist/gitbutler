@@ -7,7 +7,7 @@ use crate::graph_rebase::arrangement::{
     readopt_dangling_refs, repoint_ref, settle_chain_lower, splice_out, split_chain,
     transfer_stack, unhook_ref,
 };
-use crate::graph_rebase::{CommitGraph, CommitGraphIndex, positions};
+use crate::graph_rebase::{EditorGraph, EditorGraphIndex, positions};
 use anyhow::{Context as _, Result, anyhow, bail};
 use but_core::RefMetadata;
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ use crate::graph_rebase::{
 /// so later lookups stay aligned. `None` means the named leg itself was already removed.
 #[derive(Default)]
 struct SlotLedger {
-    map: HashMap<CommitGraphIndex, Vec<Option<usize>>>,
+    map: HashMap<EditorGraphIndex, Vec<Option<usize>>>,
 }
 
 impl SlotLedger {
@@ -30,8 +30,8 @@ impl SlotLedger {
     /// of its slots mutate.
     fn current(
         &mut self,
-        graph: &CommitGraph,
-        source: CommitGraphIndex,
+        graph: &EditorGraph,
+        source: EditorGraphIndex,
         frame_slot: usize,
     ) -> Option<usize> {
         self.map
@@ -42,7 +42,7 @@ impl SlotLedger {
             .flatten()
     }
 
-    fn note_remove(&mut self, source: CommitGraphIndex, removed: usize) {
+    fn note_remove(&mut self, source: EditorGraphIndex, removed: usize) {
         let entries = self.map.get_mut(&source).expect("looked up before noting");
         for entry in entries.iter_mut() {
             match entry {
@@ -53,7 +53,7 @@ impl SlotLedger {
         }
     }
 
-    fn note_insert(&mut self, source: CommitGraphIndex, inserted: usize) {
+    fn note_insert(&mut self, source: EditorGraphIndex, inserted: usize) {
         let entries = self.map.get_mut(&source).expect("looked up before noting");
         for slot in entries.iter_mut().flatten() {
             if *slot >= inserted {
@@ -65,7 +65,7 @@ impl SlotLedger {
 
 /// Route a step command to its namespace: references into the ref table, everything else
 /// into the node arena.
-fn add_step_to_graph(graph: &mut CommitGraph, step: Step) -> CommitGraphIndex {
+fn add_step_to_graph(graph: &mut EditorGraph, step: Step) -> EditorGraphIndex {
     match step {
         Step::Reference { refname, mutable } => graph.add_reference(refname, mutable),
         step => graph.add_node(step),
@@ -663,7 +663,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         // A requested child that is a reference is a chain member above the segment: its
         // legs are the edges to disconnect, and the member itself (with everything above it
         // in its chain) follows the disconnected parents.
-        let mut moving_ref_children: Vec<CommitGraphIndex> = Vec::new();
+        let mut moving_ref_children: Vec<EditorGraphIndex> = Vec::new();
         let children_to_disconnect = children_to_disconnect.map(|children| {
             children
                 .into_iter()
@@ -712,8 +712,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         // One ledger spans both loops: the overlap case (the segment's parent-most sitting
         // directly above the child-most's pick) captures the same leg in both frames.
         let mut ledger = SlotLedger::default();
-        let mut disconnected_parent_edges: Vec<(usize, CommitGraphIndex)> = Vec::new();
-        let mut carried_parent_tops: Vec<CommitGraphIndex> = Vec::new();
+        let mut disconnected_parent_edges: Vec<(usize, EditorGraphIndex)> = Vec::new();
+        let mut carried_parent_tops: Vec<EditorGraphIndex> = Vec::new();
         // 2. Disconnect parents. Chains the removed legs carried lose them from their approach legs.
         for (frame_slot, edge_target) in outgoing_legs {
             let should_disconnect = parent_ids_to_disconnect
@@ -866,8 +866,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     /// Remove the child edge, and reconnect to the right parents.
     fn reconnect_edges_to_parents(
         &mut self,
-        disconnected_parent_edges: &[(usize, CommitGraphIndex)],
-        child_node: CommitGraphIndex,
+        disconnected_parent_edges: &[(usize, EditorGraphIndex)],
+        child_node: EditorGraphIndex,
     ) {
         // Reconnect the child node to all the disconnected parents, appended after
         // `child_node`'s existing parents in their original relative order.
@@ -882,8 +882,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     /// Existing parent edges that get renumbered carry their approach entries along.
     fn add_edges_to_parents(
         &mut self,
-        child_node: CommitGraphIndex,
-        new_parent_nodes: impl IntoIterator<Item = CommitGraphIndex>,
+        child_node: EditorGraphIndex,
+        new_parent_nodes: impl IntoIterator<Item = EditorGraphIndex>,
         parent_reparenting_order: ParentReparentingOrder,
     ) -> Vec<usize> {
         match parent_reparenting_order {
@@ -1065,7 +1065,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             }
             InsertSide::Below => {
                 let mut moved_leg_orders = Vec::new();
-                let mut ref_parents: Vec<(usize, CommitGraphIndex)> = Vec::new();
+                let mut ref_parents: Vec<(usize, EditorGraphIndex)> = Vec::new();
                 let parents_to_add = if let Some(nodes_to_connect) = nodes_to_connect {
                     let mut nodes = Vec::new();
                     for any_selector in nodes_to_connect.as_slice() {
@@ -1374,8 +1374,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
 
     fn debug_assert_acyclic(
         &self,
-        child: CommitGraphIndex,
-        parent: CommitGraphIndex,
+        child: EditorGraphIndex,
+        parent: EditorGraphIndex,
     ) -> Result<()> {
         if cfg!(debug_assertions) {
             let mut seen = HashSet::from([parent]);

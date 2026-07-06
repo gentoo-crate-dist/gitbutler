@@ -1,7 +1,7 @@
 //! The REF-PLACEMENT LEDGER: everything editor creation needs to place references, addressed
 //! by COMMIT ID and REF NAME instead of arena indices — the commit-addressed distillation of
 //! the segment walk it replaced. [`derive`] builds it straight from the segment graph, and
-//! native creation builds the editor graph from the carried `CommitGraph` plus this ledger.
+//! native creation builds the editor graph from the carried `EditorGraph` plus this ledger.
 
 use std::collections::{HashMap, HashSet};
 

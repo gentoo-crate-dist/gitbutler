@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Result, bail};
 use but_core::RefMetadata;
 
-use crate::graph_rebase::{CommitGraphIndex, Editor, Selector, ToCommitSelector, util};
+use crate::graph_rebase::{Editor, EditorGraphIndex, Selector, ToCommitSelector, util};
 
 impl<M: RefMetadata> Editor<'_, '_, M> {
     /// Order commit selectors by parentage, with parents first and children last.
@@ -86,9 +86,9 @@ fn commit_graph_parent_to_child_rank<M: RefMetadata>(
 ) -> Result<HashMap<gix::ObjectId, usize>> {
     let mut rank_by_id = HashMap::<gix::ObjectId, usize>::new();
     let mut next_rank = 0usize;
-    let mut seen = HashSet::<CommitGraphIndex>::new();
+    let mut seen = HashSet::<EditorGraphIndex>::new();
 
-    let mut roots = editor.graph.tips().collect::<Vec<CommitGraphIndex>>();
+    let mut roots = editor.graph.tips().collect::<Vec<EditorGraphIndex>>();
     roots.sort_unstable();
 
     // Traverse from all child-most entrypoints (graph nodes without children), assigning

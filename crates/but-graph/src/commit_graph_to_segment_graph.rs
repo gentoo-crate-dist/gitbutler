@@ -386,12 +386,6 @@ pub(crate) fn graph_from_repository_with_overlay<T: but_core::RefMetadata>(
     };
     // Run the WALK's real traversal (queue, goals, limits, flag propagation) to collect the commits:
     // extents and flags are exactly the walk's, and segments are the derived view built on top.
-    if std::env::var_os("BUT_GRAPH_FLIP_DEBUG").is_some() {
-        eprintln!(
-            "FLIP ws_commit={ws_commit} entrypoint={entrypoint:?} entrypoint_ref={:?} overlay={overlay:?}",
-            entrypoint_ref.as_ref().map(|r| r.as_bstr()),
-        );
-    }
     let walk_tip = entrypoint.unwrap_or(ws_commit);
     let walk_ref = if entrypoint.is_none() || entrypoint == Some(ws_commit) {
         entrypoint_ref.clone().or(Some(ws_ref.clone()))
@@ -463,12 +457,6 @@ pub(crate) fn graph_from_repository_unmanaged_with_overlay<T: but_core::RefMetad
     options: crate::init::Options,
     overlay: crate::init::Overlay,
 ) -> anyhow::Result<crate::Graph> {
-    if std::env::var_os("BUT_GRAPH_FLIP_DEBUG").is_some() {
-        eprintln!(
-            "FLIP(unmanaged) head_tip={head_tip} entrypoint_ref={:?} overlay={overlay:?}",
-            entrypoint_ref.as_ref().map(|r| r.as_bstr()),
-        );
-    }
     // The walk's real traversal, exactly like the managed builder: extents, limits, flags, and
     // overlay handling are the walk's by construction.
     let cg = CommitGraph::from_walk(
@@ -3083,9 +3071,6 @@ fn insert_empty_branches(
         let Some(anchor) = segment_by_commit(sg, tip) else {
             continue;
         };
-        if std::env::var_os("BUT_GRAPH_FLIP_DEBUG").is_some() {
-            eprintln!("FLIP lane-plan demotion at {tip}");
-        }
         if let Some(s) = sg.node_mut(anchor) {
             s.ref_info = None;
             s.remote_tracking_ref_name = None;
@@ -3119,12 +3104,6 @@ fn insert_empty_branches(
                 if *clear_remote {
                     s.remote_tracking_branch_segment_id = None;
                 }
-            }
-            if std::env::var_os("BUT_GRAPH_FLIP_DEBUG").is_some() {
-                eprintln!(
-                    "EMPTIES li={li} commit={} empties={:?}",
-                    group.commit, group.empties
-                );
             }
             if !group.empties.is_empty() {
                 // ANOTHER stack owns the (non-integrated) commit: these branches stay PASSIVE

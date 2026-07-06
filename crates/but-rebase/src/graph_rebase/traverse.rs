@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use anyhow::Result;
 use but_core::RefMetadata;
 
-use crate::graph_rebase::{CommitGraph, CommitGraphIndex, Editor, Selector, ToSelector};
+use crate::graph_rebase::{Editor, EditorGraph, EditorGraphIndex, Selector, ToSelector};
 
 /// How far `a` is ahead of and behind `b`, counted in commits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,22 +17,22 @@ pub struct AheadBehind {
 }
 
 /// Count the `Pick` steps (i.e. commits) among `steps`.
-fn count_picks(graph: &CommitGraph, steps: impl Iterator<Item = CommitGraphIndex>) -> usize {
+fn count_picks(graph: &EditorGraph, steps: impl Iterator<Item = EditorGraphIndex>) -> usize {
     steps.filter(|ix| graph.is_pick(*ix)).count()
 }
 
 struct Traversal<'graph> {
-    graph: &'graph CommitGraph,
-    excluded: HashSet<CommitGraphIndex>,
-    seen: HashSet<CommitGraphIndex>,
-    tips: Vec<CommitGraphIndex>,
+    graph: &'graph EditorGraph,
+    excluded: HashSet<EditorGraphIndex>,
+    seen: HashSet<EditorGraphIndex>,
+    tips: Vec<EditorGraphIndex>,
 }
 
 impl<'graph> Traversal<'graph> {
     fn new(
-        graph: &'graph CommitGraph,
-        start: CommitGraphIndex,
-        excluded: HashSet<CommitGraphIndex>,
+        graph: &'graph EditorGraph,
+        start: EditorGraphIndex,
+        excluded: HashSet<EditorGraphIndex>,
     ) -> Self {
         Self {
             graph,
@@ -44,7 +44,7 @@ impl<'graph> Traversal<'graph> {
 }
 
 impl Iterator for Traversal<'_> {
-    type Item = CommitGraphIndex;
+    type Item = EditorGraphIndex;
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(n) = self.tips.pop() {
@@ -60,19 +60,19 @@ impl Iterator for Traversal<'_> {
 
 /// Every step reachable from `start` following parent edges (`Outgoing`).
 pub(crate) fn reachable_from(
-    graph: &CommitGraph,
-    start: CommitGraphIndex,
-) -> impl Iterator<Item = CommitGraphIndex> + '_ {
+    graph: &EditorGraph,
+    start: EditorGraphIndex,
+) -> impl Iterator<Item = EditorGraphIndex> + '_ {
     Traversal::new(graph, start, HashSet::new())
 }
 
 /// The rev-set `start ^excluded`: steps reachable from `start` but not
 /// `excluded`.
 pub(crate) fn a_not_b(
-    graph: &CommitGraph,
-    start: CommitGraphIndex,
-    excluded: CommitGraphIndex,
-) -> impl Iterator<Item = CommitGraphIndex> + '_ {
+    graph: &EditorGraph,
+    start: EditorGraphIndex,
+    excluded: EditorGraphIndex,
+) -> impl Iterator<Item = EditorGraphIndex> + '_ {
     let excluded = reachable_from(graph, excluded).collect();
     Traversal::new(graph, start, excluded)
 }
@@ -80,10 +80,10 @@ pub(crate) fn a_not_b(
 /// All steps in `start ^limit`, or everything reachable from `start` when there
 /// is no `limit`.
 pub(crate) fn all_until_optional_limit(
-    graph: &CommitGraph,
-    start: CommitGraphIndex,
-    limit: Option<CommitGraphIndex>,
-) -> impl Iterator<Item = CommitGraphIndex> + '_ {
+    graph: &EditorGraph,
+    start: EditorGraphIndex,
+    limit: Option<EditorGraphIndex>,
+) -> impl Iterator<Item = EditorGraphIndex> + '_ {
     let excluded = limit
         .map(|limit| reachable_from(graph, limit).collect())
         .unwrap_or_default();
@@ -106,13 +106,13 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     /// Node-era reachability over the positioned graph: picks and tombstones by edges (a
     /// reference start descends from its pick), plus every reference chain the walk
     /// entered.
-    fn reachable_ids(&self, start: CommitGraphIndex) -> Vec<CommitGraphIndex> {
+    fn reachable_ids(&self, start: EditorGraphIndex) -> Vec<EditorGraphIndex> {
         let seed = crate::graph_rebase::positions::resolve_to_pick(&self.graph, start);
-        let picks: std::collections::HashSet<CommitGraphIndex> = match seed {
+        let picks: std::collections::HashSet<EditorGraphIndex> = match seed {
             Some(seed) => reachable_from(&self.graph, seed).collect(),
             None => Default::default(),
         };
-        let mut all: Vec<CommitGraphIndex> = picks.iter().copied().collect();
+        let mut all: Vec<EditorGraphIndex> = picks.iter().copied().collect();
         all.extend(crate::graph_rebase::positions::refs_reachable_with(
             &self.graph,
             start,
@@ -129,9 +129,9 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     ) -> Result<impl Iterator<Item = Selector> + '_> {
         let start = start.to_selector(self)?.id;
         let excluded = excluded.to_selector(self)?.id;
-        let excluded: std::collections::HashSet<CommitGraphIndex> =
+        let excluded: std::collections::HashSet<EditorGraphIndex> =
             self.reachable_ids(excluded).into_iter().collect();
-        let result: Vec<CommitGraphIndex> = self
+        let result: Vec<EditorGraphIndex> = self
             .reachable_ids(start)
             .into_iter()
             .filter(|id| !excluded.contains(id))
@@ -176,10 +176,10 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     ) -> Result<impl Iterator<Item = Selector> + '_> {
         let start = start.to_selector(self)?.id;
         let limit = limit.map(|limit| limit.id);
-        let excluded: std::collections::HashSet<CommitGraphIndex> = limit
+        let excluded: std::collections::HashSet<EditorGraphIndex> = limit
             .map(|limit| self.reachable_ids(limit).into_iter().collect())
             .unwrap_or_default();
-        let result: Vec<CommitGraphIndex> = self
+        let result: Vec<EditorGraphIndex> = self
             .reachable_ids(start)
             .into_iter()
             .filter(|id| !excluded.contains(id))
@@ -193,9 +193,9 @@ mod test {
     use std::{collections::HashSet, str::FromStr as _};
 
     use super::{a_not_b, all_until_optional_limit, count_picks, reachable_from};
-    use crate::graph_rebase::{CommitGraph, CommitGraphIndex, Step};
+    use crate::graph_rebase::{EditorGraph, EditorGraphIndex, Step};
 
-    fn pick(graph: &mut CommitGraph) -> CommitGraphIndex {
+    fn pick(graph: &mut EditorGraph) -> EditorGraphIndex {
         let id = gix::ObjectId::from_str("1000000000000000000000000000000000000000").unwrap();
         graph.add_node(Step::new_pick(id))
     }
@@ -204,7 +204,7 @@ mod test {
     /// `a ^c` must drop `base` (shared with `c`) but keep `a`, `b`.
     #[test]
     fn a_not_b_excludes_shared_ancestry() {
-        let mut g = CommitGraph::default();
+        let mut g = EditorGraph::default();
         let a = pick(&mut g);
         let b = pick(&mut g);
         let base = pick(&mut g);
@@ -233,7 +233,7 @@ mod test {
     /// `b`; only the two picks count. `c ^a` reaches `c`.
     #[test]
     fn count_picks_ignores_non_pick_steps() {
-        let mut g = CommitGraph::default();
+        let mut g = EditorGraph::default();
         let a = pick(&mut g);
         let none = g.add_node(Step::None);
         let b = pick(&mut g);

@@ -13,7 +13,7 @@ use gix::refs::{
 };
 
 use crate::graph_rebase::{
-    CommitGraph, CommitGraphIndex, Editor, Step, SuccessfulRebase,
+    Editor, EditorGraph, EditorGraphIndex, Step, SuccessfulRebase,
     cherry_pick::{CherryPickOutcome, cherry_pick},
     util::collect_ordered_parents,
 };
@@ -208,19 +208,19 @@ impl<'ws, 'graph, M: RefMetadata> Editor<'ws, 'graph, M> {
 /// This second traversal ensures that all the parents of any given node have
 /// been seen, before traversing it.
 fn order_steps_picking(
-    graph: &CommitGraph,
-    heads: &[CommitGraphIndex],
-) -> VecDeque<CommitGraphIndex> {
+    graph: &EditorGraph,
+    heads: &[EditorGraphIndex],
+) -> VecDeque<EditorGraphIndex> {
     // References take no part in the pick order (no edges) and are replayed separately;
     // everything else — picks AND tombstones, even one carrying a leaked position — must be
     // traversed, or its subtree is orphaned. Filter by the STEP, not by position presence
     // (a non-reference with a stray position must not be skipped).
-    let mut heads: Vec<CommitGraphIndex> = heads
+    let mut heads: Vec<EditorGraphIndex> = heads
         .iter()
         .copied()
         .filter(|h| !graph.is_reference(*h))
         .collect();
-    let mut seen = heads.iter().cloned().collect::<HashSet<CommitGraphIndex>>();
+    let mut seen = heads.iter().cloned().collect::<HashSet<EditorGraphIndex>>();
     // Reachable nodes with no outgoing nodes.
     let mut bases = VecDeque::new();
 
@@ -311,12 +311,12 @@ mod test {
         use anyhow::Result;
 
         use crate::graph_rebase::{
-            CommitGraph, Step, rebase::order_steps_picking, testing::render_ascii_graph,
+            EditorGraph, Step, rebase::order_steps_picking, testing::render_ascii_graph,
         };
 
         #[test]
         fn basic_scenario() -> Result<()> {
-            let mut graph = CommitGraph::default();
+            let mut graph = EditorGraph::default();
             let a = graph.add_node(Step::new_pick(gix::ObjectId::from_str(
                 "1000000000000000000000000000000000000000",
             )?));
@@ -348,7 +348,7 @@ mod test {
 
         #[test]
         fn complex_scenario() -> Result<()> {
-            let mut graph = CommitGraph::default();
+            let mut graph = EditorGraph::default();
             let a = graph.add_node(Step::new_pick(gix::ObjectId::from_str(
                 "1000000000000000000000000000000000000000",
             )?));
@@ -415,7 +415,7 @@ mod test {
 
         #[test]
         fn merge_scenario() -> Result<()> {
-            let mut graph = CommitGraph::default();
+            let mut graph = EditorGraph::default();
             let a = graph.add_node(Step::new_pick(gix::ObjectId::from_str(
                 "1000000000000000000000000000000000000000",
             )?));
@@ -457,7 +457,7 @@ mod test {
 
         #[test]
         fn merge_flipped_scenario() -> Result<()> {
-            let mut graph = CommitGraph::default();
+            let mut graph = EditorGraph::default();
             let a = graph.add_node(Step::new_pick(gix::ObjectId::from_str(
                 "1000000000000000000000000000000000000000",
             )?));

@@ -20,7 +20,7 @@ use but_graph::workspace::commit::is_managed_workspace_by_message;
 use gix::prelude::ObjectIdExt;
 
 use crate::graph_rebase::{
-    Checkout, CommitGraph, CommitGraphIndex, Editor, LookupStep, Pick, Selector, Step,
+    Checkout, Editor, EditorGraph, EditorGraphIndex, LookupStep, Pick, Selector, Step,
     traverse::{self, AheadBehind},
 };
 
@@ -126,11 +126,11 @@ impl GraphWorkspace {
 }
 
 /// The index-level analog of [`Subgraph`], used internally so the traversal and
-/// set-algebra stay on cheap `CommitGraphIndex`es; converted to selectors once at
+/// set-algebra stay on cheap `EditorGraphIndex`es; converted to selectors once at
 /// the boundary.
 struct NodeSet {
-    heads: Vec<CommitGraphIndex>,
-    nodes: HashSet<CommitGraphIndex>,
+    heads: Vec<EditorGraphIndex>,
+    nodes: HashSet<EditorGraphIndex>,
 }
 
 impl NodeSet {
@@ -254,7 +254,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     }
 
     /// The entrypoint (`HEAD`) reference node, or `None` if HEAD isn't on a ref.
-    fn head_index(&self) -> Option<CommitGraphIndex> {
+    fn head_index(&self) -> Option<EditorGraphIndex> {
         self.checkouts
             .first()
             .map(|Checkout::Head { selector, .. }| selector.id)
@@ -631,9 +631,9 @@ fn combined_push_status<K: Copy + Eq + std::hash::Hash>(
 /// All steps in `start ^limit`, or everything reachable from `start` when there
 /// is no `limit`.
 fn all_until_optional_limit(
-    graph: &CommitGraph,
-    start: CommitGraphIndex,
-    limit: Option<CommitGraphIndex>,
+    graph: &EditorGraph,
+    start: EditorGraphIndex,
+    limit: Option<EditorGraphIndex>,
 ) -> NodeSet {
     NodeSet {
         heads: vec![start],
@@ -651,9 +651,9 @@ fn all_until_optional_limit(
 /// approaching child (`approach`), else the stack of its resolved pick, and a chain hanging directly
 /// off the workspace commit keeps its own (possibly pick-less) lane — the empty-branch case.
 fn divide_workspace_into_stacks(
-    graph: &CommitGraph,
+    graph: &EditorGraph,
     head_not_target: NodeSet,
-    workspace_commit_ix: CommitGraphIndex,
+    workspace_commit_ix: EditorGraphIndex,
 ) -> (NodeSet, Vec<NodeSet>) {
     // Each parent of the workspace commit seeds a stack, flooded pick-to-pick: every outgoing
     // edge resolves through reference/tombstone steps to the pick beneath.
@@ -719,7 +719,7 @@ fn divide_workspace_into_stacks(
     for (node, stored) in graph.positioned_refs() {
         let pick = positions::resolve_to_pick(graph, stored.on);
         let approach = positions::ref_approach(graph, node);
-        let by_pick = |a: Option<CommitGraphIndex>| {
+        let by_pick = |a: Option<EditorGraphIndex>| {
             a.and_then(|a| deduplicated.iter().position(|s| s.nodes.contains(&a)))
         };
         // Every approaching leg must agree on the lane; a chain entered from several lanes
@@ -791,11 +791,11 @@ fn divide_workspace_into_stacks(
 /// chains nothing descends into (e.g. a remote ref stacked above a local one) stay out,
 /// exactly like the edge-era floods never reached them.
 fn attach_flooded_refs(
-    graph: &CommitGraph,
-    nodes: &mut HashSet<CommitGraphIndex>,
-    entry: Option<CommitGraphIndex>,
+    graph: &EditorGraph,
+    nodes: &mut HashSet<EditorGraphIndex>,
+    entry: Option<EditorGraphIndex>,
 ) {
-    let mut additions: Vec<CommitGraphIndex> = graph
+    let mut additions: Vec<EditorGraphIndex> = graph
         .positioned_refs()
         .filter_map(|(node, _stored)| {
             // A chain any in-region leg approaches was flooded through before the walk

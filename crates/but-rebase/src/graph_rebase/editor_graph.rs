@@ -5,7 +5,7 @@
 //! (a reverse scan of the parent arrays), never stored. Nothing is ever removed (a removed
 //! pick becomes a `None` payload, a removed reference goes dead in place), so ids are
 //! stable by construction. [`Step`] and [`Pick`] are BOUNDARY VALUE types: synthesized by
-//! [`CommitGraph::step_view`], decomposed by [`CommitGraph::add_node`]/[`CommitGraph::set_step`].
+//! [`EditorGraph::step_view`], decomposed by [`EditorGraph::add_node`]/[`EditorGraph::set_step`].
 
 use std::collections::{HashMap, HashSet};
 
@@ -20,18 +20,18 @@ use crate::graph_rebase::{
 /// into the pick arena (its parent array is its truth), `Ref` into the reference table (a
 /// position is its truth) — so a selector can address either without knowing which.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) enum CommitGraphIndex {
+pub(crate) enum EditorGraphIndex {
     /// A pick or its tombstone in the node arena.
     Node(usize),
     /// A reference (live or dead) in the ref table.
     Ref(usize),
 }
 
-impl std::fmt::Display for CommitGraphIndex {
+impl std::fmt::Display for EditorGraphIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CommitGraphIndex::Node(i) => write!(f, "n{i}"),
-            CommitGraphIndex::Ref(i) => write!(f, "r{i}"),
+            EditorGraphIndex::Node(i) => write!(f, "n{i}"),
+            EditorGraphIndex::Ref(i) => write!(f, "r{i}"),
         }
     }
 }
@@ -39,21 +39,21 @@ impl std::fmt::Display for CommitGraphIndex {
 /// One incoming child leg of a pick, named POSITIONALLY as `(source pick, parent-slot)`.
 /// Lanes state legs by this name so a leg removed and re-created at the same coordinates is
 /// the SAME statement — see [`LaneRec::legs`].
-pub(crate) type Leg = (CommitGraphIndex, usize);
+pub(crate) type Leg = (EditorGraphIndex, usize);
 
 /// Where a reference sits, stored explicitly: references are POSITIONS, not topology. The
-/// approach legs live in the reference's LANE (see [`CommitGraph::lane_of`]), not here.
+/// approach legs live in the reference's LANE (see [`EditorGraph::lane_of`]), not here.
 /// Derived reads live in `positions`: `ref_depth` (rank), `ref_approach` (legs),
 /// `resolve_to_pick` (the node, followed through tombstones).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RefPosition {
     /// The node this reference resolves to (a pick, or its tombstone after deletion) — the
     /// commit the ref points at, reached lazily through tombstones at read time.
-    pub on: CommitGraphIndex,
+    pub on: EditorGraphIndex,
     /// The reference directly underneath in the physical stack (`None` = sits directly on the node).
     /// Rank is DERIVED: a reference's depth is the length of its below-chain
     /// (`positions::ref_depth`).
-    pub below: Option<CommitGraphIndex>,
+    pub below: Option<EditorGraphIndex>,
     /// The entry into this position converged — more than one thing (legs and/or refs stacked
     /// above) met here (a merge). A creation-time signal distinct from `approach.len() > 1` (a position
     /// can converge yet resolve to a single leg), so it is stored and PRESERVED, not re-derived.
@@ -154,7 +154,7 @@ pub(crate) enum LaneCarry {
 #[derive(Debug, Clone)]
 pub(crate) struct LaneRec {
     /// The reference nodes in this lane, unordered (order by below-chain depth to read).
-    pub members: Vec<CommitGraphIndex>,
+    pub members: Vec<EditorGraphIndex>,
     /// How much of the node's legs this lane carries.
     pub carry: LaneCarry,
     /// The legs this lane STATES it carries (`Count` lanes only). Keyed by the full
@@ -171,8 +171,8 @@ pub(crate) struct LaneRec {
 /// References are edgeless: native creation authors their positions straight from the
 /// placement ledger.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct CommitGraph {
-    /// THE arena: `CommitGraphIndex::Node(i)` IS `CommitIdx` `i`. Commit ids are the payload
+pub(crate) struct EditorGraph {
+    /// THE arena: `EditorGraphIndex::Node(i)` IS `CommitIdx` `i`. Commit ids are the payload
     /// (tombstoning flags a node in place, the node id survives every rewrite), parent
     /// slots are the ordered structure.
     arena: but_graph::CommitGraph,
@@ -183,10 +183,10 @@ pub(crate) struct CommitGraph {
     /// descend into a reference's position lives here and only here — authored by
     /// [`Self::set_position`]/[`Self::join_lane_of`], carried by [`Self::rekey_position`],
     /// renamed by [`Self::rename_legs`], read via `positions::ref_approach`.
-    lanes: HashMap<CommitGraphIndex, Vec<LaneRec>>,
+    lanes: HashMap<EditorGraphIndex, Vec<LaneRec>>,
 }
 
-impl CommitGraph {
+impl EditorGraph {
     /// Adopt `arena` wholesale as THE arena — full commit payloads (flags, refs, generation)
     /// survive, which the write-through put-back depends on. The caller must have normalized
     /// every parent slot to PRESENT (the editor's slot invariant) and follows up with
@@ -208,7 +208,7 @@ impl CommitGraph {
 
     /// Add `step` to the node arena and return its stable id. References do not belong here —
     /// use [`Self::add_reference`].
-    pub(crate) fn add_node(&mut self, step: Step) -> CommitGraphIndex {
+    pub(crate) fn add_node(&mut self, step: Step) -> EditorGraphIndex {
         let (id, settings) = match step {
             Step::Pick(pick) => {
                 let (id, settings) = PickSettings::split(pick);
@@ -226,13 +226,13 @@ impl CommitGraph {
             self.arena.node_count(),
             "settings table fell out of step with the arena"
         );
-        CommitGraphIndex::Node(i)
+        EditorGraphIndex::Node(i)
     }
 
     /// Replace the node payload at `node` with `step` — a pick decomposes into id and
     /// settings, [`Step::None`] tombstones the payload (settings go stale, not cleared).
-    pub(crate) fn set_step(&mut self, node: CommitGraphIndex, step: Step) {
-        let CommitGraphIndex::Node(i) = node else {
+    pub(crate) fn set_step(&mut self, node: EditorGraphIndex, step: Step) {
+        let EditorGraphIndex::Node(i) = node else {
             panic!("BUG: references live in the ref table, not the step arena");
         };
         match step {
@@ -250,17 +250,17 @@ impl CommitGraph {
 
     /// The commit id of the pick at `node` — `None` for tombstones and references. THE fast
     /// payload read; whole-step consumers use [`Self::step_view`].
-    pub(crate) fn commit_id(&self, node: CommitGraphIndex) -> Option<gix::ObjectId> {
+    pub(crate) fn commit_id(&self, node: EditorGraphIndex) -> Option<gix::ObjectId> {
         match node {
-            CommitGraphIndex::Node(i) => self.arena.node_payload(i),
-            CommitGraphIndex::Ref(_) => None,
+            EditorGraphIndex::Node(i) => self.arena.node_payload(i),
+            EditorGraphIndex::Ref(_) => None,
         }
     }
 
     /// Rewrite the commit id of the pick at `node` IN PLACE — THE rebase write: the node id,
     /// its parent array, its settings, and every position naming it all survive unchanged.
-    pub(crate) fn set_commit_id(&mut self, node: CommitGraphIndex, id: gix::ObjectId) {
-        let CommitGraphIndex::Node(i) = node else {
+    pub(crate) fn set_commit_id(&mut self, node: EditorGraphIndex, id: gix::ObjectId) {
+        let EditorGraphIndex::Node(i) = node else {
             panic!("BUG: only picks carry commit ids");
         };
         debug_assert!(
@@ -274,10 +274,10 @@ impl CommitGraph {
     /// [`Pick::preserved_parents`]).
     pub(crate) fn set_preserved_parents(
         &mut self,
-        node: CommitGraphIndex,
+        node: EditorGraphIndex,
         parents: Option<Vec<gix::ObjectId>>,
     ) {
-        let CommitGraphIndex::Node(i) = node else {
+        let EditorGraphIndex::Node(i) = node else {
             panic!("BUG: only picks carry preserved parents");
         };
         debug_assert!(
@@ -292,19 +292,19 @@ impl CommitGraph {
         &mut self,
         refname: gix::refs::FullName,
         mutable: bool,
-    ) -> CommitGraphIndex {
+    ) -> EditorGraphIndex {
         self.refs.push(RefRecord {
             refname,
             mutable,
             live: true,
             position: None,
         });
-        CommitGraphIndex::Ref(self.refs.len() - 1)
+        EditorGraphIndex::Ref(self.refs.len() - 1)
     }
 
     /// The reference payload at `node` — `Some` iff it names a live (non-deleted) reference.
-    pub(crate) fn reference(&self, node: CommitGraphIndex) -> Option<(&gix::refs::FullName, bool)> {
-        let CommitGraphIndex::Ref(i) = node else {
+    pub(crate) fn reference(&self, node: EditorGraphIndex) -> Option<(&gix::refs::FullName, bool)> {
+        let EditorGraphIndex::Ref(i) = node else {
             return None;
         };
         let record = self.refs.get(i)?;
@@ -312,49 +312,49 @@ impl CommitGraph {
     }
 
     /// `true` iff `node` is a live reference.
-    pub(crate) fn is_reference(&self, node: CommitGraphIndex) -> bool {
+    pub(crate) fn is_reference(&self, node: EditorGraphIndex) -> bool {
         self.reference(node).is_some()
     }
 
     /// `true` iff `node` is a pick — `false` for tombstones and references.
-    pub(crate) fn is_pick(&self, node: CommitGraphIndex) -> bool {
+    pub(crate) fn is_pick(&self, node: EditorGraphIndex) -> bool {
         self.commit_id(node).is_some()
     }
 
     /// All live references, ascending by id.
     pub(crate) fn references(
         &self,
-    ) -> impl Iterator<Item = (CommitGraphIndex, &gix::refs::FullName, bool)> + '_ {
+    ) -> impl Iterator<Item = (EditorGraphIndex, &gix::refs::FullName, bool)> + '_ {
         self.refs.iter().enumerate().filter_map(|(i, record)| {
             record
                 .live
-                .then_some((CommitGraphIndex::Ref(i), &record.refname, record.mutable))
+                .then_some((EditorGraphIndex::Ref(i), &record.refname, record.mutable))
         })
     }
 
     /// All reference ids — live AND dead — ascending. Dead references still carry their
     /// retained name and position (see [`RefRecord`]).
-    pub(crate) fn ref_indices(&self) -> impl Iterator<Item = CommitGraphIndex> + '_ {
-        (0..self.refs.len()).map(CommitGraphIndex::Ref)
+    pub(crate) fn ref_indices(&self) -> impl Iterator<Item = EditorGraphIndex> + '_ {
+        (0..self.refs.len()).map(EditorGraphIndex::Ref)
     }
 
     /// The full record of the reference at `node`, including dead ones — rebuilds need the
     /// retained payload.
-    pub(crate) fn reference_record(&self, node: CommitGraphIndex) -> Option<&RefRecord> {
+    pub(crate) fn reference_record(&self, node: EditorGraphIndex) -> Option<&RefRecord> {
         match node {
-            CommitGraphIndex::Ref(i) => self.refs.get(i),
-            CommitGraphIndex::Node(_) => None,
+            EditorGraphIndex::Ref(i) => self.refs.get(i),
+            EditorGraphIndex::Node(_) => None,
         }
     }
 
     /// Rename (or resurrect) the reference at `node` in place; its position is untouched.
     pub(crate) fn set_reference(
         &mut self,
-        node: CommitGraphIndex,
+        node: EditorGraphIndex,
         refname: gix::refs::FullName,
         mutable: bool,
     ) {
-        let CommitGraphIndex::Ref(i) = node else {
+        let EditorGraphIndex::Ref(i) = node else {
             panic!("BUG: only references can be renamed");
         };
         let record = &mut self.refs[i];
@@ -365,8 +365,8 @@ impl CommitGraph {
 
     /// Delete the reference at `node`: it goes dead in place, RETAINING its name and
     /// position so stale selectors keep normalizing and rebuilds keep carrying it.
-    pub(crate) fn tombstone_reference(&mut self, node: CommitGraphIndex) {
-        let CommitGraphIndex::Ref(i) = node else {
+    pub(crate) fn tombstone_reference(&mut self, node: EditorGraphIndex) {
+        let EditorGraphIndex::Ref(i) = node else {
             panic!("BUG: only references can be tombstoned");
         };
         self.refs[i].live = false;
@@ -375,13 +375,13 @@ impl CommitGraph {
     /// The step at `node` as an owned view — the read for whole-step consumers, synthesized
     /// from the payload: id plus settings make a `Step::Pick`, a `None` id a `Step::None`,
     /// a reference entry `Step::Reference` while live and `Step::None` once dead.
-    pub(crate) fn step_view(&self, node: CommitGraphIndex) -> Step {
+    pub(crate) fn step_view(&self, node: EditorGraphIndex) -> Step {
         match node {
-            CommitGraphIndex::Node(i) => match self.arena.node_payload(i) {
+            EditorGraphIndex::Node(i) => match self.arena.node_payload(i) {
                 Some(id) => Step::Pick(self.settings[i].pick(id)),
                 None => Step::None,
             },
-            CommitGraphIndex::Ref(i) => {
+            EditorGraphIndex::Ref(i) => {
                 let record = &self.refs[i];
                 if record.live {
                     Step::Reference {
@@ -396,17 +396,17 @@ impl CommitGraph {
     }
 
     /// The stored position of the reference at `node`, live or dead.
-    pub(crate) fn position_of(&self, node: CommitGraphIndex) -> Option<RefPosition> {
+    pub(crate) fn position_of(&self, node: EditorGraphIndex) -> Option<RefPosition> {
         match node {
-            CommitGraphIndex::Ref(i) => self.refs.get(i)?.position.clone(),
-            CommitGraphIndex::Node(_) => None,
+            EditorGraphIndex::Ref(i) => self.refs.get(i)?.position.clone(),
+            EditorGraphIndex::Node(_) => None,
         }
     }
 
-    fn position_slot(&mut self, node: CommitGraphIndex) -> &mut Option<RefPosition> {
+    fn position_slot(&mut self, node: EditorGraphIndex) -> &mut Option<RefPosition> {
         match node {
-            CommitGraphIndex::Ref(i) => &mut self.refs[i].position,
-            CommitGraphIndex::Node(_) => panic!("BUG: only references hold positions"),
+            EditorGraphIndex::Ref(i) => &mut self.refs[i].position,
+            EditorGraphIndex::Node(_) => panic!("BUG: only references hold positions"),
         }
     }
 
@@ -417,11 +417,11 @@ impl CommitGraph {
     /// existing position wholesale.
     pub(crate) fn set_position(
         &mut self,
-        node: CommitGraphIndex,
-        on: CommitGraphIndex,
-        approach: &[(CommitGraphIndex, usize)],
+        node: EditorGraphIndex,
+        on: EditorGraphIndex,
+        approach: &[(EditorGraphIndex, usize)],
         ambiguous: bool,
-        below: Option<CommitGraphIndex>,
+        below: Option<EditorGraphIndex>,
     ) {
         let live = match crate::graph_rebase::positions::resolve_to_pick(self, on) {
             Some(pick) => crate::graph_rebase::positions::legs_into_pick(self, pick),
@@ -456,9 +456,9 @@ impl CommitGraph {
     /// sitting on `below`, copying the mate's `on` and ambiguity.
     pub(crate) fn join_lane_of(
         &mut self,
-        node: CommitGraphIndex,
-        mate: CommitGraphIndex,
-        below: Option<CommitGraphIndex>,
+        node: EditorGraphIndex,
+        mate: EditorGraphIndex,
+        below: Option<EditorGraphIndex>,
     ) {
         let Some(m) = self.position_of(mate) else {
             return;
@@ -487,7 +487,7 @@ impl CommitGraph {
 
     /// Re-key `node`'s position onto `onto`, carrying its CURRENT lane record — the
     /// carry and legs as maintained through edge surgery. Below and ambiguity are preserved.
-    pub(crate) fn rekey_position(&mut self, node: CommitGraphIndex, onto: CommitGraphIndex) {
+    pub(crate) fn rekey_position(&mut self, node: EditorGraphIndex, onto: EditorGraphIndex) {
         let Some(stored) = self.position_of(node) else {
             return;
         };
@@ -515,7 +515,7 @@ impl CommitGraph {
 
     /// Re-hang `node` onto `below` — an adjacency statement only; `on` and lane
     /// membership are untouched.
-    pub(crate) fn set_below(&mut self, node: CommitGraphIndex, below: Option<CommitGraphIndex>) {
+    pub(crate) fn set_below(&mut self, node: EditorGraphIndex, below: Option<EditorGraphIndex>) {
         if let Some(stored) = self.position_slot(node).as_mut() {
             stored.below = below;
         }
@@ -524,9 +524,9 @@ impl CommitGraph {
     /// Point a DEAD reference's retained position at `on` — the bare retention pointer
     /// stale selectors normalize through. Lane membership, below, and ambiguity are dropped;
     /// live references re-place via the arrangement machinery instead.
-    pub(crate) fn set_retained_position(&mut self, node: CommitGraphIndex, on: CommitGraphIndex) {
+    pub(crate) fn set_retained_position(&mut self, node: EditorGraphIndex, on: EditorGraphIndex) {
         debug_assert!(
-            !self.is_reference(node) && matches!(node, CommitGraphIndex::Ref(_)),
+            !self.is_reference(node) && matches!(node, EditorGraphIndex::Ref(_)),
             "retained positions belong to dead references"
         );
         if let Some(stored) = self.position_of(node) {
@@ -539,7 +539,7 @@ impl CommitGraph {
         });
     }
 
-    fn lane_remove(&mut self, node: CommitGraphIndex, key: CommitGraphIndex) {
+    fn lane_remove(&mut self, node: EditorGraphIndex, key: EditorGraphIndex) {
         let Some(lanes) = self.lanes.get_mut(&key) else {
             return;
         };
@@ -554,10 +554,10 @@ impl CommitGraph {
 
     fn lane_insert(
         &mut self,
-        node: CommitGraphIndex,
-        key: CommitGraphIndex,
+        node: EditorGraphIndex,
+        key: EditorGraphIndex,
         carry: LaneCarry,
-        legs: Vec<(CommitGraphIndex, usize)>,
+        legs: Vec<(EditorGraphIndex, usize)>,
     ) {
         let lanes = self.lanes.entry(key).or_default();
         let existing = lanes.iter_mut().find(|lane| match carry {
@@ -578,15 +578,15 @@ impl CommitGraph {
 
     /// The lane table: every positioned reference's approach statement, keyed by the STORED
     /// (unresolved) `on` value.
-    pub(crate) fn lane_table(&self) -> &HashMap<CommitGraphIndex, Vec<LaneRec>> {
+    pub(crate) fn lane_table(&self) -> &HashMap<EditorGraphIndex, Vec<LaneRec>> {
         &self.lanes
     }
 
     /// The lane containing the reference at `node`, if it holds a position.
-    pub(crate) fn lane_of(&self, node: CommitGraphIndex) -> Option<&LaneRec> {
+    pub(crate) fn lane_of(&self, node: EditorGraphIndex) -> Option<&LaneRec> {
         let stored = match node {
-            CommitGraphIndex::Ref(i) => self.refs.get(i)?.position.as_ref()?,
-            CommitGraphIndex::Node(_) => return None,
+            EditorGraphIndex::Ref(i) => self.refs.get(i)?.position.as_ref()?,
+            EditorGraphIndex::Node(_) => return None,
         };
         self.lanes
             .get(&stored.on)?
@@ -597,12 +597,12 @@ impl CommitGraph {
     /// All positioned references — live AND dead — ascending by id.
     pub(crate) fn positioned_refs(
         &self,
-    ) -> impl Iterator<Item = (CommitGraphIndex, RefPosition)> + '_ {
+    ) -> impl Iterator<Item = (EditorGraphIndex, RefPosition)> + '_ {
         self.refs.iter().enumerate().filter_map(|(i, record)| {
             record
                 .position
                 .clone()
-                .map(|p| (CommitGraphIndex::Ref(i), p))
+                .map(|p| (EditorGraphIndex::Ref(i), p))
         })
     }
 
@@ -645,15 +645,15 @@ impl CommitGraph {
 
     /// The ordered parents of `node` — slot position is the parent order. References are
     /// edgeless by construction.
-    pub(crate) fn parents(&self, node: CommitGraphIndex) -> Vec<CommitGraphIndex> {
+    pub(crate) fn parents(&self, node: EditorGraphIndex) -> Vec<EditorGraphIndex> {
         match node {
-            CommitGraphIndex::Node(i) => self
+            EditorGraphIndex::Node(i) => self
                 .arena
                 .parent_indices(i)
                 .into_iter()
-                .map(CommitGraphIndex::Node)
+                .map(EditorGraphIndex::Node)
                 .collect(),
-            CommitGraphIndex::Ref(_) => Vec::new(),
+            EditorGraphIndex::Ref(_) => Vec::new(),
         }
     }
 
@@ -661,24 +661,24 @@ impl CommitGraph {
     /// flows through into the arena's slot write.
     fn update_parents<R>(
         &mut self,
-        child: CommitGraphIndex,
-        f: impl FnOnce(&mut Vec<CommitGraphIndex>) -> R,
+        child: EditorGraphIndex,
+        f: impl FnOnce(&mut Vec<EditorGraphIndex>) -> R,
     ) -> R {
-        let CommitGraphIndex::Node(i) = child else {
+        let EditorGraphIndex::Node(i) = child else {
             panic!("references are edgeless — no parent array");
         };
-        let mut parents: Vec<CommitGraphIndex> = self
+        let mut parents: Vec<EditorGraphIndex> = self
             .arena
             .parent_indices(i)
             .into_iter()
-            .map(CommitGraphIndex::Node)
+            .map(EditorGraphIndex::Node)
             .collect();
         let result = f(&mut parents);
         let targets = parents
             .into_iter()
             .map(|parent| match parent {
-                CommitGraphIndex::Node(j) => j,
-                CommitGraphIndex::Ref(_) => {
+                EditorGraphIndex::Node(j) => j,
+                EditorGraphIndex::Ref(_) => {
                     panic!("references are edgeless — they cannot be parents")
                 }
             })
@@ -688,18 +688,18 @@ impl CommitGraph {
     }
 
     /// How many parent slots `node` has.
-    pub(crate) fn parent_count(&self, node: CommitGraphIndex) -> usize {
+    pub(crate) fn parent_count(&self, node: EditorGraphIndex) -> usize {
         self.parents(node).len()
     }
 
     /// Every parent-array entry naming `node`, as `(child, slot)` legs, sorted — the derived
     /// children read.
-    pub(crate) fn incoming_legs(&self, node: CommitGraphIndex) -> Vec<Leg> {
+    pub(crate) fn incoming_legs(&self, node: EditorGraphIndex) -> Vec<Leg> {
         let mut legs = Vec::new();
         for i in 0..self.arena.node_count() {
-            let child = CommitGraphIndex::Node(i);
+            let child = EditorGraphIndex::Node(i);
             for (slot, parent) in self.arena.parent_indices(i).into_iter().enumerate() {
-                if CommitGraphIndex::Node(parent) == node {
+                if EditorGraphIndex::Node(parent) == node {
                     legs.push((child, slot));
                 }
             }
@@ -711,8 +711,8 @@ impl CommitGraph {
     /// Append `parent` as `child`'s last parent slot; returns the slot.
     pub(crate) fn push_parent(
         &mut self,
-        child: CommitGraphIndex,
-        parent: CommitGraphIndex,
+        child: EditorGraphIndex,
+        parent: EditorGraphIndex,
     ) -> usize {
         self.update_parents(child, |parents| {
             parents.push(parent);
@@ -724,9 +724,9 @@ impl CommitGraph {
     /// with their statements. Returns the slot actually used.
     pub(crate) fn insert_parent(
         &mut self,
-        child: CommitGraphIndex,
+        child: EditorGraphIndex,
         slot: usize,
-        parent: CommitGraphIndex,
+        parent: EditorGraphIndex,
     ) -> usize {
         let len = self.parent_count(child);
         let slot = slot.min(len);
@@ -740,9 +740,9 @@ impl CommitGraph {
     /// statements, and statements naming the removed slot are dropped.
     pub(crate) fn remove_parent(
         &mut self,
-        child: CommitGraphIndex,
+        child: EditorGraphIndex,
         slot: usize,
-    ) -> Option<CommitGraphIndex> {
+    ) -> Option<EditorGraphIndex> {
         let len = self.parent_count(child);
         if slot >= len {
             return None;
@@ -760,9 +760,9 @@ impl CommitGraph {
     /// statement name — is untouched: chains stated on the leg follow it to its new target.
     pub(crate) fn replace_parent(
         &mut self,
-        child: CommitGraphIndex,
+        child: EditorGraphIndex,
         slot: usize,
-        new_parent: CommitGraphIndex,
+        new_parent: EditorGraphIndex,
     ) {
         self.update_parents(child, |parents| match parents.get_mut(slot) {
             Some(entry) => *entry = new_parent,
@@ -772,7 +772,7 @@ impl CommitGraph {
 
     /// Move `from`'s whole parent array onto `to` (which must have none); statements follow
     /// slot-for-slot.
-    pub(crate) fn transplant_parents(&mut self, from: CommitGraphIndex, to: CommitGraphIndex) {
+    pub(crate) fn transplant_parents(&mut self, from: EditorGraphIndex, to: EditorGraphIndex) {
         debug_assert_eq!(
             self.parent_count(to),
             0,
@@ -786,9 +786,9 @@ impl CommitGraph {
 
     /// Re-target every parent-array entry naming `from` onto `to`, slots preserved —
     /// statement names are `(source, slot)`, so they stay valid untouched.
-    pub(crate) fn redirect_children(&mut self, from: CommitGraphIndex, to: CommitGraphIndex) {
+    pub(crate) fn redirect_children(&mut self, from: EditorGraphIndex, to: EditorGraphIndex) {
         for i in 0..self.arena.node_count() {
-            let child = CommitGraphIndex::Node(i);
+            let child = EditorGraphIndex::Node(i);
             if !self.parents(child).contains(&from) {
                 continue;
             }
@@ -805,7 +805,7 @@ impl CommitGraph {
     /// Empty `child`'s parent array, returning it. Lane statements naming the drained slots
     /// are DELIBERATELY untouched: the caller re-states the orphaned names onto their new
     /// carrier itself (the below-insert path renames them onto the segment's parent-most).
-    pub(crate) fn drain_parents(&mut self, child: CommitGraphIndex) -> Vec<CommitGraphIndex> {
+    pub(crate) fn drain_parents(&mut self, child: EditorGraphIndex) -> Vec<EditorGraphIndex> {
         self.update_parents(child, std::mem::take)
     }
 
@@ -826,20 +826,20 @@ impl CommitGraph {
 
     /// All node-arena ids (picks and tombstones), ascending. References are NOT included —
     /// see [`Self::references`] and [`Self::ref_indices`].
-    pub(crate) fn node_indices(&self) -> impl Iterator<Item = CommitGraphIndex> + '_ {
-        (0..self.arena.node_count()).map(CommitGraphIndex::Node)
+    pub(crate) fn node_indices(&self) -> impl Iterator<Item = EditorGraphIndex> + '_ {
+        (0..self.arena.node_count()).map(EditorGraphIndex::Node)
     }
 
     /// The ARENA nodes no parent array names — the child-less tips, ascending. References
     /// never appear here: they are edgeless by construction, and the consumers
     /// (head discovery) want picks and tombstones only.
-    pub(crate) fn tips(&self) -> impl Iterator<Item = CommitGraphIndex> + '_ {
-        let referenced: HashSet<CommitGraphIndex> = (0..self.arena.node_count())
+    pub(crate) fn tips(&self) -> impl Iterator<Item = EditorGraphIndex> + '_ {
+        let referenced: HashSet<EditorGraphIndex> = (0..self.arena.node_count())
             .flat_map(|i| self.arena.parent_indices(i))
-            .map(CommitGraphIndex::Node)
+            .map(EditorGraphIndex::Node)
             .collect();
         (0..self.arena.node_count())
-            .map(CommitGraphIndex::Node)
+            .map(EditorGraphIndex::Node)
             .filter(move |node| !referenced.contains(node))
     }
 }

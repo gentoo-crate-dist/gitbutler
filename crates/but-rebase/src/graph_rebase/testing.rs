@@ -19,7 +19,7 @@ use but_core::RefMetadata;
 use renderdag::{Ancestor, GraphRowRenderer, Renderer as _};
 
 use crate::graph_rebase::{
-    CommitGraph, CommitGraphIndex, Editor, Pick, Step, SuccessfulRebase, positions,
+    Editor, EditorGraph, EditorGraphIndex, Pick, Step, SuccessfulRebase, positions,
     workspace::Subgraph,
 };
 
@@ -58,7 +58,7 @@ impl<M: RefMetadata> TestingDot for SuccessfulRebase<'_, '_, M> {
     }
 }
 
-impl TestingDot for CommitGraph {
+impl TestingDot for EditorGraph {
     fn steps_dot(&self) -> String {
         let mut out = String::from("digraph {\n");
         for idx in self.node_indices().chain(self.ref_indices()) {
@@ -130,10 +130,10 @@ fn format_step(step: &Step, title: Option<String>) -> String {
 
 /// The reference chains, grouped by their (pick, approach) position and ordered by depth —
 /// the render's view of positioned refs as rows.
-type ChainKey = (CommitGraphIndex, Vec<(CommitGraphIndex, usize)>);
+type ChainKey = (EditorGraphIndex, Vec<(EditorGraphIndex, usize)>);
 
-fn chains(graph: &CommitGraph) -> HashMap<ChainKey, Vec<CommitGraphIndex>> {
-    let mut out: HashMap<_, Vec<(usize, CommitGraphIndex)>> = HashMap::new();
+fn chains(graph: &EditorGraph) -> HashMap<ChainKey, Vec<EditorGraphIndex>> {
+    let mut out: HashMap<_, Vec<(usize, EditorGraphIndex)>> = HashMap::new();
     for (node, stored) in graph.positioned_refs() {
         out.entry((stored.on, positions::ref_approach(graph, node)))
             .or_default()
@@ -149,8 +149,8 @@ fn chains(graph: &CommitGraph) -> HashMap<ChainKey, Vec<CommitGraphIndex>> {
 
 /// Find head rows: picks (and tombstones) without incoming edges, plus the tops of root
 /// reference chains (positioned with nothing above them).
-fn find_heads(graph: &CommitGraph) -> Vec<CommitGraphIndex> {
-    let mut has_incoming: HashSet<CommitGraphIndex> = HashSet::new();
+fn find_heads(graph: &EditorGraph) -> Vec<EditorGraphIndex> {
+    let mut has_incoming: HashSet<EditorGraphIndex> = HashSet::new();
     for idx in graph.node_indices() {
         has_incoming.extend(graph.parents(idx));
     }
@@ -181,7 +181,7 @@ fn find_heads(graph: &CommitGraph) -> Vec<CommitGraphIndex> {
 /// below it (or its pick); a pick's parent edges route through the chain positioned on
 /// that (parent, slot), when one exists — reproducing the interposed rows references had
 /// when they were nodes.
-fn get_sorted_parents(graph: &CommitGraph, node: CommitGraphIndex) -> Vec<CommitGraphIndex> {
+fn get_sorted_parents(graph: &EditorGraph, node: EditorGraphIndex) -> Vec<EditorGraphIndex> {
     let chains = chains(graph);
     if let Some(stored) = graph.position_of(node) {
         let chain = chains
@@ -213,7 +213,7 @@ fn get_sorted_parents(graph: &CommitGraph, node: CommitGraphIndex) -> Vec<Commit
 
 /// A deterministic ordering for the head nodes so snapshots are stable: picks
 /// before references, then by id / refname.
-fn compare_heads(graph: &CommitGraph, a: CommitGraphIndex, b: CommitGraphIndex) -> Ordering {
+fn compare_heads(graph: &EditorGraph, a: EditorGraphIndex, b: EditorGraphIndex) -> Ordering {
     match (&graph.step_view(a), &graph.step_view(b)) {
         (
             Step::Reference { refname, .. },
@@ -236,12 +236,12 @@ fn compare_heads(graph: &CommitGraph, a: CommitGraphIndex, b: CommitGraphIndex) 
 /// graph (where `nodes` is every index) as well as a subgraph that doesn't
 /// include its parents.
 fn topological_order(
-    graph: &CommitGraph,
-    nodes: &HashSet<CommitGraphIndex>,
-    heads: &[CommitGraphIndex],
-) -> Vec<CommitGraphIndex> {
+    graph: &EditorGraph,
+    nodes: &HashSet<EditorGraphIndex>,
+    heads: &[EditorGraphIndex],
+) -> Vec<EditorGraphIndex> {
     // Incoming edges from *within* the node set.
-    let mut in_degree: HashMap<CommitGraphIndex, usize> = nodes.iter().map(|&n| (n, 0)).collect();
+    let mut in_degree: HashMap<EditorGraphIndex, usize> = nodes.iter().map(|&n| (n, 0)).collect();
     for &n in nodes {
         for parent in get_sorted_parents(graph, n) {
             if let Some(deg) = in_degree.get_mut(&parent) {
@@ -251,15 +251,15 @@ fn topological_order(
     }
 
     let mut result = Vec::new();
-    let mut visited: HashSet<CommitGraphIndex> = HashSet::new();
+    let mut visited: HashSet<EditorGraphIndex> = HashSet::new();
 
     fn dfs(
-        node: CommitGraphIndex,
-        graph: &CommitGraph,
-        nodes: &HashSet<CommitGraphIndex>,
-        visited: &mut HashSet<CommitGraphIndex>,
-        in_degree: &mut HashMap<CommitGraphIndex, usize>,
-        result: &mut Vec<CommitGraphIndex>,
+        node: EditorGraphIndex,
+        graph: &EditorGraph,
+        nodes: &HashSet<EditorGraphIndex>,
+        visited: &mut HashSet<EditorGraphIndex>,
+        in_degree: &mut HashMap<EditorGraphIndex, usize>,
+        result: &mut Vec<EditorGraphIndex>,
     ) {
         if visited.contains(&node) || in_degree.get(&node).is_some_and(|&d| d > 0) {
             return;
@@ -303,9 +303,9 @@ fn topological_order(
 /// ordering from; parents outside `nodes` are simply dropped, so this renders
 /// both full graphs and subgraphs.
 fn render_commit_graph<F>(
-    graph: &CommitGraph,
-    nodes: &HashSet<CommitGraphIndex>,
-    heads: &[CommitGraphIndex],
+    graph: &EditorGraph,
+    nodes: &HashSet<EditorGraphIndex>,
+    heads: &[EditorGraphIndex],
     mut get_title: F,
 ) -> String
 where
@@ -314,7 +314,7 @@ where
     let mut heads = heads.to_vec();
     // Row-view tops without a rendered child inside the subgraph — e.g. reference chains
     // positioned above a stack's head pick, approached only from outside — are heads too.
-    let mut in_degree: HashMap<CommitGraphIndex, usize> = nodes.iter().map(|&n| (n, 0)).collect();
+    let mut in_degree: HashMap<EditorGraphIndex, usize> = nodes.iter().map(|&n| (n, 0)).collect();
     for &n in nodes {
         for parent in get_sorted_parents(graph, n) {
             if let Some(deg) = in_degree.get_mut(&parent) {
@@ -322,7 +322,7 @@ where
             }
         }
     }
-    let mut extra: Vec<CommitGraphIndex> = nodes
+    let mut extra: Vec<EditorGraphIndex> = nodes
         .iter()
         .copied()
         .filter(|n| in_degree.get(n).is_none_or(|&d| d == 0) && !heads.contains(n))
@@ -340,7 +340,7 @@ where
     heads.extend(extra);
     heads.sort_by(|a, b| compare_heads(graph, *a, *b));
 
-    let mut renderer = GraphRowRenderer::<CommitGraphIndex>::new()
+    let mut renderer = GraphRowRenderer::<EditorGraphIndex>::new()
         .output()
         .with_min_row_height(1)
         .build_box_drawing();
@@ -368,11 +368,11 @@ where
 }
 
 /// Render the full commit graph as a box-drawing DAG.
-pub(crate) fn render_ascii_graph<F>(graph: &CommitGraph, get_title: F) -> String
+pub(crate) fn render_ascii_graph<F>(graph: &EditorGraph, get_title: F) -> String
 where
     F: FnMut(gix::ObjectId) -> Option<String>,
 {
-    let nodes: HashSet<CommitGraphIndex> =
+    let nodes: HashSet<EditorGraphIndex> =
         graph.node_indices().chain(graph.ref_indices()).collect();
     let heads = find_heads(graph);
     render_commit_graph(graph, &nodes, &heads, get_title)
@@ -382,8 +382,8 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
     /// Render a [`Subgraph`] (e.g. one of the parts of [`Editor::graph_workspace`])
     /// as a box-drawing DAG, in the same style as [`Testing::steps_ascii`].
     pub fn subgraph_ascii(&self, subgraph: &Subgraph) -> String {
-        let nodes: HashSet<CommitGraphIndex> = subgraph.nodes.iter().map(|s| s.id).collect();
-        let heads: Vec<CommitGraphIndex> = subgraph.heads.iter().map(|s| s.id).collect();
+        let nodes: HashSet<EditorGraphIndex> = subgraph.nodes.iter().map(|s| s.id).collect();
+        let heads: Vec<EditorGraphIndex> = subgraph.heads.iter().map(|s| s.id).collect();
         render_commit_graph(&self.graph, &nodes, &heads, |id| {
             lookup_commit_title(&self.repo, id)
         })
@@ -457,7 +457,7 @@ mod tests {
         Step::Pick(Pick::new_pick(gix::ObjectId::from_str(hex).unwrap()))
     }
 
-    fn add_ref(graph: &mut CommitGraph, name: &str) -> CommitGraphIndex {
+    fn add_ref(graph: &mut EditorGraph, name: &str) -> EditorGraphIndex {
         graph.add_reference(
             gix::refs::FullName::try_from(format!("refs/heads/{name}")).unwrap(),
             true,
@@ -466,7 +466,7 @@ mod tests {
 
     /// Add a reference POSITIONED on `on`, the way native creation authors refs — a
     /// root chain of one.
-    fn place_ref(graph: &mut CommitGraph, name: &str, on: CommitGraphIndex) -> CommitGraphIndex {
+    fn place_ref(graph: &mut EditorGraph, name: &str, on: EditorGraphIndex) -> EditorGraphIndex {
         let ix = add_ref(graph, name);
         graph.set_position(ix, on, &[], false, None);
         ix
@@ -475,9 +475,9 @@ mod tests {
     /// Helper to append a parent slot; the stated order documents the intended slot and is
     /// asserted against the push (arrays make insertion order the structure).
     fn add_edge(
-        graph: &mut CommitGraph,
-        from: CommitGraphIndex,
-        to: CommitGraphIndex,
+        graph: &mut EditorGraph,
+        from: EditorGraphIndex,
+        to: EditorGraphIndex,
         order: usize,
     ) {
         let slot = graph.push_parent(from, to);
@@ -487,7 +487,7 @@ mod tests {
     #[test]
     fn linear_graph() {
         // Simple linear: main on B -> C -> D
-        let mut graph = CommitGraph::default();
+        let mut graph = EditorGraph::default();
         let b = graph.add_node(make_pick("1111111111111111111111111111111111111111"));
         let c = graph.add_node(make_pick("2222222222222222222222222222222222222222"));
         let d = graph.add_node(make_pick("3333333333333333333333333333333333333333"));
@@ -516,7 +516,7 @@ mod tests {
         // A   B
         //  \ /
         //   C
-        let mut graph = CommitGraph::default();
+        let mut graph = EditorGraph::default();
         let m = graph.add_node(make_pick("9999999999999999999999999999999999999999"));
         let a = graph.add_node(make_pick("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
@@ -550,7 +550,7 @@ mod tests {
         //  A  B  C
         //   \ | /
         //     D
-        let mut graph = CommitGraph::default();
+        let mut graph = EditorGraph::default();
         let m = graph.add_node(make_pick("9999999999999999999999999999999999999999"));
         let a = graph.add_node(make_pick("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
@@ -591,7 +591,7 @@ mod tests {
         //  X  Y  Z  \
         //   \ | /   |
         //     C-----+
-        let mut graph = CommitGraph::default();
+        let mut graph = EditorGraph::default();
         let m = graph.add_node(make_pick("9999999999999999999999999999999999999999"));
         let f = graph.add_node(make_pick("ffffffffffffffffffffffffffffffffffffffff")); // fork point
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
@@ -639,7 +639,7 @@ mod tests {
     #[test]
     fn four_way_merge() {
         // Four-way merge
-        let mut graph = CommitGraph::default();
+        let mut graph = EditorGraph::default();
         let m = graph.add_node(make_pick("9999999999999999999999999999999999999999"));
         let a = graph.add_node(make_pick("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
@@ -686,7 +686,7 @@ mod tests {
         // A3  |
         //  \ /
         //   C
-        let mut graph = CommitGraph::default();
+        let mut graph = EditorGraph::default();
         let m = graph.add_node(make_pick("9999999999999999999999999999999999999999"));
         let a1 = graph.add_node(make_pick("a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"));
         let a2 = graph.add_node(make_pick("a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2"));
@@ -726,7 +726,7 @@ mod tests {
         //   D   E   |
         //    \ /    |
         //     F-----+
-        let mut graph = CommitGraph::default();
+        let mut graph = EditorGraph::default();
         let a = graph.add_node(make_pick("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
         let c = graph.add_node(make_pick("cccccccccccccccccccccccccccccccccccccccc"));
@@ -775,7 +775,7 @@ mod tests {
         //     X Y Z  \|
         //      \|/    |
         //       D-----+
-        let mut graph = CommitGraph::default();
+        let mut graph = EditorGraph::default();
         let m = graph.add_node(make_pick("9999999999999999999999999999999999999999"));
         let f = graph.add_node(make_pick("ffffffffffffffffffffffffffffffffffffffff"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
@@ -837,7 +837,7 @@ mod tests {
         //   E   F     <- D forks to E and F, F is shared with C
         //    \ /
         //     base
-        let mut graph = CommitGraph::default();
+        let mut graph = EditorGraph::default();
         let m = graph.add_node(make_pick("9999999999999999999999999999999999999999"));
         let a = graph.add_node(make_pick("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
@@ -904,7 +904,7 @@ mod tests {
         //   |     G     <- B, C, and D's second branch merge at G
         //    \   /
         //      F        <- E and G merge at F
-        let mut graph = CommitGraph::default();
+        let mut graph = EditorGraph::default();
         let m = graph.add_node(make_pick("1111111111111111111111111111111111111111"));
         let a = graph.add_node(make_pick("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
@@ -968,7 +968,7 @@ mod tests {
         //  E F shared <- D forks to E, F, shared where shared comes from C
         //   \|/
         //    base
-        let mut graph = CommitGraph::default();
+        let mut graph = EditorGraph::default();
         let m = graph.add_node(make_pick("9999999999999999999999999999999999999999"));
         let a = graph.add_node(make_pick("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
@@ -1026,7 +1026,7 @@ mod tests {
         // main on a -> b -> base, rendering only the subgraph {a, b}.
         // `main` (positioned on `a`) and `base` (a parent of `b`) are outside
         // the set, so neither is drawn and `b` renders as a root.
-        let mut graph = CommitGraph::default();
+        let mut graph = EditorGraph::default();
         let a = graph.add_node(make_pick("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         let b = graph.add_node(make_pick("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
         let base = graph.add_node(make_pick("0000000000000000000000000000000000000000"));
@@ -1035,7 +1035,7 @@ mod tests {
         add_edge(&mut graph, a, b, 0);
         add_edge(&mut graph, b, base, 0);
 
-        let nodes: HashSet<CommitGraphIndex> = [a, b].into_iter().collect();
+        let nodes: HashSet<EditorGraphIndex> = [a, b].into_iter().collect();
         let output = render_commit_graph(&graph, &nodes, &[a], |_| None);
         insta::assert_snapshot!(output, @"
         ●  aaaaaaa

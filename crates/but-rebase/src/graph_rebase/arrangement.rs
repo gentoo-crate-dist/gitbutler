@@ -1,6 +1,6 @@
 //! The name-keyed arrangement table — the seed of the position model's end-state.
 //!
-//! Everything a [`RefPosition`](crate::graph_rebase::commit_graph::RefPosition) records is keyed
+//! Everything a [`RefPosition`](crate::graph_rebase::editor_graph::RefPosition) records is keyed
 //! by graph coordinates (node ids, parent slots) that churn under mutation, which is why positions
 //! need incremental maintenance (`rewrite_approach_leg`, `apply_chain_join`, the preserve-vs-reclassify
 //! flag). The intended replacement keys the same information by REF NAMES, which mutation never
@@ -8,51 +8,43 @@
 //! the shape of workspace metadata (stack order, branch order). Pick, rank, and approach then
 //! become DERIVED, projection-style, from the table + live pick edges.
 //!
-//! This module provides two things:
-//!
-//! 1. The OP API ([`place_ref`] and friends): mutation sites speak position INTENTS
-//!    ([`StackSlot`]) instead of authoring `(on, below, lane)` triples by hand. Implemented
-//!    atop the stored positions today; when the store swaps to the name-keyed table, only these
-//!    ops' internals change.
-//! 2. A corpus census (env `BUT_ARRANGE_CENSUS`, called from `debug_assert_positions_total`):
-//!    extract the table from today's stored positions, re-derive every position from it, and
-//!    compare. Divergences enumerate precisely where the name-keyed model needs a better rule —
-//!    or where information is genuinely not order-derivable. Verdict so far: zero divergences
-//!    corpus-wide.
+//! This module provides the OP API ([`place_ref`] and friends): mutation sites speak position
+//! INTENTS ([`StackSlot`]) instead of authoring `(on, below, lane)` triples by hand. Implemented
+//! atop the stored positions today; when the store swaps to the name-keyed table, only these
+//! ops' internals change. (An env-gated corpus census proved the swap viable — every stored
+//! position round-trips through the name-keyed table with zero divergences corpus-wide.)
 
-use std::collections::HashMap;
-
-use crate::graph_rebase::commit_graph::{LaneCarry, RefPosition};
-use crate::graph_rebase::positions::{self, legs_into_pick};
-use crate::graph_rebase::{CommitGraph, CommitGraphIndex};
+use crate::graph_rebase::editor_graph::RefPosition;
+use crate::graph_rebase::positions;
+use crate::graph_rebase::{EditorGraph, EditorGraphIndex};
 
 /// A position in a commit's reference stack, named by intent.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum StackSlot {
     /// Directly above this reference in its chain: mates that sat on it re-hang onto the
     /// newcomer.
-    Above(CommitGraphIndex),
+    Above(EditorGraphIndex),
     /// At this reference's position: the newcomer takes its below, and it re-hangs onto the
     /// newcomer.
-    Below(CommitGraphIndex),
+    Below(EditorGraphIndex),
     /// The bottom of the pick's whole stack (carrying all its legs — "the branch here");
     /// every reference that sat on the pick itself re-hangs onto the newcomer.
-    Bottom(CommitGraphIndex),
+    Bottom(EditorGraphIndex),
     /// The top of the chain the leg `(child, parent-slot)` carries into `pick`.
     LaneTop {
         /// The commit the lane's chain sits on.
-        pick: CommitGraphIndex,
+        pick: EditorGraphIndex,
         /// The child edge whose lane the reference stacks onto.
-        leg: (CommitGraphIndex, usize),
+        leg: (EditorGraphIndex, usize),
     },
     /// A fresh root above `pick`: nothing descends into it, no other position moves.
-    Root(CommitGraphIndex),
+    Root(EditorGraphIndex),
 }
 
 /// Place the reference at `node` into `slot`, shifting other positions as the slot demands.
 /// The node must not currently occupy a position that should move with it (this is the FRESH
 /// placement op; moving an existing reference is a different intent).
-pub(crate) fn place_ref(graph: &mut CommitGraph, node: CommitGraphIndex, slot: StackSlot) {
+pub(crate) fn place_ref(graph: &mut EditorGraph, node: EditorGraphIndex, slot: StackSlot) {
     match slot {
         StackSlot::Above(target) => {
             if graph.position_of(target).is_none() {
@@ -120,7 +112,7 @@ pub(crate) fn place_ref(graph: &mut CommitGraph, node: CommitGraphIndex, slot: S
 /// that approached it follow it when it is their sole carrier (their edges move onto the new
 /// pick and merge into the slot's approach), and — when moving above another reference —
 /// the chain members now entered through the moved reference share the merged approach.
-pub(crate) fn move_ref(graph: &mut CommitGraph, node: CommitGraphIndex, slot: StackSlot) {
+pub(crate) fn move_ref(graph: &mut EditorGraph, node: EditorGraphIndex, slot: StackSlot) {
     let Some(moving) = graph.position_of(node) else {
         return;
     };
@@ -246,9 +238,9 @@ pub(crate) fn move_ref(graph: &mut CommitGraph, node: CommitGraphIndex, slot: St
 /// `onto` (what it sat on). Everything above closes the gap by construction — depth is
 /// derived from the below-chain.
 pub(crate) fn splice_out(
-    graph: &mut CommitGraph,
-    node: CommitGraphIndex,
-    onto: Option<CommitGraphIndex>,
+    graph: &mut EditorGraph,
+    node: EditorGraphIndex,
+    onto: Option<EditorGraphIndex>,
 ) {
     let dependents: Vec<_> = graph
         .positioned_refs()
@@ -263,11 +255,11 @@ pub(crate) fn splice_out(
 /// The member holding the depth directly below `depth` on `on` (resolved), excluding
 /// `exclude` — the mate a landing reference at `depth` sits on, lowest node id on a tie.
 fn mate_below_depth(
-    graph: &CommitGraph,
-    exclude: CommitGraphIndex,
-    on: CommitGraphIndex,
+    graph: &EditorGraph,
+    exclude: EditorGraphIndex,
+    on: EditorGraphIndex,
     depth: usize,
-) -> Option<CommitGraphIndex> {
+) -> Option<EditorGraphIndex> {
     if depth == 0 {
         return None;
     }
@@ -288,7 +280,7 @@ fn mate_below_depth(
 /// chain members stacked above move with it, and members below lose their approach (they
 /// become roots at the old pick). An unplaced reference is placed as a fresh root; a
 /// reference already resolving there just refreshes its stored `on`.
-pub(crate) fn repoint_ref(graph: &mut CommitGraph, node: CommitGraphIndex, onto: CommitGraphIndex) {
+pub(crate) fn repoint_ref(graph: &mut EditorGraph, node: EditorGraphIndex, onto: EditorGraphIndex) {
     let Some(stored) = graph.position_of(node) else {
         place_ref(graph, node, StackSlot::Root(onto));
         return;
@@ -350,7 +342,7 @@ pub(crate) fn repoint_ref(graph: &mut CommitGraph, node: CommitGraphIndex, onto:
 /// reference becomes a root at its current pick — nothing descends into it any more. With
 /// `drop_legs` the pick edges that approached its position are removed outright; otherwise
 /// they stay on the pick for a follow-up reconnect to rewire.
-pub(crate) fn unhook_ref(graph: &mut CommitGraph, node: CommitGraphIndex, drop_legs: bool) {
+pub(crate) fn unhook_ref(graph: &mut EditorGraph, node: EditorGraphIndex, drop_legs: bool) {
     let Some(unhooked) = graph.position_of(node) else {
         return;
     };
@@ -383,10 +375,10 @@ pub(crate) fn unhook_ref(graph: &mut CommitGraph, node: CommitGraphIndex, drop_l
 /// re-classified against its own legs at the destination (they come along), and stored
 /// ambiguity is preserved.
 pub(crate) fn transfer_stack(
-    graph: &mut CommitGraph,
-    lead_ref: CommitGraphIndex,
-    source_pick: CommitGraphIndex,
-    dest: CommitGraphIndex,
+    graph: &mut EditorGraph,
+    lead_ref: EditorGraphIndex,
+    source_pick: EditorGraphIndex,
+    dest: EditorGraphIndex,
 ) {
     if graph.position_of(lead_ref).is_none() {
         return;
@@ -426,11 +418,11 @@ pub(crate) fn transfer_stack(
 /// delimiter position below the slice stays behind. `lane`/`above_depth` are caller-captured
 /// (pre-mutation) coordinates rather than live derivations.
 pub(crate) fn carry_stack_above(
-    graph: &mut CommitGraph,
-    source_pick: CommitGraphIndex,
-    lane: &[(CommitGraphIndex, usize)],
+    graph: &mut EditorGraph,
+    source_pick: EditorGraphIndex,
+    lane: &[(EditorGraphIndex, usize)],
     above_depth: usize,
-    dest: CommitGraphIndex,
+    dest: EditorGraphIndex,
 ) {
     let moves: Vec<_> = graph
         .positioned_refs()
@@ -461,10 +453,10 @@ pub(crate) fn carry_stack_above(
 /// that now descend into the joined chain. Returns false (leaving the graph untouched) when
 /// `top` holds no position.
 pub(crate) fn land_stack_above(
-    graph: &mut CommitGraph,
-    source_pick: CommitGraphIndex,
-    top: CommitGraphIndex,
-    bridge_node: CommitGraphIndex,
+    graph: &mut EditorGraph,
+    source_pick: EditorGraphIndex,
+    top: EditorGraphIndex,
+    bridge_node: EditorGraphIndex,
 ) -> bool {
     let Some(top_stored) = graph.position_of(top) else {
         return false;
@@ -498,7 +490,7 @@ pub(crate) fn land_stack_above(
 /// Re-key every reference whose `on` no longer resolves (it sat on removed picks) onto
 /// `onto`, positions carried verbatim — the ruled dangling semantics: the position
 /// follows where the commit's place went, the approach stays.
-pub(crate) fn readopt_dangling_refs(graph: &mut CommitGraph, onto: CommitGraphIndex) {
+pub(crate) fn readopt_dangling_refs(graph: &mut EditorGraph, onto: EditorGraphIndex) {
     let dangling: Vec<_> = graph
         .positioned_refs()
         .filter(|(_, stored)| positions::resolve_to_pick(graph, stored.on).is_none())
@@ -520,7 +512,7 @@ pub(crate) enum SplitBoundary {
 pub(crate) struct ChainSplit {
     /// The members left behind, with their pre-split positions — settle them with
     /// [`settle_chain_lower`] once the leg entering the lower part is known.
-    pub lower: Vec<(CommitGraphIndex, RefPosition)>,
+    pub lower: Vec<(EditorGraphIndex, RefPosition)>,
     /// Whether any member moved onto the upper node. When none did, `at_ref` was the top
     /// of its chain, so the chain's carried legs belong to the caller's new pick.
     pub moved_any: bool,
@@ -531,10 +523,10 @@ pub(crate) struct ChainSplit {
 /// (approach kinds carried verbatim), and the lower members are returned untouched for the
 /// caller to settle.
 pub(crate) fn split_chain(
-    graph: &mut CommitGraph,
-    at_ref: CommitGraphIndex,
+    graph: &mut EditorGraph,
+    at_ref: EditorGraphIndex,
     boundary: SplitBoundary,
-    upper: CommitGraphIndex,
+    upper: EditorGraphIndex,
 ) -> ChainSplit {
     if graph.position_of(at_ref).is_none() {
         return ChainSplit {
@@ -595,233 +587,11 @@ pub(crate) fn split_chain(
 /// Settle the lower part of a split chain: each member keeps its `on` and stacking but is
 /// now approached through `leg` — the edge descending from the interposed pick.
 pub(crate) fn settle_chain_lower(
-    graph: &mut CommitGraph,
-    lower: &[(CommitGraphIndex, RefPosition)],
-    leg: (CommitGraphIndex, usize),
+    graph: &mut EditorGraph,
+    lower: &[(EditorGraphIndex, RefPosition)],
+    leg: (EditorGraphIndex, usize),
 ) {
     for (node, member) in lower {
         graph.set_position(*node, member.on, &[leg], false, member.below);
-    }
-}
-
-/// One lane of a co-located group: refs bottom-up. `rank`/`ambiguous` are carried verbatim in
-/// this v1 (rank is only topology-defined inside carrying chains; root-sibling order is table
-/// data by design).
-#[derive(Debug, Clone)]
-struct Lane {
-    refs: Vec<(gix::refs::FullName, usize, bool)>,
-    carry: LaneCarry,
-}
-
-/// The lanes of every pick that has references on it.
-struct Arrangement {
-    groups: HashMap<CommitGraphIndex, Vec<Lane>>,
-}
-
-/// Extract the arrangement from the CURRENT stored positions, recording anomalies that the
-/// name-keyed model must care about (duplicate names, unplaced refs, non-contiguous chain
-/// ranks, non-consecutive lane legs).
-fn extract(graph: &CommitGraph, notes: &mut Vec<String>) -> Arrangement {
-    let mut seen_names: HashMap<gix::refs::FullName, CommitGraphIndex> = HashMap::new();
-    // (pick, approach) -> members
-    type ChainKey = (CommitGraphIndex, Vec<(CommitGraphIndex, usize)>);
-    let mut chains: HashMap<ChainKey, Vec<(gix::refs::FullName, usize, bool)>> = HashMap::new();
-    for (node, refname, _) in graph.references() {
-        if let Some(previous) = seen_names.insert(refname.clone(), node) {
-            notes.push(format!("DUPNAME {refname:?} nodes {previous} and {node}"));
-        }
-        let Some(stored) = graph.position_of(node) else {
-            continue; // no stored position: unborn, exempt like the standing assert
-        };
-        let Some(pick) = positions::resolve_to_pick(graph, stored.on) else {
-            notes.push(format!("UNPLACED {refname:?}"));
-            continue;
-        };
-        chains
-            .entry((pick, positions::ref_approach(graph, node)))
-            .or_default()
-            .push((
-                refname.clone(),
-                positions::ref_depth(graph, node),
-                stored.ambiguous,
-            ));
-    }
-
-    type ApproachedLane = (Vec<(CommitGraphIndex, usize)>, Lane);
-    let mut groups: HashMap<CommitGraphIndex, Vec<ApproachedLane>> = HashMap::new();
-    for ((pick, approach), mut members) in chains {
-        members.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-        let legs = legs_into_pick(graph, pick);
-        let carry = if approach.is_empty() {
-            LaneCarry::None
-        } else if approach == legs {
-            LaneCarry::All
-        } else {
-            // The consumption model needs each lane's legs to be a consecutive run of the
-            // pick's sorted legs; measure violations instead of assuming.
-            if let Some(start) = legs.iter().position(|l| Some(l) == approach.first()) {
-                if legs[start..].len() < approach.len()
-                    || legs[start..start + approach.len()] != approach[..]
-                {
-                    notes.push(format!(
-                        "NONCONSECUTIVE pick {pick} approach {approach:?} legs {legs:?}"
-                    ));
-                }
-            } else {
-                notes.push(format!(
-                    "APPROACH-NOT-IN-LEGS pick {pick} approach {approach:?} legs {legs:?}"
-                ));
-            }
-            LaneCarry::Count(approach.len())
-        };
-        if carry != LaneCarry::None {
-            let ranks: Vec<usize> = members.iter().map(|m| m.1).collect();
-            if ranks.iter().copied().ne(0..members.len()) {
-                notes.push(format!(
-                    "RANK-GAP pick {pick} ranks {ranks:?} (carrying chain)"
-                ));
-            }
-        }
-        groups.entry(pick).or_default().push((
-            approach,
-            Lane {
-                refs: members,
-                carry,
-            },
-        ));
-    }
-
-    // Lane order within a group: carrying lanes by their first leg (the parent-array order the
-    // materialization writes), shared `All` lanes next, root lanes last by name. This is the
-    // order a name-keyed table would persist.
-    let groups = groups
-        .into_iter()
-        .map(|(pick, mut lanes)| {
-            lanes.sort_by(|(approach_a, lane_a), (approach_b, lane_b)| {
-                let class = |lane: &Lane| match lane.carry {
-                    LaneCarry::Count(_) => 0,
-                    LaneCarry::All => 1,
-                    LaneCarry::None => 2,
-                };
-                class(lane_a)
-                    .cmp(&class(lane_b))
-                    .then_with(|| approach_a.cmp(approach_b))
-                    .then_with(|| lane_a.refs.cmp(&lane_b.refs))
-            });
-            (pick, lanes.into_iter().map(|(_, lane)| lane).collect())
-        })
-        .collect();
-    Arrangement { groups }
-}
-
-/// A derived position: pick, rank, approach, ambiguous.
-type DerivedPosition = (
-    CommitGraphIndex,
-    usize,
-    Vec<(CommitGraphIndex, usize)>,
-    bool,
-);
-
-/// Re-derive every reference's position from the arrangement + live edges: `Count` lanes consume
-/// the pick's sorted legs in lane order, `All` lanes take them all, `None` lanes take none.
-fn derive(
-    graph: &CommitGraph,
-    arrangement: &Arrangement,
-    notes: &mut Vec<String>,
-) -> HashMap<gix::refs::FullName, DerivedPosition> {
-    let mut out = HashMap::new();
-    for (&pick, lanes) in &arrangement.groups {
-        let legs = legs_into_pick(graph, pick);
-        let mut consumed = 0usize;
-        for lane in lanes {
-            let approach = match lane.carry {
-                LaneCarry::None => Vec::new(),
-                LaneCarry::All => legs.clone(),
-                LaneCarry::Count(n) => {
-                    let run = legs
-                        .get(consumed..consumed + n)
-                        .map(<[_]>::to_vec)
-                        .unwrap_or_default();
-                    consumed += n;
-                    run
-                }
-            };
-            for (name, rank, ambiguous) in &lane.refs {
-                out.insert(name.clone(), (pick, *rank, approach.clone(), *ambiguous));
-            }
-        }
-        if consumed > 0 && consumed != legs.len() {
-            notes.push(format!(
-                "UNCONSUMED-LEGS pick {pick} consumed {consumed} of {}",
-                legs.len()
-            ));
-        }
-    }
-    out
-}
-
-/// Round-trip the current graph through the name-keyed arrangement and report every divergence
-/// and anomaly. Empty result = this graph's positions are fully order-derivable.
-fn census(graph: &CommitGraph) -> Vec<String> {
-    let mut notes = Vec::new();
-    let arrangement = extract(graph, &mut notes);
-    // Is rank a contiguous, duplicate-free 0..n stack index per pick across ALL lanes?
-    // (The forest store derives rank from one global list per pick if so.)
-    for (pick, lanes) in &arrangement.groups {
-        let mut ranks: Vec<usize> = lanes
-            .iter()
-            .flat_map(|lane| lane.refs.iter().map(|(_, rank, _)| *rank))
-            .collect();
-        ranks.sort_unstable();
-        if !ranks.iter().copied().eq(0..ranks.len()) {
-            notes.push(format!("GLOBAL-RANK pick {pick} ranks {ranks:?}"));
-        }
-    }
-    let derived = derive(graph, &arrangement, &mut notes);
-    for (node, refname, _) in graph.references() {
-        let Some(stored) = graph.position_of(node) else {
-            continue;
-        };
-        let Some(pick) = positions::resolve_to_pick(graph, stored.on) else {
-            continue;
-        };
-        let rank = positions::ref_depth(graph, node);
-        let approach = positions::ref_approach(graph, node);
-        match derived.get(refname) {
-            Some((d_pick, d_rank, d_approach, d_ambiguous)) => {
-                if (*d_pick, *d_rank, d_approach, *d_ambiguous)
-                    != (pick, rank, &approach, stored.ambiguous)
-                {
-                    notes.push(format!(
-                        "DIVERGE {refname:?} stored=({pick},{rank},{approach:?},{}) derived=({d_pick},{d_rank},{d_approach:?},{d_ambiguous})",
-                        stored.ambiguous
-                    ));
-                }
-            }
-            None => notes.push(format!("MISSING {refname:?}")),
-        }
-    }
-    notes
-}
-
-/// Env-gated corpus probe: when `BUT_ARRANGE_CENSUS` names a file, append this graph's census
-/// findings (and a `GRAPHS` counter line) to it. Capture-proof, like the earlier census tooling.
-pub(crate) fn census_to_file(graph: &CommitGraph) {
-    let Ok(path) = std::env::var("BUT_ARRANGE_CENSUS") else {
-        return;
-    };
-    let notes = census(graph);
-    use std::io::Write as _;
-    let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    else {
-        return;
-    };
-    let refs = graph.references().count();
-    let _ = writeln!(file, "GRAPH refs={refs} findings={}", notes.len());
-    for note in notes {
-        let _ = writeln!(file, "{note}");
     }
 }

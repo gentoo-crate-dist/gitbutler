@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use but_core::{RefMetadata, commit::tree_expression::TreeExpression};
 use gix::prelude::ObjectIdExt;
 
-use crate::graph_rebase::{CommitGraphIndex, Editor, util::collect_ordered_parents};
+use crate::graph_rebase::{Editor, EditorGraphIndex, util::collect_ordered_parents};
 
 /// A selected commit change range that should be merged into an accumulated
 /// tree.
@@ -240,10 +240,10 @@ fn traverse_graph_for_planning<M: RefMetadata>(
 ) -> Result<SelectedCommitPlanningTraversal> {
     let mut traversal = SelectedCommitPlanningTraversal::default();
     let mut seen_selected_commit_ids = HashSet::new();
-    let mut seen_normal = HashSet::<CommitGraphIndex>::new();
-    let mut seen_target_ancestor_walk = HashSet::<CommitGraphIndex>::new();
+    let mut seen_normal = HashSet::<EditorGraphIndex>::new();
+    let mut seen_target_ancestor_walk = HashSet::<EditorGraphIndex>::new();
 
-    let mut roots = editor.graph.tips().collect::<Vec<CommitGraphIndex>>();
+    let mut roots = editor.graph.tips().collect::<Vec<EditorGraphIndex>>();
     roots.sort_unstable();
 
     for root in roots {
