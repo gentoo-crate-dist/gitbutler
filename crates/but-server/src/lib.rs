@@ -897,6 +897,10 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             but_post(commit::uncommit::commit_uncommit_changes_cmd),
         )
         .route(
+            "/commit_uncommit_changes_from_commits",
+            but_post(commit::uncommit::commit_uncommit_changes_from_commits_cmd),
+        )
+        .route(
             "/commit_uncommit",
             but_post(commit::uncommit::commit_uncommit_cmd),
         )

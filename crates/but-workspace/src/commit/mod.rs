@@ -56,7 +56,10 @@ pub use insert_blank_commit::insert_blank_commit;
 pub mod move_changes;
 pub use move_changes::{MoveChangesOutcome, move_changes_between_commits};
 pub mod uncommit_changes;
-pub use uncommit_changes::{UncommitChangesOutcome, uncommit_changes};
+pub use uncommit_changes::{
+    UncommitChangesFailure, UncommitChangesFromCommitsOutcome, UncommitChangesOutcome,
+    UncommitChangesSource, uncommit_changes, uncommit_changes_from_commits,
+};
 pub mod move_commit;
 pub use move_commit::{move_commit, move_commit_no_rebase, move_commits};
 pub mod discard_commit;

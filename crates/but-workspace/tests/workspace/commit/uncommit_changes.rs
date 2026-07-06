@@ -1,9 +1,12 @@
 use anyhow::Result;
-use but_core::DiffSpec;
+use but_core::{DiffSpec, HunkHeader};
 use but_rebase::graph_rebase::{Editor, LookupStep};
-use but_testsupport::{visualize_commit_graph_all, visualize_tree};
-use but_workspace::commit::uncommit_changes;
+use but_testsupport::{hunk_header, visualize_commit_graph_all, visualize_tree};
+use but_workspace::commit::{
+    UncommitChangesSource, uncommit_changes, uncommit_changes_from_commits,
+};
 use gix::prelude::ObjectIdExt;
+use std::collections::HashMap;
 
 use crate::ref_info::with_workspace_commit::utils::named_writable_scenario_with_description_and_graph as writable_scenario;
 
@@ -13,6 +16,86 @@ fn diff_spec_for_file(path: &str) -> DiffSpec {
         path: path.into(),
         hunk_headers: vec![],
     }
+}
+
+fn source(commit_id: gix::ObjectId, path: &str) -> UncommitChangesSource {
+    UncommitChangesSource {
+        commit_id,
+        change: diff_spec_for_file(path),
+    }
+}
+
+fn source_with_hunks(
+    commit_id: gix::ObjectId,
+    path: &str,
+    hunk_headers: Vec<HunkHeader>,
+) -> UncommitChangesSource {
+    UncommitChangesSource {
+        commit_id,
+        change: DiffSpec {
+            previous_path: None,
+            path: path.into(),
+            hunk_headers,
+        },
+    }
+}
+
+fn graph_diff(before: &str, after: &str) -> String {
+    let mut labels = HashMap::<String, String>::new();
+    let before = normalize_graph(before, &mut labels);
+    let after = normalize_graph(after, &mut labels);
+
+    let mut out = String::from("--- before\n");
+    for line in before.lines() {
+        out.push('-');
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out.push_str("+++ after\n");
+    for line in after.lines() {
+        out.push('+');
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
+fn normalize_graph(graph: &str, labels: &mut HashMap<String, String>) -> String {
+    let mut out = String::new();
+    let mut token = String::new();
+    for ch in graph.chars() {
+        if ch.is_ascii_hexdigit() {
+            token.push(ch);
+        } else {
+            push_normalized_token(&mut out, &mut token, labels);
+            out.push(ch);
+        }
+    }
+    push_normalized_token(&mut out, &mut token, labels);
+    out
+}
+
+fn push_normalized_token(
+    out: &mut String,
+    token: &mut String,
+    labels: &mut HashMap<String, String>,
+) {
+    if (7..=40).contains(&token.len()) && token.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        let next = labels.len() + 1;
+        let label = labels
+            .entry(std::mem::take(token))
+            .or_insert_with(|| format!("[C{next}]"));
+        out.push_str(label);
+    } else {
+        out.push_str(token);
+        token.clear();
+    }
+}
+
+fn assert_worktree_file(repo: &gix::Repository, path: &str, expected: &str) {
+    let actual = std::fs::read_to_string(repo.workdir().unwrap().join(path))
+        .unwrap_or_else(|err| panic!("failed to read worktree file {path}: {err}"));
+    assert_eq!(actual, expected, "worktree file {path} should match");
 }
 
 #[test]
@@ -216,6 +299,370 @@ fn uncommit_empty_changes_is_noop() -> Result<()> {
     * 16fd221 (origin/two, two) commit two
     * 8b426d0 (one) commit one
     ");
+
+    Ok(())
+}
+
+#[test]
+fn uncommit_changes_from_commits_groups_and_orders_sources() -> Result<()> {
+    let (_tmp, graph, repo, mut meta, _description) =
+        writable_scenario("reword-three-commits", |_| {})?;
+
+    let one_id = repo.rev_parse_single("one")?.detach();
+    let two_id = repo.rev_parse_single("two")?.detach();
+    let three_id = repo.rev_parse_single("three")?.detach();
+    let graph_before = visualize_commit_graph_all(&repo)?;
+
+    let mut ws = graph.into_workspace()?;
+    let editor = Editor::create(&mut ws, &mut meta, &repo)?;
+    let outcome = uncommit_changes_from_commits(
+        editor,
+        [
+            source(one_id, "one.txt"),
+            source(three_id, "three.txt"),
+            source(two_id, "two.txt"),
+        ],
+        0,
+    )?;
+
+    assert!(
+        outcome.failures.is_empty(),
+        "all valid grouped sources should uncommit: {:?}",
+        outcome.failures
+    );
+
+    let rebase = outcome
+        .rebase
+        .expect("valid sources should produce a rebase");
+    rebase.materialize_without_checkout()?;
+    let graph_after = visualize_commit_graph_all(&repo)?;
+
+    insta::assert_snapshot!(graph_diff(&graph_before, &graph_after), @r"
+    --- before
+    -* [C1] (HEAD -> three) commit three
+    -* [C2] (origin/two, two) commit two
+    -* [C3] (one) commit one
+    +++ after
+    +* [C4] (HEAD -> three) commit three
+    +* [C5] (two) commit two
+    +* [C6] (one) commit one
+    +* [C2] (origin/two) commit two
+    +* [C3] commit one
+    ");
+
+    insta::assert_snapshot!(visualize_tree(repo.rev_parse_single("three")?.object()?.peel_to_tree()?.id()), @r#"
+    f2ff419
+    └── .gitignore:100644:f4ec724 "/remote/\n"
+    "#);
+    assert_worktree_file(&repo, "one.txt", "foo\n");
+    assert_worktree_file(&repo, "two.txt", "foo\n");
+    assert_worktree_file(&repo, "three.txt", "foo\n");
+
+    Ok(())
+}
+
+#[test]
+fn uncommit_changes_from_commits_groups_multiple_changes_per_commit() -> Result<()> {
+    let (_tmp, graph, repo, mut meta, _description) =
+        writable_scenario("reword-three-commits", |_| {})?;
+
+    let one_id = repo.rev_parse_single("one")?.detach();
+    let graph_before = visualize_commit_graph_all(&repo)?;
+
+    let mut ws = graph.into_workspace()?;
+    let editor = Editor::create(&mut ws, &mut meta, &repo)?;
+    let outcome = uncommit_changes_from_commits(
+        editor,
+        [source(one_id, ".gitignore"), source(one_id, "one.txt")],
+        0,
+    )?;
+
+    assert!(
+        outcome.failures.is_empty(),
+        "both changes from the same commit should be grouped: {:?}",
+        outcome.failures
+    );
+
+    let rebase = outcome
+        .rebase
+        .expect("valid sources should produce a rebase");
+    rebase.materialize_without_checkout()?;
+    let graph_after = visualize_commit_graph_all(&repo)?;
+
+    insta::assert_snapshot!(graph_diff(&graph_before, &graph_after), @r"
+    --- before
+    -* [C1] (HEAD -> three) commit three
+    -* [C2] (origin/two, two) commit two
+    -* [C3] (one) commit one
+    +++ after
+    +* [C4] (HEAD -> three) commit three
+    +* [C5] (two) commit two
+    +* [C6] (one) commit one
+    +* [C2] (origin/two) commit two
+    +* [C3] commit one
+    ");
+
+    insta::assert_snapshot!(visualize_tree(repo.rev_parse_single("one")?.object()?.peel_to_tree()?.id()), @"4b825dc");
+    assert_worktree_file(&repo, ".gitignore", "/remote/\n");
+    assert_worktree_file(&repo, "one.txt", "foo\n");
+
+    Ok(())
+}
+
+#[test]
+fn uncommit_changes_from_commits_reports_failures_and_materializes_successes() -> Result<()> {
+    let (_tmp, graph, repo, mut meta, _description) =
+        writable_scenario("reword-three-commits", |_| {})?;
+
+    let one_id = repo.rev_parse_single("one")?.detach();
+    let three_id = repo.rev_parse_single("three")?.detach();
+    let graph_before = visualize_commit_graph_all(&repo)?;
+
+    let mut ws = graph.into_workspace()?;
+    let editor = Editor::create(&mut ws, &mut meta, &repo)?;
+    let outcome = uncommit_changes_from_commits(
+        editor,
+        [
+            source(one_id, "does-not-exist.txt"),
+            source(three_id, "three.txt"),
+        ],
+        0,
+    )?;
+
+    assert_eq!(outcome.failures.len(), 1);
+    assert_eq!(outcome.failures[0].commit_id, one_id);
+    assert!(
+        outcome.failures[0]
+            .error
+            .contains("Failed to remove specified changes"),
+        "failure should explain why the grouped source was skipped: {:?}",
+        outcome.failures[0]
+    );
+
+    let rebase = outcome
+        .rebase
+        .expect("one successful source should still produce a rebase");
+    rebase.materialize_without_checkout()?;
+    let graph_after = visualize_commit_graph_all(&repo)?;
+
+    insta::assert_snapshot!(graph_diff(&graph_before, &graph_after), @r"
+    --- before
+    -* [C1] (HEAD -> three) commit three
+    -* [C2] (origin/two, two) commit two
+    -* [C3] (one) commit one
+    +++ after
+    +* [C4] (HEAD -> three) commit three
+    +* [C2] (origin/two, two) commit two
+    +* [C3] (one) commit one
+    ");
+
+    insta::assert_snapshot!(visualize_tree(repo.rev_parse_single("three")?.object()?.peel_to_tree()?.id()), @r#"
+    aac5238
+    ├── .gitignore:100644:f4ec724 "/remote/\n"
+    ├── one.txt:100644:257cc56 "foo\n"
+    └── two.txt:100644:257cc56 "foo\n"
+    "#);
+    assert_worktree_file(&repo, "three.txt", "foo\n");
+
+    Ok(())
+}
+
+#[test]
+fn uncommit_changes_from_commits_all_failures_does_not_rebase() -> Result<()> {
+    let (_tmp, graph, repo, mut meta, _description) =
+        writable_scenario("reword-three-commits", |_| {})?;
+
+    let one_id = repo.rev_parse_single("one")?.detach();
+    let three_before = repo.rev_parse_single("three")?.detach();
+
+    let mut ws = graph.into_workspace()?;
+    let editor = Editor::create(&mut ws, &mut meta, &repo)?;
+    let outcome = uncommit_changes_from_commits(
+        editor,
+        [
+            source(one_id, "does-not-exist.txt"),
+            source(three_before, "also-missing.txt"),
+        ],
+        0,
+    )?;
+
+    assert_eq!(outcome.failures.len(), 2);
+    assert!(
+        outcome.rebase.is_none(),
+        "all failed sources should avoid producing a rebase"
+    );
+    assert_eq!(
+        repo.rev_parse_single("three")?.detach(),
+        three_before,
+        "refs should be unchanged when there is no rebase to materialize"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn uncommit_changes_from_commits_can_uncommit_selected_lines() -> Result<()> {
+    let (_tmp, graph, repo, mut meta, _description) =
+        writable_scenario("uncommit-lines-from-file", |_| {})?;
+
+    let branch_id = repo.rev_parse_single("branch")?.detach();
+    let graph_before = visualize_commit_graph_all(&repo)?;
+
+    let mut ws = graph.into_workspace()?;
+    let editor = Editor::create(&mut ws, &mut meta, &repo)?;
+    let outcome = uncommit_changes_from_commits(
+        editor,
+        [source_with_hunks(
+            branch_id,
+            "story.txt",
+            vec![hunk_header("-3,0", "+4,2")],
+        )],
+        0,
+    )?;
+
+    assert!(
+        outcome.failures.is_empty(),
+        "selected lines should uncommit cleanly: {:?}",
+        outcome.failures
+    );
+
+    let rebase = outcome
+        .rebase
+        .expect("valid selected lines should produce a rebase");
+    rebase.materialize_without_checkout()?;
+    let graph_after = visualize_commit_graph_all(&repo)?;
+
+    insta::assert_snapshot!(graph_diff(&graph_before, &graph_after), @r"
+    --- before
+    -* [C1] (HEAD -> branch) edit story
+    -* [C2] (main) base story
+    +++ after
+    +* [C3] (HEAD -> branch) edit story
+    +* [C2] (main) base story
+    ");
+    insta::assert_snapshot!(visualize_tree(repo.rev_parse_single("branch")?.object()?.peel_to_tree()?.id()), @r#"
+    12a9d5c
+    └── story.txt:100644:35f45fd "base-1\nbase-2\nkeep-1\nkeep-2\n"
+    "#);
+    assert_worktree_file(
+        &repo,
+        "story.txt",
+        "base-1\nbase-2\nkeep-1\ndrop-1\ndrop-2\nkeep-2\n",
+    );
+
+    Ok(())
+}
+
+#[test]
+fn uncommit_changes_from_commits_handles_parallel_stacks() -> Result<()> {
+    let (_tmp, graph, repo, mut meta, _description) =
+        writable_scenario("uncommit-from-parallel-stacks", |_| {})?;
+
+    let stack_a_id = repo.rev_parse_single("stack-a")?.detach();
+    let stack_b_id = repo.rev_parse_single("stack-b")?.detach();
+    let graph_before = visualize_commit_graph_all(&repo)?;
+
+    let mut ws = graph.into_workspace()?;
+    let editor = Editor::create(&mut ws, &mut meta, &repo)?;
+    let outcome = uncommit_changes_from_commits(
+        editor,
+        [source(stack_b_id, "b.txt"), source(stack_a_id, "a.txt")],
+        0,
+    )?;
+
+    assert!(
+        outcome.failures.is_empty(),
+        "parallel stack sources should uncommit cleanly: {:?}",
+        outcome.failures
+    );
+
+    let rebase = outcome
+        .rebase
+        .expect("valid parallel stack sources should produce a rebase");
+    rebase.materialize_without_checkout()?;
+    let graph_after = visualize_commit_graph_all(&repo)?;
+
+    insta::assert_snapshot!(graph_diff(&graph_before, &graph_after), @r"
+    --- before
+    -*-.   [C1] (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+    -|\ \
+    -| | * [C2] (stack-b) stack B adds file
+    -| |/
+    -|/|
+    -| * [C3] (stack-a) stack A adds file
+    -|/
+    -* [C4] (main) base
+    +++ after
+    +*-.   [C5] (HEAD -> gitbutler/workspace) GitButler Workspace Commit
+    +|\ \
+    +| | * [C6] (stack-b) stack B adds file
+    +| |/
+    +|/|
+    +| * [C7] (stack-a) stack A adds file
+    +|/
+    +* [C4] (main) base
+    ");
+    insta::assert_snapshot!(visualize_tree(repo.rev_parse_single("gitbutler/workspace")?.object()?.peel_to_tree()?.id()), @r#"
+    4b36dfd
+    └── base.txt:100644:df967b9 "base\n"
+    "#);
+    assert_worktree_file(&repo, "a.txt", "a\n");
+    assert_worktree_file(&repo, "b.txt", "b\n");
+
+    Ok(())
+}
+
+#[test]
+fn uncommit_changes_from_commits_handles_unordered_overwrites_of_same_file() -> Result<()> {
+    let (_tmp, graph, repo, mut meta, _description) =
+        writable_scenario("uncommit-overwritten-file-three-commits", |_| {})?;
+
+    let one_id = repo.rev_parse_single("branch~2")?.detach();
+    let two_id = repo.rev_parse_single("branch~1")?.detach();
+    let three_id = repo.rev_parse_single("branch")?.detach();
+    let graph_before = visualize_commit_graph_all(&repo)?;
+
+    let mut ws = graph.into_workspace()?;
+    let editor = Editor::create(&mut ws, &mut meta, &repo)?;
+    let outcome = uncommit_changes_from_commits(
+        editor,
+        [
+            source(one_id, "file.txt"),
+            source(three_id, "file.txt"),
+            source(two_id, "file.txt"),
+        ],
+        0,
+    )?;
+
+    assert!(
+        outcome.failures.is_empty(),
+        "unordered overwrites should be sorted child-to-parent: {:?}",
+        outcome.failures
+    );
+
+    let rebase = outcome
+        .rebase
+        .expect("valid overwrite sources should produce a rebase");
+    rebase.materialize_without_checkout()?;
+    let graph_after = visualize_commit_graph_all(&repo)?;
+
+    insta::assert_snapshot!(graph_diff(&graph_before, &graph_after), @r"
+    --- before
+    -* [C1] (HEAD -> branch) write three
+    -* [C2] write two
+    -* [C3] write one
+    -* [C4] (main) base
+    +++ after
+    +* [C5] (HEAD -> branch) write three
+    +* [C6] write two
+    +* [C7] write one
+    +* [C4] (main) base
+    ");
+    insta::assert_snapshot!(visualize_tree(repo.rev_parse_single("branch")?.object()?.peel_to_tree()?.id()), @r#"
+    7bee507
+    └── file.txt:100644:df967b9 "base\n"
+    "#);
+    assert_worktree_file(&repo, "file.txt", "three\n");
 
     Ok(())
 }

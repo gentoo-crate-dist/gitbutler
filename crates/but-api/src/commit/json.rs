@@ -11,6 +11,7 @@ use super::types::{
     CommitInsertBlankResult as EngineCommitInsertBlankResult,
     CommitMoveResult as EngineCommitMoveResult, CommitRewordResult as EngineCommitRewordResult,
     CommitSquashResult as EngineCommitSquashResult, MoveChangesResult as EngineMoveChangesResult,
+    UncommitChangesFromCommitsResult as EngineUncommitChangesFromCommitsResult,
 };
 
 /// JSON transport type for moving changes between commits.
@@ -33,6 +34,60 @@ impl TryFrom<EngineMoveChangesResult> for MoveChangesResult {
 
         Ok(Self {
             workspace: workspace.try_into()?,
+        })
+    }
+}
+
+/// A grouped source that could not be uncommitted.
+#[derive(Debug, Serialize)]
+#[cfg_attr(feature = "export-schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct UncommitChangesFailure {
+    /// The commit whose changes failed to uncommit.
+    #[cfg_attr(feature = "export-schema", schemars(with = "String"))]
+    pub commit_id: HexHash,
+    /// All changes requested for this commit.
+    pub changes: Vec<but_core::DiffSpec>,
+    /// Human-readable failure reason.
+    pub error: String,
+}
+
+#[cfg(feature = "export-schema")]
+but_schemars::register_sdk_type!(UncommitChangesFailure);
+
+/// JSON transport type for uncommitting changes from multiple commits.
+#[derive(Debug, Serialize)]
+#[cfg_attr(feature = "export-schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct UncommitChangesFromCommitsResult {
+    /// Workspace state after uncommitting successful sources.
+    pub workspace: crate::json::WorkspaceState,
+    /// Sources that could not be uncommitted.
+    pub failures: Vec<UncommitChangesFailure>,
+}
+
+#[cfg(feature = "export-schema")]
+but_schemars::register_sdk_type!(UncommitChangesFromCommitsResult);
+
+impl TryFrom<EngineUncommitChangesFromCommitsResult> for UncommitChangesFromCommitsResult {
+    type Error = anyhow::Error;
+
+    fn try_from(value: EngineUncommitChangesFromCommitsResult) -> Result<Self, Self::Error> {
+        let EngineUncommitChangesFromCommitsResult {
+            workspace,
+            failures,
+        } = value;
+
+        Ok(Self {
+            workspace: workspace.try_into()?,
+            failures: failures
+                .into_iter()
+                .map(|failure| UncommitChangesFailure {
+                    commit_id: failure.commit_id.into(),
+                    changes: failure.changes,
+                    error: failure.error,
+                })
+                .collect(),
         })
     }
 }
