@@ -225,7 +225,7 @@ impl SegmentGraph {
 
     /// Add a connection `source -> target` at position `slot` of `source`'s connections
     /// (clamped to the end). The position matters where connection order is data, like the
-    /// workspace segment's lane order.
+    /// workspace segment, whose connection order is the projection's stack order.
     pub(crate) fn insert_edge_at(
         &mut self,
         source: SegmentIndex,

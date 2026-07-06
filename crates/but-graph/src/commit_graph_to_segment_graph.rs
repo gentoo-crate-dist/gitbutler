@@ -246,7 +246,7 @@ fn complete_parents_from_odb(cg: &mut CommitGraph, repo: &OverlayRepo<'_>) -> an
         };
         let mut odb_parents: Vec<_> = commit.parent_ids().map(|p| p.detach()).collect();
         // Collapse exact duplicate parents like the walk and the graph reader do (a
-        // workspace merge encodes empty lanes as repeated parents).
+        // workspace merge encodes empty stacks as repeated parents).
         if odb_parents.len() > 1 {
             let mut deduped = Vec::with_capacity(odb_parents.len());
             for p in odb_parents {
@@ -609,7 +609,7 @@ fn enrichment_inputs(
     })
 }
 
-/// Only IN-WORKSPACE stacks form lanes. An inactive/outside stack's branches never splice as
+/// Only IN-WORKSPACE stacks form chains. An inactive/outside stack's branches never splice as
 /// empty segments (`unapplied_branch_on_base`: "This will be an empty workspace") — they
 /// contribute only branch METADATA, which names commit-holding segments via the metadata tier
 /// of disambiguation. A branch listed in SEVERAL stacks counts once, like the walk, which
@@ -631,7 +631,7 @@ fn in_workspace_stack_branches(
         .collect()
 }
 
-/// Assemble the MANAGED-workspace graph from `cg`: workspace metadata defines the lanes, and the
+/// Assemble the MANAGED-workspace graph from `cg`: workspace metadata defines the chains, and the
 /// enrichment reads go through the overlay views so in-memory previews (apply/unapply) see the
 /// future state, not the on-disk one.
 #[allow(clippy::too_many_arguments)]
@@ -958,14 +958,14 @@ fn facts<T: but_core::RefMetadata>(
 ///
 /// 1. **Facts** (`facts`) — the boundaries where segments start, which boundary owns each
 ///    commit, and the tips in materialization order. Pure facts over `cg`; reads no segment.
-/// 2. **Lower bound** — the base all lanes and the target converge on.
-/// 3. **Lane plan** (`lane_plan`) — the NAME each tip's segment gets (some go anonymous so an
+/// 2. **Lower bound** — the base all chains and the target converge on.
+/// 3. **Chain plan** (`chain_plan`) — the NAME each tip's segment gets (some go anonymous so an
 ///    empty named segment can float above them), decided before any segment is built.
 /// 4. **Materialize** — one local segment per tip holding its first-parent commit run, then the
 ///    planned float placeholders (empty named segments) spliced above the anonymized tips.
 /// 5. **Connect** — each segment's bottom commit points at the segments owning its parents.
-/// 6. **Lane structure** — empty-workspace segment, advanced-outside branches, empty-branch
-///    splices. Runs before the remote passes so those link the lane segments at creation.
+/// 6. **Chain structure** — empty-workspace segment, advanced-outside branches, empty-branch
+///    splices. Runs before the remote passes so those link the chain segments at creation.
 /// 7. **Remote / target / entrypoint passes** — a remote root segment per local branch whose
 ///    remote tip is present; the target's own remote segment when no local tracks it; regions for
 ///    an extra (older) target position, an outside checkout, and any explicit tip left uncovered.
@@ -1010,11 +1010,11 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
         &project_meta,
         &options,
     );
-    // The workspace's lower bound — the base all lanes and the (stored/extra) target converge
+    // The workspace's lower bound — the base all chains and the (stored/extra) target converge
     // on, extended down to an older target position.
     let ws_lower_bound =
         effective_lower_bound(cg, workspace_commit, target, &project_meta, &options);
-    let plan = lane_plan(
+    let plan = chain_plan(
         cg,
         &f,
         workspace_commit,
@@ -1104,7 +1104,7 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
                 ref_name: float.name.clone(),
                 // Metadata-derived empties are synthetic: no resolved ref tip, like the walk's
                 // `branch_segment_from_name_and_meta` without a refs-by-id lookup. Consumers treat
-                // a `Some` here as an amendable tip, which must not happen for empty lanes.
+                // a `Some` here as an amendable tip, which must not happen for empty chains.
                 commit_id: None,
                 worktree: None,
             }),
@@ -1154,10 +1154,10 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
         connect(&mut sg, ph, tip_sidx);
     }
 
-    // The lane STRUCTURE (empty-ws segment, advanced-outside branches, empty-branch splices)
-    // precedes the remote passes, which link the lane segments at creation.
+    // The chain STRUCTURE (empty-ws segment, advanced-outside branches, empty-branch splices)
+    // precedes the remote passes, which link the chain segments at creation.
     let mut ws_empty_sidx = None;
-    let before_lanes: HashSet<SegmentIndex> = sg.node_indices().collect();
+    let before_chains: HashSet<SegmentIndex> = sg.node_indices().collect();
     if managed {
         if empty_ws_case {
             ws_empty_sidx =
@@ -1177,28 +1177,28 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
         let ws_sidx = ws_empty_sidx.or_else(|| seg_of_tip.get(&workspace_commit).copied());
         insert_empty_branches(&mut sg, ws_sidx, &plan, remote_tracking);
     }
-    // Segments the lane pass creates: the coverage gates below (extra target, outside
-    // entrypoint, explicit tips) historically evaluated BEFORE any lane existed — they must not
-    // be shadowed by lane segments (e.g. an advanced-outside run swallowing the stored target
+    // Segments the chain pass creates: the coverage gates below (extra target, outside
+    // entrypoint, explicit tips) historically evaluated BEFORE any chain existed — they must not
+    // be shadowed by chain segments (e.g. an advanced-outside run swallowing the stored target
     // position that the extra-target region must surface).
-    let lane_created: HashSet<SegmentIndex> = sg
+    let chain_created: HashSet<SegmentIndex> = sg
         .node_indices()
-        .filter(|sidx| !before_lanes.contains(sidx))
+        .filter(|sidx| !before_chains.contains(sidx))
         .collect();
 
     // Remote segments: for each local segment with a remote-tracking ref whose remote tip is
     // present, create a remote root segment (holding the remote-ahead commits) that connects into
     // the local segment, doubly-linked via siblings. The remote passes historically ran BEFORE the
-    // lane structure and keyed on the pre-lane names — the overlay carries exactly that view
-    // (materialization names plus the passes' own renames), so the lane reorder cannot change
+    // chain structure and keyed on the pre-chain names — the overlay carries exactly that view
+    // (materialization names plus the passes' own renames), so the chain reorder cannot change
     // their decisions.
-    let pre_lane_names: IdMap<gix::refs::FullName> = plan.base_name_of.clone();
+    let pre_chain_names: IdMap<gix::refs::FullName> = plan.base_name_of.clone();
     // Remote refs some creator will consume as a segment name: the region builder cuts its run
     // at interior remote refs only when unclaimed. Plan-modeled names (`remote_used` covers the
     // walk seeds) plus the ahead-case remotes of EVERY boundary-tip local (`add_remote_segments`
     // regions all of them, mirroring its gates) plus explicit-tip remote names.
     let mut claimed_remote_names: HashSet<gix::refs::FullName> = plan.remote_used.clone();
-    claimed_remote_names.extend(pre_lane_names.values().filter_map(|name| {
+    claimed_remote_names.extend(pre_chain_names.values().filter_map(|name| {
         let rt = remote_tracking.get(name)?;
         let rt_tip = cg.commit_by_ref(rt.as_ref())?;
         let is_meta_stack_branch = stack_branches
@@ -1238,7 +1238,7 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
         stack_branches,
         &region_pinned,
         remote_tracking,
-        &pre_lane_names,
+        &pre_chain_names,
         &plan.renames,
         &claimed_remote_names,
         &mut pending_edges,
@@ -1357,7 +1357,7 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
     // region, so the projection can derive `target_commit` from it.
     if let Some(extra) = options.extra_target_commit_id
         && cg.node(extra).is_some()
-        && segment_by_commit_excluding(&sg, extra, &lane_created).is_none()
+        && segment_by_commit_excluding(&sg, extra, &chain_created).is_none()
     {
         segment_ahead_region(
             cg,
@@ -1382,7 +1382,7 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
     // still see the workspace. The projection downgrades it to the single-branch view.
     if !in_set.contains(&entrypoint)
         && cg.node(entrypoint).is_some()
-        && segment_by_commit_excluding(&sg, entrypoint, &lane_created).is_none()
+        && segment_by_commit_excluding(&sg, entrypoint, &chain_created).is_none()
     {
         segment_ahead_region(
             cg,
@@ -1410,7 +1410,7 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
         if cg.node(t.id).is_none() {
             continue;
         }
-        match segment_by_commit_excluding(&sg, t.id, &lane_created) {
+        match segment_by_commit_excluding(&sg, t.id, &chain_created) {
             None => segment_ahead_region(
                 cg,
                 &mut sg,
@@ -1768,7 +1768,7 @@ fn name_entrypoint_segment(
     Some(sidx)
 }
 
-/// One floated lane placeholder decided by [`lane_plan`]: `tip`'s segment goes anonymous, an
+/// One floated chain placeholder decided by [`chain_plan`]: `tip`'s segment goes anonymous, an
 /// empty segment named `name` splices in between the workspace and it, and `displaced` (a
 /// build-time name pushed aside by a metadata stack branch) returns to the commit as a passive
 /// ref.
@@ -1782,14 +1782,14 @@ struct Float {
     displaced_ref_name: Option<gix::refs::FullName>,
 }
 
-/// The managed lane NAME decisions, computed before any segment mutation happens (phase 2 of
+/// The managed chain NAME decisions, computed before any segment mutation happens (phase 2 of
 /// gather-then-build). Models the naming state the passes would see — materialization names,
 /// then the anon-owner renames of the remote/target/explicit-tip passes — and decides purely:
 ///
-/// * which shared workspace-parent tips float their name up as an empty lane placeholder
+/// * which shared workspace-parent tips float their name up as an empty chain placeholder
 ///   (`anonymize_shared_stack_tips`),
 /// * which anchors are DEMOTED to anonymous (a shared base at/below the bound, the lower-bound
-///   float) so their stacks' branches form their own lanes (`insert_empty_branches`' demotions).
+///   float) so their stacks' branches form their own chains (`insert_empty_branches`' demotions).
 ///
 /// The group-naming decisions stay in `insert_empty_branches` for now: their "does this ref
 /// already name a segment" checks range over remote segments, which become plan data only when
@@ -1810,10 +1810,10 @@ struct RefGroup {
 /// How a [`RefGroup`] is placed by materialization.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum GroupPlacement {
-    /// The group's commit is inside another lane: the empties splice into that chain.
+    /// The group's commit is inside another chain: the empties splice into that chain.
     Dependent,
-    /// The group anchors its own lane from the workspace (shared base or integrated anchor).
-    OwnLane,
+    /// The group anchors its own chain from the workspace (shared base or integrated anchor).
+    OwnChain,
     /// Another stack owns the (non-integrated) commit: the refs stay passive on it.
     Passive,
     /// The group is outside the workspace or co-located with a managed merge commit — nothing
@@ -1821,7 +1821,7 @@ enum GroupPlacement {
     Skipped,
 }
 
-struct LanePlan {
+struct ChainPlan {
     floats: Vec<Float>,
     demoted: IdSet,
     /// Group-naming decisions of `insert_empty_branches`, keyed by (stack-list index, group
@@ -1829,8 +1829,8 @@ struct LanePlan {
     /// non-bottom namer is displaced, the remote creators link its floated empty instead).
     group_names: HashMap<(usize, gix::ObjectId), (gix::refs::FullName, bool)>,
     /// Every boundary tip's MATERIALIZATION name (before floats/demotions suppress it on the
-    /// segment). The remote/target passes historically ran before the lane shape existed and
-    /// keyed their decisions on these — they read them through [`LanePlan::effective_name`].
+    /// segment). The remote/target passes historically ran before the chain shape existed and
+    /// keyed their decisions on these — they read them through [`ChainPlan::effective_name`].
     base_name_of: IdMap<gix::refs::FullName>,
     /// Names the remote/target/explicit-tip passes give to ANONYMOUS boundary tips (a remote
     /// pointing behind/at an anonymous owner names it; the target and explicit tips likewise).
@@ -1839,7 +1839,7 @@ struct LanePlan {
     /// remote can point mid-run, below the owner's tip).
     renames: IdMap<(gix::refs::FullName, gix::ObjectId)>,
     /// Every remote-ref name the remote passes will consume (renames, empty roots, ahead
-    /// regions, untracked surfacing, the target). With the lane structure built FIRST, the
+    /// regions, untracked surfacing, the target). With the chain structure built FIRST, the
     /// empties filter consults this instead of finding the remote segments in the graph.
     remote_used: HashSet<gix::refs::FullName>,
     /// The RefOrder: co-located ref-order decisions per metadata stack list, in metadata
@@ -1850,7 +1850,7 @@ struct LanePlan {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn lane_plan<T: but_core::RefMetadata>(
+fn chain_plan<T: but_core::RefMetadata>(
     cg: &CommitGraph,
     facts: &Facts,
     workspace_commit: gix::ObjectId,
@@ -1865,8 +1865,8 @@ fn lane_plan<T: but_core::RefMetadata>(
     target_ref: Option<&gix::refs::FullName>,
     symbolic_remotes: &[String],
     extra_target: Option<gix::ObjectId>,
-) -> LanePlan {
-    let mut plan = LanePlan {
+) -> ChainPlan {
+    let mut plan = ChainPlan {
         floats: Vec::new(),
         demoted: IdSet::default(),
         group_names: HashMap::new(),
@@ -1875,7 +1875,7 @@ fn lane_plan<T: but_core::RefMetadata>(
         remote_used: HashSet::new(),
         ref_order: Vec::new(),
     };
-    // The naming state as the lane passes will see it: materialization names first…
+    // The naming state as the chain passes will see it: materialization names first…
     let mut name_of: IdMap<gix::refs::FullName> = IdMap::default();
     for &tip in &facts.tips {
         if let Some(name) = materialize_tip_name(
@@ -2006,7 +2006,7 @@ fn lane_plan<T: but_core::RefMetadata>(
     };
     if facts.ws_is_managed_merge {
         for parent in cg.parents(workspace_commit) {
-            // The target/base lane keeps its name even when other stacks depend on it.
+            // The target/base chain keeps its name even when other stacks depend on it.
             if Some(parent) == target || !facts.boundaries.contains(&parent) {
                 continue;
             }
@@ -2026,7 +2026,7 @@ fn lane_plan<T: but_core::RefMetadata>(
             }
             // When build-time disambiguation picked a NON-stack ref, float the unique metadata
             // STACK branch instead and return the displaced name to the commit as a passive ref:
-            // an applied-but-empty stack must keep its own lane, or the projection's
+            // an applied-but-empty stack must keep its own chain, or the projection's
             // integration-prune swallows the whole stack with the shared base it would own.
             let (float_name, displaced) = if is_stack_branch(&current) {
                 (current.clone(), None)
@@ -2071,7 +2071,7 @@ fn lane_plan<T: but_core::RefMetadata>(
     }
     let at_or_below_bound: Option<IdSet> = ws_lower_bound.map(|lb| cg.ancestor_set(lb));
     // A commit pointed at by branches of SEVERAL metadata stacks at/below the bound is a shared
-    // base: its segment stays anonymous and every stack's branches float above as their own lane.
+    // base: its segment stays anonymous and every stack's branches float above as their own chain.
     for (&commit, &count) in &lists_per_commit {
         if count <= 1 {
             continue;
@@ -2091,7 +2091,7 @@ fn lane_plan<T: but_core::RefMetadata>(
         }
     }
     // The workspace LOWER BOUND is where independent stacks rest: an otherwise-unrepresented
-    // stack's branch pointing there floats as its own empty lane and the boundary segment stays
+    // stack's branch pointing there floats as its own empty chain and the boundary segment stays
     // anonymous.
     let floats_at_lower_bound = |list: &Vec<gix::refs::FullName>| -> bool {
         let Some(lb) = ws_lower_bound else {
@@ -2126,7 +2126,7 @@ fn lane_plan<T: but_core::RefMetadata>(
     }
 
     // ── Group naming: the pass's "does this ref already name a segment" ranges over every
-    // segment, so model the full set of names in use by insert_empty_branches time — lane names
+    // segment, so model the full set of names in use by insert_empty_branches time — chain names
     // plus everything the remote/target/tip/advanced passes will have created. ──
     let mut used: HashSet<gix::refs::FullName> = name_of.values().cloned().collect();
     used.extend(plan.floats.iter().map(|fl| fl.name.clone()));
@@ -2272,7 +2272,7 @@ fn lane_plan<T: but_core::RefMetadata>(
             } else if !shared_base && anchor_not_integrated {
                 GroupPlacement::Dependent
             } else {
-                GroupPlacement::OwnLane
+                GroupPlacement::OwnChain
             };
             plan.ref_order[li].push(RefGroup {
                 commit,
@@ -2292,7 +2292,7 @@ fn lane_plan<T: but_core::RefMetadata>(
     plan
 }
 
-/// The name a boundary tip gets at MATERIALIZATION — shared with `lane_plan`'s modeling so plan
+/// The name a boundary tip gets at MATERIALIZATION — shared with `chain_plan`'s modeling so plan
 /// and build cannot drift. The managed workspace tip is named by the workspace ref itself (a
 /// `gitbutler/*` ref that normal disambiguation skips); a forced entrypoint boundary keeps the
 /// split's precedence (checked-out ref first); every other tip is named by disambiguation. A
@@ -2423,19 +2423,19 @@ fn add_remote_segments(
     stack_branches: Option<&[Vec<gix::refs::FullName>]>,
     pinned_commits: &IdSet,
     remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
-    pre_lane_names: &IdMap<gix::refs::FullName>,
+    pre_chain_names: &IdMap<gix::refs::FullName>,
     renames: &IdMap<(gix::refs::FullName, gix::ObjectId)>,
     claimed_remote_names: &HashSet<gix::refs::FullName>,
     pending_edges: &mut Vec<(SegmentIndex, gix::ObjectId)>,
 ) {
-    // Locals are keyed on the PRE-LANE names: this pass historically ran before the lane shape
+    // Locals are keyed on the PRE-CHAIN names: this pass historically ran before the chain shape
     // was applied and saw every build-time name. The LINKS however belong to whichever segment
-    // finally carries the name — a lane placeholder, a spliced empty, a group-named anchor —
-    // which exists already (lanes precede this pass), so no reconciliation is needed after.
+    // finally carries the name — a chain placeholder, a spliced empty, a group-named anchor —
+    // which exists already (chains precede this pass), so no reconciliation is needed after.
     let mut locals: Vec<(SegmentIndex, gix::refs::FullName, gix::ObjectId)> = seg_of_tip
         .iter()
         .filter_map(|(&tip, &sidx)| {
-            let name = pre_lane_names.get(&tip)?;
+            let name = pre_chain_names.get(&tip)?;
             let rt = remote_tracking.get(name).cloned()?;
             let link_sidx = segment_by_ref(sg, name).unwrap_or(sidx);
             Some((link_sidx, rt, tip))
@@ -2787,7 +2787,7 @@ fn add_untracked_remote_segments(
         };
         // Only surface a remote whose LOCAL counterpart actually sits on the same commit (e.g.
         // `C`/`origin/C` on an ambiguous tip). An ORPHAN remote (`origin/A` with no local `A`)
-        // has no lane to pair with and is deliberately invisible: the traversal never walks it
+        // has no chain to pair with and is deliberately invisible: the traversal never walks it
         // (remotes are queued off encountered LOCAL refs only), and a metadata branch whose local
         // ref is missing is skipped at seeding. When the local ref (re)appears — e.g. an anonymous
         // segment renamed back to `A` — the next build pairs the remote again automatically.
@@ -2981,7 +2981,7 @@ fn add_advanced_outside_branches<T: but_core::RefMetadata>(
             continue;
         }
         // A PINNED commit (a stored/extra target position) must start its own segment via the
-        // extra-target region — the projection derives the remembered base from it. When lanes
+        // extra-target region — the projection derives the remembered base from it. When chains
         // run before the remote passes this pass would otherwise swallow it into the branch's
         // outside run first.
         if pinned_commits.contains(&tip) {
@@ -3013,7 +3013,7 @@ fn add_advanced_outside_branches<T: but_core::RefMetadata>(
             continue;
         };
         // Named like any tip: ambiguous refs keep the segment anonymous (the walk's floating
-        // `►D, ►E` run), a unique branch names it (the advanced `B` above its own lane).
+        // `►D, ►E` run), a unique branch names it (the advanced `B` above its own chain).
         let ref_info =
             disambiguated_ref(cg, tip, remote_tracking, meta, None, target_ref).map(|ref_name| {
                 RefInfo {
@@ -3051,20 +3051,20 @@ fn add_advanced_outside_branches<T: but_core::RefMetadata>(
     }
 }
 
-/// Materialize the plan's [RefOrder](LanePlan::ref_order): per metadata stack list, thread the
+/// Materialize the plan's [RefOrder](ChainPlan::ref_order): per metadata stack list, thread the
 /// same-commit groups top→bottom — the plan-decided namer takes the anchor, the plan-decided
 /// empties splice above it in metadata order — producing
 /// `ws → [empties] → seg(c1) → [empties] → seg(c2) → … → [empties] → base`.
-/// Which refs become empties and how a group lands (dependent splice, own lane, passive) is
+/// Which refs become empties and how a group lands (dependent splice, own chain, passive) is
 /// plan DATA; this pass only looks up anchors and splices.
 fn insert_empty_branches(
     sg: &mut SegmentGraph,
     ws_sidx: Option<SegmentIndex>,
-    plan: &LanePlan,
+    plan: &ChainPlan,
     remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
 ) {
-    // DEMOTIONS, decided by `lane_plan`: a shared base at/below the bound stays anonymous while
-    // every stack's branches float above as their own lane; the lower-bound anchor of an
+    // DEMOTIONS, decided by `chain_plan`: a shared base at/below the bound stays anonymous while
+    // every stack's branches float above as their own chain; the lower-bound anchor of an
     // otherwise-unrepresented stack floats likewise. Remote links of a demoted name are
     // established on the floated segment by the remote creators.
     for &tip in &plan.demoted {
@@ -3077,11 +3077,11 @@ fn insert_empty_branches(
             s.remote_tracking_branch_segment_id = None;
         }
     }
-    for (li, lane) in plan.ref_order.iter().enumerate() {
+    for (li, chain) in plan.ref_order.iter().enumerate() {
         // `from_sidx` feeds the top of the stack: the workspace segment for the first group, then each
         // group's anchor for the next (so its empties splice into the edge coming from above).
         let mut from_sidx = ws_sidx;
-        for group in lane {
+        for group in chain {
             // Outside the workspace or co-located with a managed merge commit: nothing to place.
             if group.placement == GroupPlacement::Skipped {
                 continue;
@@ -3089,7 +3089,7 @@ fn insert_empty_branches(
             let Some(anchor) = segment_by_commit(sg, group.commit) else {
                 continue;
             };
-            // GROUP NAMING, decided by `lane_plan`: the bottom-most branch names an anonymous
+            // GROUP NAMING, decided by `chain_plan`: the bottom-most branch names an anonymous
             // anchor; metadata order overrides a build-time name that belongs to the group (its
             // remote links are cleared, the remote creators link its floated empty instead).
             if let Some((namer, clear_remote)) = plan.group_names.get(&(li, group.commit))
@@ -3123,9 +3123,9 @@ fn insert_empty_branches(
                     remote_tracking,
                     dependent,
                     dependent,
-                    // A fresh lane straight off the workspace lands at its metadata position:
-                    // lanes are threaded in metadata-stack order, so `li` is the slot among the
-                    // workspace's connections (existing lanes sit in parent-array order, which
+                    // A fresh chain straight off the workspace lands at its metadata position:
+                    // chains are threaded in metadata-stack order, so `li` is the slot among the
+                    // workspace's connections (existing chains sit in parent-array order, which
                     // metadata mirrors in steady state).
                     (from_sidx == ws_sidx).then_some(li),
                 );
@@ -3142,8 +3142,8 @@ fn is_remote_segment(sg: &SegmentGraph, sidx: SegmentIndex) -> bool {
         .is_some_and(|ri| ri.ref_name.as_ref().category() == Some(Category::RemoteBranch))
 }
 
-/// Like [`segment_by_commit`], but ignoring `exclude`d segments — the pre-lane coverage view
-/// for gates that historically ran before the lane structure existed.
+/// Like [`segment_by_commit`], but ignoring `exclude`d segments — the pre-chain coverage view
+/// for gates that historically ran before the chain structure existed.
 fn segment_by_commit_excluding(
     sg: &SegmentGraph,
     commit: gix::ObjectId,
@@ -3165,7 +3165,7 @@ fn segment_by_commit(sg: &SegmentGraph, commit: gix::ObjectId) -> Option<Segment
     })
 }
 
-/// The workspace's LOWER BOUND: the nearest commit common to the target and EVERY workspace lane
+/// The workspace's LOWER BOUND: the nearest commit common to the target and EVERY workspace parent
 /// (the walk's `compute_lowest_base` — the base all stacks and the target converge on). BFS from the
 /// workspace over all parents, so the nearest such commit wins.
 fn workspace_lower_bound(
@@ -3175,8 +3175,8 @@ fn workspace_lower_bound(
 ) -> Option<gix::ObjectId> {
     let mut common = cg.ancestor_set(target);
     for parent in cg.all_parent_ids(workspace_commit) {
-        let lane = cg.ancestor_set(parent);
-        common.retain(|c| lane.contains(c));
+        let parent_ancestors = cg.ancestor_set(parent);
+        common.retain(|c| parent_ancestors.contains(c));
     }
     let mut seen = HashSet::new();
     let mut queue = std::collections::VecDeque::from([workspace_commit]);
@@ -3232,18 +3232,18 @@ fn insert_empty_chain_above(
     anchor: SegmentIndex,
     empties: &[gix::refs::FullName],
     remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
-    // The anchor commit sits strictly inside another stack's lane (not at/below the base): splice into
-    // that chain's existing edge rather than adding a fresh workspace lane.
+    // The anchor commit sits strictly inside another stack's chain (not at/below the base): splice into
+    // that chain's existing edge rather than adding a fresh workspace chain.
     dependent: bool,
-    // Route EVERY incoming edge to the anchor through the chain (a splice INTO the lane, above the
+    // Route EVERY incoming edge to the anchor through the chain (a splice INTO the chain, above the
     // bound): both the workspace's parent edge and the chain edge from the commit-holding segment
     // above enter at the chain top — the walk's inline-splice shape. `false` keeps other stacks'
-    // direct edges (a true shared base where each stack has its own lane).
+    // direct edges (a true shared base where each stack has its own chain).
     redirect_all: bool,
-    // Where a FRESH lane edge goes in `from_sidx`'s connections: the stack's metadata index, so a
+    // Where a FRESH chain edge goes in `from_sidx`'s connections: the stack's metadata index, so a
     // new empty stack surfaces at its metadata position (e.g. on top for `Some(0)`) instead of
-    // last. Connection order on the workspace segment is lane order. `None` appends.
-    fresh_lane_slot: Option<usize>,
+    // last. Connection order on the workspace segment is stack order in the projection. `None` appends.
+    fresh_connection_slot: Option<usize>,
 ) {
     let seg_ids: Vec<SegmentIndex> = empties
         .iter()
@@ -3275,7 +3275,7 @@ fn insert_empty_chain_above(
     // reach the anchor keep their direct edges. If it has none, the anchor may sit MID-CHAIN of another
     // stack (dependent branches, e.g. `D`/`E` pointing into `S1`'s spine): splice into the existing
     // incoming edge from the commit-holding local segment above, matching the walk — a fresh workspace
-    // edge would mint a duplicate lane showing the anchor's commits twice. Only when no such chain
+    // edge would mint a duplicate chain showing the anchor's commits twice. Only when no such chain
     // parent exists (a sibling empty stack already took the shared edge to this base) does a fresh
     // edge connect this stack from above.
     if let Some(from_sidx) = from_sidx {
@@ -3294,7 +3294,7 @@ fn insert_empty_chain_above(
             // Prefer a commit-holding chain parent (the dependent-branch pattern); an EMPTY one —
             // another stack's branch already spliced above the same anchor — also carries the
             // chain, so a further dependent branch slots in underneath it rather than minting a
-            // fresh lane.
+            // fresh chain.
             let find_parent = |require_commits: bool| {
                 sg.node_indices().find(|&sidx| {
                     sidx != from_sidx
@@ -3312,7 +3312,7 @@ fn insert_empty_chain_above(
                 Some(parent) => {
                     sg.retarget_edges(parent, anchor, top);
                 }
-                None => match fresh_lane_slot {
+                None => match fresh_connection_slot {
                     Some(slot) => {
                         let conn = Connection::new(top, None, None, None, None)
                             .adjusted_for(from_sidx, top, sg);
@@ -3366,7 +3366,7 @@ fn disambiguated_ref<T: but_core::RefMetadata>(
     remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
     meta: &T,
     // The workspace commit, when naming happens in a managed workspace: the target-local
-    // tie-break applies only to its direct parents (lane tops).
+    // tie-break applies only to its direct parents (chain tops).
     workspace_commit: Option<gix::ObjectId>,
     target_ref: Option<&gix::refs::FullName>,
 ) -> Option<gix::refs::FullName> {
@@ -3392,7 +3392,7 @@ fn disambiguated_ref<T: but_core::RefMetadata>(
         .flatten()
         .or_else(|| unique(&|r| remote_tracking.contains_key(r)))
         // Several remote-tracked branches on a LANE TOP (a direct parent of the workspace merge):
-        // a unique branch WITH metadata wins even when integrated (it is the lane the user works
+        // a unique branch WITH metadata wins even when integrated (it is the chain the user works
         // in, e.g. `first-branch` next to a target-local `main` in gb-local mode); among several
         // metadata branches the TARGET's own local wins (e.g. `main` next to a just-applied
         // branch, both resting on the target's tip). Deeper commits stay anonymous like the walk's.
