@@ -10,7 +10,7 @@ fn conflicted_context() -> Result<(but_ctx::Context, gix::ObjectId, tempfile::Te
     let (repo, tmp) = crate::support::writable_scenario("resolve-ai-conflicted-commit");
     crate::support::persist_default_target(&repo)?;
     let conflicted_commit = repo.rev_parse_single("refs/tags/conflicted")?.detach();
-    let ctx = but_ctx::Context::from_repo(repo)?.with_memory_app_cache();
+    let ctx = but_ctx::Context::from_repo_for_testing(repo)?.with_memory_app_cache();
     Ok((ctx, conflicted_commit, tmp))
 }
 

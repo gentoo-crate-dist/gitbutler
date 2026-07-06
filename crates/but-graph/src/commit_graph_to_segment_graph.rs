@@ -1114,7 +1114,10 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
             id: 0,
             ref_info: Some(RefInfo {
                 ref_name: float.name.clone(),
-                commit_id: Some(float.tip),
+                // Metadata-derived empties are synthetic: no resolved ref tip, like the walk's
+                // `branch_segment_from_name_and_meta` without a refs-by-id lookup. Consumers treat
+                // a `Some` here as an amendable tip, which must not happen for empty lanes.
+                commit_id: None,
                 worktree: None,
             }),
             remote_tracking_ref_name: remote_tracking.get(&float.name).cloned(),
@@ -3139,7 +3142,6 @@ fn insert_empty_branches(
                     anchor,
                     &group.empties,
                     remote_tracking,
-                    group.commit,
                     dependent,
                     dependent,
                 );
@@ -3239,16 +3241,12 @@ fn effective_lower_bound(
 /// parents), they are moved onto the chain top; if it has none — because a sibling empty stack already
 /// consumed the shared edge to `anchor` (two empty stacks on the same base) — a fresh edge is added.
 /// Other stacks' and remotes' edges into `anchor` are untouched. Produces `top_empty → … → anchor`.
-#[expect(clippy::too_many_arguments)]
 fn insert_empty_chain_above(
     sg: &mut SegmentGraph,
     from_sidx: Option<SegmentIndex>,
     anchor: SegmentIndex,
     empties: &[gix::refs::FullName],
     remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
-    // The commit every empty branch points at (the group's commit — empty segments still have a
-    // ref TARGET, like the walk's).
-    commit_id: gix::ObjectId,
     // The anchor commit sits strictly inside another stack's lane (not at/below the base): splice into
     // that chain's existing edge rather than adding a fresh workspace lane.
     dependent: bool,
@@ -3265,7 +3263,9 @@ fn insert_empty_chain_above(
                 id: 0,
                 ref_info: Some(RefInfo {
                     ref_name: b.clone(),
-                    commit_id: Some(commit_id),
+                    // Metadata-derived empties are synthetic: no resolved ref tip. A `Some` would
+                    // make consumers treat the anchor commit as this branch's amendable tip.
+                    commit_id: None,
                     worktree: None,
                 }),
                 remote_tracking_ref_name: remote_tracking.get(b).cloned(),
