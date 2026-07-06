@@ -9,22 +9,25 @@
 //! - `ambiguous` — whether more than one thing converged here (i.e. this position is a merge).
 //!
 //! Which of the pick's incoming child edges descend into a reference's position lives in the
-//! reference's LANE (`EditorGraph::lanes`): each lane records its members and a
-//! [`LaneCarry`] — none of the legs, all of them, or an explicit leg list.
+//! reference's CHAIN (`EditorGraph::chains`): each chain records its members and a
+//! [`ChainCarry`] — none of the edges, all of them, or an explicit edge list.
 //!
 //! Keeping references out of the edge graph is deliberate: an edge running THROUGH a reference
 //! node would make the reference bear connectivity it shouldn't — gluing a commit's history onto
 //! whatever else the reference happens to touch. The functions here read and maintain positions.
 //!
 //! Vocabulary used throughout this module:
-//! - **leg** — one incoming child edge of a pick, identified as `(source-pick node, parent-slot)`.
-//!   A plain commit has one leg; a merge commit has several.
-//! - **approach** — the legs that descend into a reference's position (see [`ref_approach`]). This is what
-//!   distinguishes co-located references and picks out which merge lane a reference belongs to.
+//! - **edge** — a parent edge of the commit graph, named from its child side as
+//!   `(child node, parent-slot)` — the canonical identity, since edges live in parent arrays.
+//!   A commit has one parent edge per parent; a pick's INCOMING edges are its children's
+//!   edges pointing at it.
+//! - **enters through** — an incoming edge of a pick ENTERS THROUGH a reference when it
+//!   descends into that reference's position (see [`edges_through`]). This is what
+//!   distinguishes co-located references and picks out which merge chain a reference belongs to.
 //! - **chain** — references stacked on one pick, ordered by their below-chain ([`ref_depth`]).
 //!   Chains are shallow in practice (≤3 observed).
 
-use crate::graph_rebase::editor_graph::{LaneCarry, RefPosition};
+use crate::graph_rebase::editor_graph::{ChainCarry, RefPosition};
 use crate::graph_rebase::{EditorGraph, EditorGraphIndex};
 
 /// The reference's depth above its pick — the length of its below-chain (0 = directly on
@@ -43,37 +46,31 @@ pub(crate) fn ref_depth(graph: &EditorGraph, node: EditorGraphIndex) -> usize {
     depth
 }
 
-/// The current `approach` of the reference at `node` — the DIRECT lane read: the node's lane
-/// carries its own leg list, kept aligned by the slot mutators (`EditorGraph::remove_parent` /
-/// `insert_parent` / `replace_parent`), ordered and filtered by the resolved pick's live legs
-/// so a stale lane leg never reaches a consumer.
-pub(crate) fn ref_approach(
+/// The edges currently entering through the reference at `node` — the DIRECT chain read: the node's chain
+/// carries its own edge list, kept aligned by the slot mutators (`EditorGraph::remove_parent` /
+/// `insert_parent` / `replace_parent`), ordered and filtered by the resolved pick's live edges
+/// so a stale chain edge never reaches a consumer.
+pub(crate) fn edges_through(
     graph: &EditorGraph,
     node: EditorGraphIndex,
 ) -> Vec<(EditorGraphIndex, usize)> {
     let Some(stored) = graph.position_of(node) else {
         return Vec::new();
     };
-    let lane = graph
-        .lane_table()
-        .get(&stored.on)
-        .and_then(|lanes| lanes.iter().find(|lane| lane.members.contains(&node)));
-    match lane {
+    let Some(chain) = graph.chain_of(node) else {
+        return Vec::new();
+    };
+    let edges = match resolve_to_pick(graph, stored.on) {
+        Some(pick) => edges_into(graph, pick),
         None => Vec::new(),
-        Some(lane) => {
-            let legs = match resolve_to_pick(graph, stored.on) {
-                Some(pick) => legs_into_pick(graph, pick),
-                None => Vec::new(),
-            };
-            match lane.carry {
-                LaneCarry::None => Vec::new(),
-                LaneCarry::All => legs,
-                LaneCarry::Count(_) => legs
-                    .into_iter()
-                    .filter(|leg| lane.legs.contains(leg))
-                    .collect(),
-            }
-        }
+    };
+    match chain.carry {
+        ChainCarry::None => Vec::new(),
+        ChainCarry::All => edges,
+        ChainCarry::Edges => edges
+            .into_iter()
+            .filter(|edge| chain.edges.contains(edge))
+            .collect(),
     }
 }
 
@@ -93,7 +90,7 @@ pub(crate) fn refs_resolving_to(
 
 /// The standing collapse invariant: every reference in the graph has a well-formed position,
 /// and positions are unique wherever order is topologically meaningful — i.e. within chains
-/// approached by a child (`approach = Some`). Parallel ROOT chains above one pick are legitimate
+/// entered by a child edge (a non-empty [`edges_through`]). Parallel ROOT chains above one pick are legitimate
 /// unordered siblings (found by this very assert on its first corpus run): with nothing above
 /// them, their relative order is not defined by topology — the collapse orders them like the
 /// passive set (by name).
@@ -118,17 +115,17 @@ pub(crate) fn debug_assert_positions_total(graph: &EditorGraph) {
         let Some(stored) = graph.position_of(node) else {
             continue;
         };
-        let approach = ref_approach(graph, node);
-        if approach.is_empty() {
+        let entering = edges_through(graph, node);
+        if entering.is_empty() {
             continue;
         }
         let pick = resolve_to_pick(graph, stored.on);
         let rank = ref_depth(graph, node);
-        if let Some(previous) = seen.insert((pick, approach.clone(), rank), node) {
+        if let Some(previous) = seen.insert((pick, entering.clone(), rank), node) {
             debug_assert!(
                 false,
                 "reference nodes {previous} and {node} collide at position \
-                 (pick {pick:?}, approach {approach:?}, rank {rank})"
+                 (pick {pick:?}, entering {entering:?}, rank {rank})"
             );
         }
     }
@@ -172,16 +169,16 @@ fn debug_assert_below_wellformed(graph: &EditorGraph) {
 }
 
 /// The references the node-era traversal from `start` would have walked through, given the
-/// PICK set it reached: a chain is entered when one of its legs was visited (the edge from
-/// leg to chain top), and when `start` is itself a reference, it and its chain below count.
+/// PICK set it reached: a chain is entered when one of its edges was visited (the edge from
+/// edge to chain top), and when `start` is itself a reference, it and its chain below count.
 pub(crate) fn refs_reachable_with(
     graph: &EditorGraph,
     start: EditorGraphIndex,
     picks: &std::collections::HashSet<EditorGraphIndex>,
 ) -> Vec<EditorGraphIndex> {
-    // Reached commits by ID as well as node: a graph can hold one commit twice (a stack lane
-    // and a target lane), and the node era's shared reference nodes made reachability
-    // commit-equivalent across such lanes.
+    // Reached commits by ID as well as node: a graph can hold one commit twice (a stack chain
+    // and a target chain), and the node era's shared reference nodes made reachability
+    // commit-equivalent across such chains.
     let reached_ids: std::collections::HashSet<gix::ObjectId> = picks
         .iter()
         .filter_map(|node| graph.commit_id(*node))
@@ -204,33 +201,33 @@ pub(crate) fn refs_reachable_with(
     out
 }
 
-/// A chain about to be entered by a new leg, captured BEFORE the leg's edge exists — while
+/// A chain about to be entered by a new edge, captured BEFORE that edge exists — while
 /// the store is still consistent — so [`apply_chain_join`] never reads a half-updated store.
 pub(crate) struct ChainJoin {
     /// The joining members: the reference and the chain-mates its below-chain rests on. Root
-    /// chains (empty approach) at one pick are distinct siblings, so only the reference
+    /// chains (no entering edges) at one pick are distinct siblings, so only the reference
     /// itself joins.
     members: Vec<(EditorGraphIndex, RefPosition)>,
-    /// The chain's shared approach at capture time.
-    approach: Vec<(EditorGraphIndex, usize)>,
+    /// The edges entering the chain at capture time.
+    entering: Vec<(EditorGraphIndex, usize)>,
 }
 
-/// Capture `ref_node`'s chain for a coming join — call BEFORE adding the joining leg's edge.
+/// Capture `ref_node`'s chain for a coming join — call BEFORE the joining edge is added.
 pub(crate) fn prepare_chain_join(graph: &EditorGraph, ref_node: EditorGraphIndex) -> ChainJoin {
     let Some(stored) = graph.position_of(ref_node) else {
         return ChainJoin {
             members: Vec::new(),
-            approach: Vec::new(),
+            entering: Vec::new(),
         };
     };
     let is_root = graph
-        .lane_of(ref_node)
-        .is_some_and(|lane| lane.carry == LaneCarry::None);
+        .chain_of(ref_node)
+        .is_some_and(|chain| chain.carry == ChainCarry::None);
     let members = if is_root {
         vec![(ref_node, stored.clone())]
     } else {
         // The reference plus the chain-mates underneath it: walk the below-chain, keeping
-        // members of this chain (the physical stack may pass through other lanes' refs).
+        // members of this chain (the physical stack may pass through other chains' refs).
         let chain = chain_members(graph, ref_node);
         let mut members = vec![(ref_node, stored.clone())];
         let mut cursor = stored.below;
@@ -247,36 +244,36 @@ pub(crate) fn prepare_chain_join(graph: &EditorGraph, ref_node: EditorGraphIndex
     };
     ChainJoin {
         members,
-        approach: ref_approach(graph, ref_node),
+        entering: edges_through(graph, ref_node),
     }
 }
 
-/// The new `leg` enters the captured chain: every member gains it in its approach, classified
-/// against the pick's now-complete legs — call right AFTER the leg's edge is added. AllLegs
-/// stays AllLegs; a Lane gains the slot; a Root descends.
+/// The new `edge` enters the captured chain: every member gains it among its entering edges,
+/// classified against the pick's now-complete edges — call right AFTER the edge is added. An
+/// `All` chain stays `All`; an `Edges` chain gains the edge; a Root descends.
 pub(crate) fn apply_chain_join(
     graph: &mut EditorGraph,
     join: &ChainJoin,
-    leg: (EditorGraphIndex, usize),
+    edge: (EditorGraphIndex, usize),
 ) {
     for (node, member) in &join.members {
-        let mut approach = join.approach.clone();
-        if !approach.contains(&leg) {
-            approach.push(leg);
+        let mut entering = join.entering.clone();
+        if !entering.contains(&edge) {
+            entering.push(edge);
         }
-        let ambiguous = member.ambiguous || approach.len() > 1;
-        graph.set_position(*node, member.on, &approach, ambiguous, member.below);
+        let ambiguous = member.ambiguous || entering.len() > 1;
+        graph.set_position(*node, member.on, &entering, ambiguous, member.below);
     }
 }
 
 /// Move every reference resolving to `from_pick` onto `to_pick`.
 ///
-/// With `reclassify` false the kind is PRESERVED (an `AllLegs` chain top follows onto `to_pick`
-/// and derives its legs there — the bridged leg set a deletion's re-point restores, robust to the
-/// reconnect renumbering the leg's slot). With `reclassify` true the ref's current derived legs
-/// are re-classified against `to_pick`'s legs, so a ref sliding onto a dup-parent MERGE base splits
-/// into the `Lane` its leg occupies. `ambiguous` is preserved. NOTE: preserve-vs-reclassify is
-/// per-situation, not cleanly per-caller — each call site picks based on whether the leg set
+/// With `reclassify` false the kind is PRESERVED (an `All` chain top follows onto `to_pick`
+/// and derives its edges there — the bridged edge set a deletion's re-point restores, robust to the
+/// reconnect renumbering the edge's slot). With `reclassify` true the ref's current derived edges
+/// are re-classified against `to_pick`'s edges, so a ref sliding onto a dup-parent MERGE base splits
+/// into the `Edges` chain its edge occupies. `ambiguous` is preserved. NOTE: preserve-vs-reclassify is
+/// per-situation, not cleanly per-caller — each call site picks based on whether the edge set
 /// should survive the move or be re-derived at the destination.
 pub(crate) fn reposition_refs(
     graph: &mut EditorGraph,
@@ -292,8 +289,8 @@ pub(crate) fn reposition_refs(
         .collect();
     for (node, stored) in moves {
         if reclassify {
-            let approach = ref_approach(graph, node);
-            graph.set_position(node, to_pick, &approach, stored.ambiguous, stored.below);
+            let entering = edges_through(graph, node);
+            graph.set_position(node, to_pick, &entering, stored.ambiguous, stored.below);
         } else {
             graph.rekey_position(node, to_pick);
         }
@@ -301,7 +298,7 @@ pub(crate) fn reposition_refs(
 }
 
 /// The members of `ref_node`'s chain — every reference with the same resolved pick and the
-/// same (derived) approach — with their stored positions.
+/// same (derived) entering edges — with their stored positions.
 pub(crate) fn chain_members(
     graph: &EditorGraph,
     ref_node: EditorGraphIndex,
@@ -313,26 +310,25 @@ pub(crate) fn chain_members(
         return vec![];
     };
     let pick = resolve_to_pick(graph, stored.on);
-    let approach = ref_approach(graph, ref_node);
+    let entering = edges_through(graph, ref_node);
     graph
         .positioned_refs()
         .filter_map(|(node, other)| {
-            (ref_approach(graph, node) == approach && resolve_to_pick(graph, other.on) == pick)
+            (edges_through(graph, node) == entering && resolve_to_pick(graph, other.on) == pick)
                 .then(|| (node, other.clone()))
         })
         .collect()
 }
 
-/// The legs a co-located chain on `pick` is approached by: the pick edges pointing at it,
-/// as `(source, parent-slot)` pairs, sorted. Every reference co-located on one pick shares
-/// this approach — it is the chain's single entry, replicated across members so the renderer can
-/// group them by `(pick, approach)` and order them by below-chain depth.
-pub(crate) fn legs_into_pick(
+/// A pick's incoming edges — its children's parent edges pointing at it, as
+/// `(child, parent-slot)` pairs, sorted. The chains on the pick divide these among
+/// themselves (their [`ChainCarry`]); [`edges_through`] reads one chain's share.
+pub(crate) fn edges_into(
     graph: &EditorGraph,
     pick: EditorGraphIndex,
 ) -> Vec<(EditorGraphIndex, usize)> {
     graph
-        .incoming_legs(pick)
+        .incoming_edges(pick)
         .into_iter()
         .filter(|&(child, _)| graph.is_pick(child))
         .collect()

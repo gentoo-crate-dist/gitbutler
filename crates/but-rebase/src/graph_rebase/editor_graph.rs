@@ -36,14 +36,14 @@ impl std::fmt::Display for EditorGraphIndex {
     }
 }
 
-/// One incoming child leg of a pick, named POSITIONALLY as `(source pick, parent-slot)`.
-/// Lanes state legs by this name so a leg removed and re-created at the same coordinates is
-/// the SAME statement — see [`LaneRec::legs`].
-pub(crate) type Leg = (EditorGraphIndex, usize);
+/// One incoming child edge of a pick, named POSITIONALLY as `(source pick, parent-slot)`.
+/// Chains state edges by this name, so an edge removed and re-created at the same coordinates is
+/// the SAME statement — see [`ChainRec::edges`].
+pub(crate) type Edge = (EditorGraphIndex, usize);
 
 /// Where a reference sits, stored explicitly: references are POSITIONS, not topology. The
-/// approach legs live in the reference's LANE (see [`EditorGraph::lane_of`]), not here.
-/// Derived reads live in `positions`: `ref_depth` (rank), `ref_approach` (legs),
+/// edges entering through it live in the reference's CHAIN (see [`EditorGraph::chain_of`]), not here.
+/// Derived reads live in `positions`: `ref_depth` (rank), `edges_through` (entering edges),
 /// `resolve_to_pick` (the node, followed through tombstones).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RefPosition {
@@ -54,9 +54,9 @@ pub(crate) struct RefPosition {
     /// Rank is DERIVED: a reference's depth is the length of its below-chain
     /// (`positions::ref_depth`).
     pub below: Option<EditorGraphIndex>,
-    /// The entry into this position converged — more than one thing (legs and/or refs stacked
-    /// above) met here (a merge). A creation-time signal distinct from `approach.len() > 1` (a position
-    /// can converge yet resolve to a single leg), so it is stored and PRESERVED, not re-derived.
+    /// The entry into this position converged — more than one thing (edges and/or refs stacked
+    /// above) met here (a merge). A creation-time signal distinct from `edges.len() > 1` (a position
+    /// can converge yet resolve to a single edge), so it is stored and PRESERVED, not re-derived.
     pub ambiguous: bool,
 }
 
@@ -136,33 +136,33 @@ impl Default for PickSettings {
     }
 }
 
-/// How much of its node's incoming legs a lane carries.
+/// How much of its node's incoming edges a chain carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum LaneCarry {
-    /// Nothing descends into this lane (a root chain: remote above a tip, empty top).
+pub(crate) enum ChainCarry {
+    /// Nothing descends into this chain (a root chain: remote above a tip, empty top).
     None,
-    /// Every leg into the node descends through this lane (a plain chain, or a shared
-    /// chain all merge lanes converge on).
+    /// Every edge into the node descends through this chain (a plain chain, or a shared
+    /// chain all merge chains converge on).
     All,
-    /// This lane carries exactly the legs its [`LaneRec::legs`] statement names — one lane
+    /// This chain carries exactly the edges its [`ChainRec::edges`] statement names — one chain
     /// of a merge.
-    Count(usize),
+    Edges,
 }
 
-/// One lane above a stored node: the references sharing an approach at one position.
+/// One chain above a stored node: the references sharing the same entering edges at one position.
 /// Membership only — order among members stays the below-chain's job.
 #[derive(Debug, Clone)]
-pub(crate) struct LaneRec {
-    /// The reference nodes in this lane, unordered (order by below-chain depth to read).
+pub(crate) struct ChainRec {
+    /// The reference nodes in this chain, unordered (order by below-chain depth to read).
     pub members: Vec<EditorGraphIndex>,
-    /// How much of the node's legs this lane carries.
-    pub carry: LaneCarry,
-    /// The legs this lane STATES it carries (`Count` lanes only). Keyed by the full
-    /// `(source-pick, parent-slot)` leg: two distinct sources can feed one node at the
+    /// How much of the node's edges this chain carries.
+    pub carry: ChainCarry,
+    /// The edges this chain STATES it carries (`Edges` chains only). Keyed by the full
+    /// `(source-pick, parent-slot)` edge: two distinct sources can feed one node at the
     /// same slot (and one source at two slots), so both coordinates are needed. Read
-    /// filtered against the node's LIVE legs, so a stale entry is inert — and reclaims
-    /// its leg by itself when surgery revives the same coordinates.
-    pub legs: Vec<Leg>,
+    /// filtered against the node's LIVE edges, so a stale entry is inert — and reclaims
+    /// its edge by itself when surgery revives the same coordinates.
+    pub edges: Vec<Edge>,
 }
 
 /// The editor's commit graph: a [`but_graph::CommitGraph`] arena where PICKS carry ordered
@@ -179,11 +179,11 @@ pub(crate) struct EditorGraph {
     /// Each node's pick options, parallel to the arena.
     settings: Vec<PickSettings>,
     refs: Vec<RefRecord>,
-    /// THE approach store: lane membership per STORED (unresolved) `on` value. Which legs
+    /// THE entering-edge store: chain membership per STORED (unresolved) `on` value. Which edges
     /// descend into a reference's position lives here and only here — authored by
-    /// [`Self::set_position`]/[`Self::join_lane_of`], carried by [`Self::rekey_position`],
-    /// renamed by [`Self::rename_legs`], read via `positions::ref_approach`.
-    lanes: HashMap<EditorGraphIndex, Vec<LaneRec>>,
+    /// [`Self::set_position`]/[`Self::join_chain_of`], carried by [`Self::rekey_position`],
+    /// renamed by [`Self::rename_edges`], read via `positions::edges_through`.
+    chains: HashMap<EditorGraphIndex, Vec<ChainRec>>,
 }
 
 impl EditorGraph {
@@ -197,7 +197,7 @@ impl EditorGraph {
             arena,
             settings,
             refs: Vec::new(),
-            lanes: HashMap::new(),
+            chains: HashMap::new(),
         }
     }
 
@@ -410,41 +410,42 @@ impl EditorGraph {
         }
     }
 
-    /// Author a FRESH position for `node`: `approach` is the lane intent, classified against
-    /// `on`'s CURRENT legs — empty opens (or joins) the root lane, the whole live set the
-    /// shared `All` lane, any other set a `Count` lane stating exactly those legs. Only
-    /// correct when the node's legs are already complete — never use to re-place an
+    /// Author a FRESH position for `node`: `entering` is the chain intent — the edges meant to
+    /// enter through it — classified against
+    /// `on`'s CURRENT edges — empty opens (or joins) the root chain, the whole live set the
+    /// shared `All` chain, any other set a `Count` chain stating exactly those edges. Only
+    /// correct when the node's edges are already complete — never use to re-place an
     /// existing position wholesale.
     pub(crate) fn set_position(
         &mut self,
         node: EditorGraphIndex,
         on: EditorGraphIndex,
-        approach: &[(EditorGraphIndex, usize)],
+        entering: &[Edge],
         ambiguous: bool,
         below: Option<EditorGraphIndex>,
     ) {
         let live = match crate::graph_rebase::positions::resolve_to_pick(self, on) {
-            Some(pick) => crate::graph_rebase::positions::legs_into_pick(self, pick),
+            Some(pick) => crate::graph_rebase::positions::edges_into(self, pick),
             None => Vec::new(),
         };
-        let (carry, legs) = if approach.is_empty() {
-            (LaneCarry::None, Vec::new())
+        let (carry, edges) = if entering.is_empty() {
+            (ChainCarry::None, Vec::new())
         } else {
-            let approach_set: HashSet<_> = approach.iter().copied().collect();
+            let edge_set: HashSet<_> = entering.iter().copied().collect();
             let live_set: HashSet<_> = live.iter().copied().collect();
-            if approach_set == live_set {
-                (LaneCarry::All, Vec::new())
+            if edge_set == live_set {
+                (ChainCarry::All, Vec::new())
             } else {
-                let mut legs = approach.to_vec();
-                legs.sort_unstable();
-                legs.dedup();
-                (LaneCarry::Count(legs.len()), legs)
+                let mut edges = entering.to_vec();
+                edges.sort_unstable();
+                edges.dedup();
+                (ChainCarry::Edges, edges)
             }
         };
         if let Some(previous) = self.position_of(node) {
-            self.lane_remove(node, previous.on);
+            self.chain_remove(node, previous.on);
         }
-        self.lane_insert(node, on, carry, legs);
+        self.chain_insert(node, on, carry, edges);
         *self.position_slot(node) = Some(RefPosition {
             on,
             ambiguous,
@@ -452,9 +453,9 @@ impl EditorGraph {
         });
     }
 
-    /// Join `node` into the lane CONTAINING `mate` — direct membership, not legs-equality —
+    /// Join `node` into the chain CONTAINING `mate` — direct membership, not edges-equality —
     /// sitting on `below`, copying the mate's `on` and ambiguity.
-    pub(crate) fn join_lane_of(
+    pub(crate) fn join_chain_of(
         &mut self,
         node: EditorGraphIndex,
         mate: EditorGraphIndex,
@@ -464,19 +465,19 @@ impl EditorGraph {
             return;
         };
         if let Some(previous) = self.position_of(node) {
-            self.lane_remove(node, previous.on);
+            self.chain_remove(node, previous.on);
         }
         let joined = self
-            .lanes
+            .chains
             .entry(m.on)
             .or_default()
             .iter_mut()
-            .find(|lane| lane.members.contains(&mate))
-            .map(|lane| lane.members.push(node))
+            .find(|chain| chain.members.contains(&mate))
+            .map(|chain| chain.members.push(node))
             .is_some();
-        debug_assert!(joined, "positioned mate {mate} must own a lane");
+        debug_assert!(joined, "positioned mate {mate} must own a chain");
         if !joined {
-            self.lane_insert(node, m.on, LaneCarry::All, Vec::new());
+            self.chain_insert(node, m.on, ChainCarry::All, Vec::new());
         }
         *self.position_slot(node) = Some(RefPosition {
             on: m.on,
@@ -485,8 +486,8 @@ impl EditorGraph {
         });
     }
 
-    /// Re-key `node`'s position onto `onto`, carrying its CURRENT lane record — the
-    /// carry and legs as maintained through edge surgery. Below and ambiguity are preserved.
+    /// Re-key `node`'s position onto `onto`, carrying its CURRENT chain record — the
+    /// carry and edges as maintained through edge surgery. Below and ambiguity are preserved.
     pub(crate) fn rekey_position(&mut self, node: EditorGraphIndex, onto: EditorGraphIndex) {
         let Some(stored) = self.position_of(node) else {
             return;
@@ -494,18 +495,18 @@ impl EditorGraph {
         if stored.on == onto {
             return;
         }
-        let lane_data = self.lanes.get(&stored.on).and_then(|lanes| {
-            lanes
+        let chain_data = self.chains.get(&stored.on).and_then(|chains| {
+            chains
                 .iter()
-                .find(|lane| lane.members.contains(&node))
-                .map(|lane| (lane.carry.clone(), lane.legs.clone()))
+                .find(|chain| chain.members.contains(&node))
+                .map(|chain| (chain.carry.clone(), chain.edges.clone()))
         });
-        self.lane_remove(node, stored.on);
-        match lane_data {
-            Some((carry, legs)) => self.lane_insert(node, onto, carry, legs),
+        self.chain_remove(node, stored.on);
+        match chain_data {
+            Some((carry, edges)) => self.chain_insert(node, onto, carry, edges),
             None => {
-                debug_assert!(false, "positioned node {node} must own a lane");
-                self.lane_insert(node, onto, LaneCarry::All, Vec::new());
+                debug_assert!(false, "positioned node {node} must own a chain");
+                self.chain_insert(node, onto, ChainCarry::All, Vec::new());
             }
         }
         if let Some(a) = self.position_slot(node).as_mut() {
@@ -513,7 +514,7 @@ impl EditorGraph {
         }
     }
 
-    /// Re-hang `node` onto `below` — an adjacency statement only; `on` and lane
+    /// Re-hang `node` onto `below` — an adjacency statement only; `on` and chain
     /// membership are untouched.
     pub(crate) fn set_below(&mut self, node: EditorGraphIndex, below: Option<EditorGraphIndex>) {
         if let Some(stored) = self.position_slot(node).as_mut() {
@@ -522,7 +523,7 @@ impl EditorGraph {
     }
 
     /// Point a DEAD reference's retained position at `on` — the bare retention pointer
-    /// stale selectors normalize through. Lane membership, below, and ambiguity are dropped;
+    /// stale selectors normalize through. Chain membership, below, and ambiguity are dropped;
     /// live references re-place via the arrangement machinery instead.
     pub(crate) fn set_retained_position(&mut self, node: EditorGraphIndex, on: EditorGraphIndex) {
         debug_assert!(
@@ -530,7 +531,7 @@ impl EditorGraph {
             "retained positions belong to dead references"
         );
         if let Some(stored) = self.position_of(node) {
-            self.lane_remove(node, stored.on);
+            self.chain_remove(node, stored.on);
         }
         *self.position_slot(node) = Some(RefPosition {
             on,
@@ -539,59 +540,52 @@ impl EditorGraph {
         });
     }
 
-    fn lane_remove(&mut self, node: EditorGraphIndex, key: EditorGraphIndex) {
-        let Some(lanes) = self.lanes.get_mut(&key) else {
+    fn chain_remove(&mut self, node: EditorGraphIndex, key: EditorGraphIndex) {
+        let Some(chains) = self.chains.get_mut(&key) else {
             return;
         };
-        for lane in lanes.iter_mut() {
-            lane.members.retain(|&member| member != node);
+        for chain in chains.iter_mut() {
+            chain.members.retain(|&member| member != node);
         }
-        lanes.retain(|lane| !lane.members.is_empty());
-        if lanes.is_empty() {
-            self.lanes.remove(&key);
+        chains.retain(|chain| !chain.members.is_empty());
+        if chains.is_empty() {
+            self.chains.remove(&key);
         }
     }
 
-    fn lane_insert(
+    fn chain_insert(
         &mut self,
         node: EditorGraphIndex,
         key: EditorGraphIndex,
-        carry: LaneCarry,
-        legs: Vec<(EditorGraphIndex, usize)>,
+        carry: ChainCarry,
+        edges: Vec<(EditorGraphIndex, usize)>,
     ) {
-        let lanes = self.lanes.entry(key).or_default();
-        let existing = lanes.iter_mut().find(|lane| match carry {
-            // `Count` lanes are identified by their stated legs (same legs => same lane).
-            LaneCarry::Count(_) => matches!(lane.carry, LaneCarry::Count(_)) && lane.legs == legs,
-            // One `None` and one `All` lane per key.
-            _ => lane.carry == carry,
+        let chains = self.chains.entry(key).or_default();
+        let existing = chains.iter_mut().find(|chain| {
+            // `Edges` chains are identified by their stated edges (same edges => same chain);
+            // one `None` and one `All` chain per key.
+            chain.carry == carry && (carry != ChainCarry::Edges || chain.edges == edges)
         });
         match existing {
-            Some(lane) => lane.members.push(node),
-            None => lanes.push(LaneRec {
+            Some(chain) => chain.members.push(node),
+            None => chains.push(ChainRec {
                 members: vec![node],
                 carry,
-                legs,
+                edges,
             }),
         }
     }
 
-    /// The lane table: every positioned reference's approach statement, keyed by the STORED
-    /// (unresolved) `on` value.
-    pub(crate) fn lane_table(&self) -> &HashMap<EditorGraphIndex, Vec<LaneRec>> {
-        &self.lanes
-    }
-
-    /// The lane containing the reference at `node`, if it holds a position.
-    pub(crate) fn lane_of(&self, node: EditorGraphIndex) -> Option<&LaneRec> {
+    /// The chain containing the reference at `node`, if it holds a position.
+    pub(crate) fn chain_of(&self, node: EditorGraphIndex) -> Option<&ChainRec> {
         let stored = match node {
             EditorGraphIndex::Ref(i) => self.refs.get(i)?.position.as_ref()?,
             EditorGraphIndex::Node(_) => return None,
         };
-        self.lanes
+        self.chains
             .get(&stored.on)?
             .iter()
-            .find(|lane| lane.members.contains(&node))
+            .find(|chain| chain.members.contains(&node))
     }
 
     /// All positioned references — live AND dead — ascending by id.
@@ -606,30 +600,22 @@ impl EditorGraph {
         })
     }
 
-    /// The leg `old` is now called `new` — its slot renumbered (or re-sourced onto another
-    /// pick) by surgery: every lane that carried `old` carries `new` instead.
-    pub(crate) fn rename_leg(&mut self, old: Leg, new: Leg) {
-        self.rename_legs(&[(old, new)]);
-    }
-
-    /// Apply several leg renames SIMULTANEOUSLY: every lane leg is matched against the
+    /// Apply several edge renames SIMULTANEOUSLY: every chain edge is matched against the
     /// pre-rename names once, so shifting slots in a renumber can't collide mid-flight.
-    pub(crate) fn rename_legs(&mut self, renames: &[(Leg, Leg)]) {
-        for lanes in self.lanes.values_mut() {
-            for lane in lanes.iter_mut() {
+    /// Each renamed edge is `(old, new)` — a slot renumbered or re-sourced onto another pick.
+    pub(crate) fn rename_edges(&mut self, renames: &[(Edge, Edge)]) {
+        for chains in self.chains.values_mut() {
+            for chain in chains.iter_mut() {
                 let mut changed = false;
-                for leg in lane.legs.iter_mut() {
-                    if let Some((_, new)) = renames.iter().find(|(old, _)| old == leg) {
-                        *leg = *new;
+                for edge in chain.edges.iter_mut() {
+                    if let Some((_, new)) = renames.iter().find(|(old, _)| old == edge) {
+                        *edge = *new;
                         changed = true;
                     }
                 }
                 if changed {
-                    lane.legs.sort_unstable();
-                    lane.legs.dedup();
-                    if let LaneCarry::Count(_) = lane.carry {
-                        lane.carry = LaneCarry::Count(lane.legs.len());
-                    }
+                    chain.edges.sort_unstable();
+                    chain.edges.dedup();
                 }
             }
         }
@@ -692,20 +678,20 @@ impl EditorGraph {
         self.parents(node).len()
     }
 
-    /// Every parent-array entry naming `node`, as `(child, slot)` legs, sorted — the derived
+    /// Every parent-array entry naming `node`, as `(child, slot)` edges, sorted — the derived
     /// children read.
-    pub(crate) fn incoming_legs(&self, node: EditorGraphIndex) -> Vec<Leg> {
-        let mut legs = Vec::new();
+    pub(crate) fn incoming_edges(&self, node: EditorGraphIndex) -> Vec<Edge> {
+        let mut edges = Vec::new();
         for i in 0..self.arena.node_count() {
             let child = EditorGraphIndex::Node(i);
             for (slot, parent) in self.arena.parent_indices(i).into_iter().enumerate() {
                 if EditorGraphIndex::Node(parent) == node {
-                    legs.push((child, slot));
+                    edges.push((child, slot));
                 }
             }
         }
-        legs.sort_unstable();
-        legs
+        edges.sort_unstable();
+        edges
     }
 
     /// Append `parent` as `child`'s last parent slot; returns the slot.
@@ -731,7 +717,7 @@ impl EditorGraph {
         let len = self.parent_count(child);
         let slot = slot.min(len);
         let renames: Vec<_> = (slot..len).map(|s| ((child, s), (child, s + 1))).collect();
-        self.rename_legs(&renames);
+        self.rename_edges(&renames);
         self.update_parents(child, |parents| parents.insert(slot, parent));
         slot
     }
@@ -748,16 +734,16 @@ impl EditorGraph {
             return None;
         }
         let target = self.update_parents(child, |parents| parents.remove(slot));
-        self.retain_legs(|&leg| leg != (child, slot));
+        self.retain_edges(|&edge| edge != (child, slot));
         let renames: Vec<_> = (slot + 1..len)
             .map(|s| ((child, s), (child, s - 1)))
             .collect();
-        self.rename_legs(&renames);
+        self.rename_edges(&renames);
         Some(target)
     }
 
     /// Re-point `child`'s parent at `slot` onto `new_parent`. The slot — and so the
-    /// statement name — is untouched: chains stated on the leg follow it to its new target.
+    /// statement name — is untouched: chains stated on the edge follow it to its new target.
     pub(crate) fn replace_parent(
         &mut self,
         child: EditorGraphIndex,
@@ -781,7 +767,7 @@ impl EditorGraph {
         let parents = self.update_parents(from, std::mem::take);
         let renames: Vec<_> = (0..parents.len()).map(|s| ((from, s), (to, s))).collect();
         self.update_parents(to, |slot| *slot = parents);
-        self.rename_legs(&renames);
+        self.rename_edges(&renames);
     }
 
     /// Re-target every parent-array entry naming `from` onto `to`, slots preserved —
@@ -802,24 +788,18 @@ impl EditorGraph {
         }
     }
 
-    /// Empty `child`'s parent array, returning it. Lane statements naming the drained slots
+    /// Empty `child`'s parent array, returning it. Chain statements naming the drained slots
     /// are DELIBERATELY untouched: the caller re-states the orphaned names onto their new
     /// carrier itself (the below-insert path renames them onto the segment's parent-most).
     pub(crate) fn drain_parents(&mut self, child: EditorGraphIndex) -> Vec<EditorGraphIndex> {
         self.update_parents(child, std::mem::take)
     }
 
-    /// Drop every lane statement `keep` rejects, keeping `Count` carries consistent.
-    fn retain_legs(&mut self, keep: impl Fn(&Leg) -> bool) {
-        for lanes in self.lanes.values_mut() {
-            for lane in lanes.iter_mut() {
-                let before = lane.legs.len();
-                lane.legs.retain(&keep);
-                if lane.legs.len() != before
-                    && let LaneCarry::Count(_) = lane.carry
-                {
-                    lane.carry = LaneCarry::Count(lane.legs.len());
-                }
+    /// Drop every chain statement `keep` rejects.
+    fn retain_edges(&mut self, keep: impl Fn(&Edge) -> bool) {
+        for chains in self.chains.values_mut() {
+            for chain in chains.iter_mut() {
+                chain.edges.retain(&keep);
             }
         }
     }

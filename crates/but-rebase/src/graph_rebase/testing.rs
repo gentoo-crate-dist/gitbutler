@@ -122,14 +122,14 @@ fn format_step(step: &Step, title: Option<String>) -> String {
     }
 }
 
-/// The reference chains, grouped by their (pick, approach) position and ordered by depth —
+/// The reference chains, grouped by their (pick, entering-edges) position and ordered by depth —
 /// the render's view of positioned refs as rows.
 type ChainKey = (EditorGraphIndex, Vec<(EditorGraphIndex, usize)>);
 
 fn chains(graph: &EditorGraph) -> HashMap<ChainKey, Vec<EditorGraphIndex>> {
     let mut out: HashMap<_, Vec<(usize, EditorGraphIndex)>> = HashMap::new();
     for (node, stored) in graph.positioned_refs() {
-        out.entry((stored.on, positions::ref_approach(graph, node)))
+        out.entry((stored.on, positions::edges_through(graph, node)))
             .or_default()
             .push((positions::ref_depth(graph, node), node));
     }
@@ -157,10 +157,10 @@ fn find_heads(graph: &EditorGraph) -> Vec<EditorGraphIndex> {
         .chain(graph.ref_indices())
         .filter(|idx| match graph.position_of(*idx) {
             Some(stored) => {
-                let approach = positions::ref_approach(graph, *idx);
-                approach.is_empty()
+                let entering = positions::edges_through(graph, *idx);
+                entering.is_empty()
                     && chains
-                        .get(&(stored.on, approach))
+                        .get(&(stored.on, entering))
                         .and_then(|members| members.last())
                         == Some(idx)
             }
@@ -179,7 +179,7 @@ fn get_sorted_parents(graph: &EditorGraph, node: EditorGraphIndex) -> Vec<Editor
     let chains = chains(graph);
     if let Some(stored) = graph.position_of(node) {
         let chain = chains
-            .get(&(stored.on, positions::ref_approach(graph, node)))
+            .get(&(stored.on, positions::edges_through(graph, node)))
             .map(Vec::as_slice)
             .unwrap_or_default();
         let below = chain
@@ -198,7 +198,7 @@ fn get_sorted_parents(graph: &EditorGraph, node: EditorGraphIndex) -> Vec<Editor
         .map(|(order, target)| {
             chains
                 .iter()
-                .find(|((pick, approach), _)| *pick == target && approach.contains(&(node, order)))
+                .find(|((pick, entering), _)| *pick == target && entering.contains(&(node, order)))
                 .and_then(|(_, chain)| chain.last().copied())
                 .unwrap_or(target)
         })
@@ -307,7 +307,7 @@ where
 {
     let mut heads = heads.to_vec();
     // Row-view tops without a rendered child inside the subgraph — e.g. reference chains
-    // positioned above a stack's head pick, approached only from outside — are heads too.
+    // positioned above a stack's head pick, entered only from outside — are heads too.
     let mut in_degree: HashMap<EditorGraphIndex, usize> = nodes.iter().map(|&n| (n, 0)).collect();
     for &n in nodes {
         for parent in get_sorted_parents(graph, n) {
@@ -557,8 +557,8 @@ mod tests {
     }
 
     #[test]
-    fn nested_merge_first_leg_forks_into_three() {
-        // First leg of a 2-way merge forks into 3:
+    fn nested_merge_first_side_forks_into_three() {
+        // First edge of a 2-way merge forks into 3:
         //       M
         //      / \
         //     F   B
@@ -966,7 +966,7 @@ mod tests {
         // C -> shared
         add_edge(&mut graph, c, shared, 0);
 
-        // D forks to E, F, shared (shared is also reached approach C)
+        // D forks to E, F, shared (shared is also reached via C)
         add_edge(&mut graph, d, e, 0);
         add_edge(&mut graph, d, f, 1);
         add_edge(&mut graph, d, shared, 2);

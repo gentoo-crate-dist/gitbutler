@@ -61,13 +61,7 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
         }
 
         // The rank map is the sole source of truth for deterministic parent-before-child ordering.
-        selected.sort_by_key(|commit| {
-            let rank = commit_graph_rank
-                .get(&commit.id)
-                .copied()
-                .unwrap_or(usize::MAX);
-            (rank, commit.input_order)
-        });
+        selected.sort_by_key(|commit| (commit_graph_rank[&commit.id], commit.input_order));
 
         Ok(selected.into_iter().map(|s| s.selector).collect())
     }

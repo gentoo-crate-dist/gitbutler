@@ -14,13 +14,12 @@ use crate::graph_rebase::{Checkout, MaterializeOutcome, Pick, Step, SuccessfulRe
 impl<'ws, 'graph, M: RefMetadata> SuccessfulRebase<'ws, 'graph, M> {
     /// Materializes a history rewrite
     pub fn materialize(mut self) -> Result<MaterializeOutcome<'ws, 'graph, M>> {
-        let repo = self.repo.clone();
         if let Some(memory) = self.repo.objects.take_object_memory() {
-            memory.persist(self.repo)?;
+            memory.persist(&self.repo)?;
         }
 
         let mut head_reference_update = None;
-        for checkout in self.checkouts {
+        for checkout in std::mem::take(&mut self.checkouts) {
             match checkout {
                 Checkout::Head {
                     selector,
@@ -49,7 +48,7 @@ impl<'ws, 'graph, M: RefMetadata> SuccessfulRebase<'ws, 'graph, M> {
                     // commit mapping), perform a safe checkout.
                     safe_checkout_from_head(
                         new_head,
-                        &repo,
+                        &self.repo,
                         Options {
                             skip_head_update: true,
                             merge_base_override,
@@ -60,9 +59,9 @@ impl<'ws, 'graph, M: RefMetadata> SuccessfulRebase<'ws, 'graph, M> {
             }
         }
 
-        let mut ref_edits = self.ref_edits.clone();
+        let mut ref_edits = std::mem::take(&mut self.ref_edits);
         if let Some(refname) = head_reference_update
-            && repo.head_name()?.as_ref() != Some(&refname)
+            && self.repo.head_name()?.as_ref() != Some(&refname)
         {
             let ref_short_name = refname.shorten().to_owned();
             ref_edits.push(RefEdit {
@@ -83,16 +82,7 @@ impl<'ws, 'graph, M: RefMetadata> SuccessfulRebase<'ws, 'graph, M> {
                 deref: false,
             });
         }
-        repo.edit_references(ref_edits)?;
-
-        refresh_workspace_from_arena(&self.graph, self.workspace, &repo, &*self.meta)?;
-
-        Ok(MaterializeOutcome {
-            graph: self.graph,
-            history: self.history,
-            workspace: self.workspace,
-            meta: self.meta,
-        })
+        self.finish(ref_edits)
     }
 
     /// Materializes a rebase without performing a checkout.
@@ -111,14 +101,18 @@ impl<'ws, 'graph, M: RefMetadata> SuccessfulRebase<'ws, 'graph, M> {
     /// If I instead called [`Self::materialize`], the changes would instead be
     /// gone from disk.
     pub fn materialize_without_checkout(mut self) -> Result<MaterializeOutcome<'ws, 'graph, M>> {
-        let repo = self.repo.clone();
         if let Some(memory) = self.repo.objects.take_object_memory() {
-            memory.persist(self.repo)?;
+            memory.persist(&self.repo)?;
         }
 
-        repo.edit_references(self.ref_edits.clone())?;
+        let ref_edits = std::mem::take(&mut self.ref_edits);
+        self.finish(ref_edits)
+    }
 
-        refresh_workspace_from_arena(&self.graph, self.workspace, &repo, &*self.meta)?;
+    fn finish(self, ref_edits: Vec<RefEdit>) -> Result<MaterializeOutcome<'ws, 'graph, M>> {
+        self.repo.edit_references(ref_edits)?;
+
+        refresh_workspace_from_arena(&self.graph, self.workspace, &self.repo, &*self.meta)?;
 
         Ok(MaterializeOutcome {
             graph: self.graph,

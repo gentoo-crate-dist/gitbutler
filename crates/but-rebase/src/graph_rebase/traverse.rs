@@ -73,8 +73,7 @@ pub(crate) fn a_not_b(
     start: EditorGraphIndex,
     excluded: EditorGraphIndex,
 ) -> impl Iterator<Item = EditorGraphIndex> + '_ {
-    let excluded = reachable_from(graph, excluded).collect();
-    Traversal::new(graph, start, excluded)
+    all_until_optional_limit(graph, start, Some(excluded))
 }
 
 /// All steps in `start ^limit`, or everything reachable from `start` when there
@@ -119,24 +118,6 @@ impl<M: RefMetadata> Editor<'_, '_, M> {
             &picks,
         ));
         all
-    }
-
-    /// The rev-set `start ^excluded`, yielding selectors.
-    pub fn a_not_b(
-        &self,
-        start: impl ToSelector,
-        excluded: impl ToSelector,
-    ) -> Result<impl Iterator<Item = Selector> + '_> {
-        let start = start.to_selector(self)?.id;
-        let excluded = excluded.to_selector(self)?.id;
-        let excluded: std::collections::HashSet<EditorGraphIndex> =
-            self.reachable_ids(excluded).into_iter().collect();
-        let result: Vec<EditorGraphIndex> = self
-            .reachable_ids(start)
-            .into_iter()
-            .filter(|id| !excluded.contains(id))
-            .collect();
-        Ok(result.into_iter().map(|id| self.new_selector(id)))
     }
 
     /// How far `a` is ahead of and behind `b`, counted in commits.

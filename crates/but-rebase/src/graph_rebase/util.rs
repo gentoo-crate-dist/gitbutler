@@ -4,30 +4,22 @@ use std::collections::HashSet;
 
 use crate::graph_rebase::{EditorGraph, EditorGraphIndex};
 
-/// Find the parents of a given node that are commit - in correct parent
-/// ordering.
-///
-/// We do this via a pruned depth first search.
-pub(crate) fn collect_ordered_parents(
-    graph: &EditorGraph,
-    target: EditorGraphIndex,
-) -> Vec<EditorGraphIndex> {
-    ordered_commit_parents(graph, target)
-}
-
 /// Pruned depth-first search for `target`'s commit parents in parent order, descending through
 /// non-commit steps.
 ///
-/// A parent slot that carries a reference chain (the slot is a stored approach entry of a chain
+/// A parent slot that carries a reference chain (the slot is a stored edge entry of a chain
 /// positioned at its pick) yields to any plain slot resolving to the same pick, and only the
 /// first of several carrying slots survives — the same collapse the node-era search produced
 /// when a ref path and a direct path reached one pick. Plain duplicate slots are all kept
 /// (dup-parents workspace commits).
-fn ordered_commit_parents(graph: &EditorGraph, target: EditorGraphIndex) -> Vec<EditorGraphIndex> {
+pub(crate) fn collect_ordered_parents(
+    graph: &EditorGraph,
+    target: EditorGraphIndex,
+) -> Vec<EditorGraphIndex> {
     let carries_chain = |slot: usize, parent: EditorGraphIndex| {
         graph.is_pick(parent)
             && graph.positioned_refs().any(|(node, stored)| {
-                crate::graph_rebase::positions::ref_approach(graph, node).contains(&(target, slot))
+                crate::graph_rebase::positions::edges_through(graph, node).contains(&(target, slot))
                     && crate::graph_rebase::positions::resolve_to_pick(graph, stored.on)
                         == Some(parent)
             })

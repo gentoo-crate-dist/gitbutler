@@ -65,7 +65,7 @@ impl<'ws, 'meta, M: RefMetadata> Editor<'ws, 'meta, M> {
 /// Build the editor graph by ADOPTION: the carried [`but_graph::CommitGraph`] is cloned
 /// wholesale into the arena — full commit payloads (flags, refs, generation) survive, which
 /// the write-through put-back depends on — then normalized to editor shape (every parent
-/// slot present, the ws commit on its lane slots) and dressed with pick settings and the
+/// slot present, the ws commit on its stack slots) and dressed with pick settings and the
 /// reference positions derived from the segment graph.
 ///
 /// The derivation mirrors the retired segment walk's semantics exactly, on a throwaway IR:
@@ -173,7 +173,7 @@ fn create_native(
     }
 
     // Rank-ordered inter-segment edges onto each run's LAST node: real parents by their index
-    // in the source commit's parent array, commit-less legs after them in edge order, ranks
+    // in the source commit's parent array, commit-less edges after them in edge order, ranks
     // compacted by push order.
     let parents_by_commit: HashMap<gix::ObjectId, &[gix::ObjectId]> = commit_table
         .iter()
@@ -215,7 +215,7 @@ fn create_native(
     }
 
     // The fixup: flatten a commit's chain parents in slot order; on disagreement with the
-    // RAW parent list, rewire directly to present commits (chains lose their legs). The ws
+    // RAW parent list, rewire directly to present commits (chains lose their edges). The ws
     // commit and partially-traversed commits keep their segment wiring.
     let commit_ids: HashSet<gix::ObjectId> = commit_table.iter().map(|(id, _)| *id).collect();
     let flatten = |nodes: &[IrStep], parents: &[Vec<usize>], start: usize| {
@@ -255,7 +255,7 @@ fn create_native(
     }
 
     // Positions from the (post-fixup, pre-strip) topology: descend first-edges for `on` and
-    // below, ascend for the approach legs and the convergence signal.
+    // below, ascend for the entering edges and the convergence signal.
     let mut incoming: Vec<Vec<(usize, usize)>> = vec![Vec::new(); nodes.len()];
     for (child, slots) in parents.iter().enumerate() {
         for (slot, &parent) in slots.iter().enumerate() {
@@ -275,7 +275,7 @@ fn create_native(
         on: usize,
         below: Option<usize>,
         ambiguous: bool,
-        approach: Vec<(usize, usize)>,
+        entering: Vec<(usize, usize)>,
     }
     let mut positions = HashMap::<usize, DerivedPosition>::new();
     for &(ref_node, _) in &ref_nodes {
@@ -299,7 +299,7 @@ fn create_native(
             continue; // unborn: no stored position
         };
         let mut cursor = ref_node;
-        let mut approach = Vec::new();
+        let mut entering_edges = Vec::new();
         let mut ambiguous = false;
         for _ in 0..10_000 {
             let entering = &incoming[cursor];
@@ -310,7 +310,7 @@ fn create_native(
                 .collect();
             if !picks.is_empty() {
                 ambiguous = entering.len() > 1;
-                approach = picks;
+                entering_edges = picks;
                 break;
             }
             let mut others = entering.iter().filter(|&&(child, _)| !is_commit(child));
@@ -325,14 +325,14 @@ fn create_native(
                 on,
                 below,
                 ambiguous,
-                approach,
+                entering: entering_edges,
             },
         );
     }
 
     // The strip's slot compaction: resolve each commit's parent entries to commits (dropping
-    // unborn chains), record the vacated slots so the captured approach legs can be renamed,
-    // and keep the ws commit's resolved LANE slots (one per workspace lane, so empty lanes
+    // unborn chains), record the vacated slots so the captured entering edges can be renamed,
+    // and keep the ws commit's resolved STACK slots (one per stack, so empty stacks
     // over one base yield duplicate entries the real commit does not have).
     let resolve = |start: usize| -> Option<usize> {
         let mut cursor = start;
@@ -365,10 +365,10 @@ fn create_native(
         }
     }
     for position in positions.values_mut() {
-        for (leg_source, slot) in position.approach.iter_mut() {
+        for (edge_source, slot) in position.entering.iter_mut() {
             *slot -= dropped
                 .iter()
-                .filter(|(source, vacated)| source == leg_source && vacated < slot)
+                .filter(|(source, vacated)| source == edge_source && vacated < slot)
                 .count();
         }
     }
@@ -389,7 +389,7 @@ fn create_native(
 
     let mut arena = cg.clone();
     for (i, id) in cg.commit_ids().enumerate() {
-        // The ws commit takes its LANE slots from the derivation (dups and all); everything
+        // The ws commit takes its STACK slots from the derivation (dups and all); everything
         // else keeps the PRESENT parents in slot order — the same presence filter the old
         // segment walk's parent-fixup pass applied.
         if workspace_commit_id == Some(id) {
@@ -445,19 +445,19 @@ fn create_native(
             };
             ref_ixs[br]
         });
-        let mut legs = Vec::with_capacity(position.approach.len());
-        for &(child, slot) in &position.approach {
+        let mut edges = Vec::with_capacity(position.entering.len());
+        for &(child, slot) in &position.entering {
             let IrStep::Commit(c) = nodes[child] else {
-                unreachable!("approach legs come from commits");
+                unreachable!("entering edges come from commits");
             };
-            legs.push((commit_table[c].0, slot));
+            edges.push((commit_table[c].0, slot));
         }
-        legs.sort_unstable();
-        let approach = legs
+        edges.sort_unstable();
+        let entering = edges
             .into_iter()
             .map(|(id, slot)| Ok((node_of(id)?, slot)))
             .collect::<Result<Vec<_>>>()?;
-        editor_graph.set_position(ref_ixs[r], on, &approach, position.ambiguous, below);
+        editor_graph.set_position(ref_ixs[r], on, &entering, position.ambiguous, below);
     }
 
     let references = ref_table
