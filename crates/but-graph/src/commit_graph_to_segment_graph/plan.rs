@@ -24,18 +24,6 @@ pub(super) struct Float {
     pub(super) displaced_ref_name: Option<gix::refs::FullName>,
 }
 
-/// The managed chain NAME decisions, computed before any segment mutation happens (phase 2 of
-/// gather-then-build). Models the naming state the passes would see — materialization names,
-/// then the anon-owner renames of the remote/target/explicit-tip passes — and decides purely:
-///
-/// * which shared workspace-parent tips float their name up as an empty chain placeholder
-///   (`anonymize_shared_stack_tips`),
-/// * which anchors are DEMOTED to anonymous (a shared base at/below the bound, the lower-bound
-///   float) so their stacks' branches form their own chains (`insert_empty_branches`' demotions).
-///
-/// The group-naming decisions stay in `insert_empty_branches` for now: their "does this ref
-/// already name a segment" checks range over remote segments, which become plan data only when
-/// the remote passes are planned too.
 /// One same-commit group of a metadata stack list — the RefOrder unit. Groups appear in
 /// metadata order (top → bottom of the stack); a group's refs all point at `commit`.
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -91,6 +79,16 @@ pub(super) struct ChainPlan {
     pub(super) ref_order: Vec<Vec<RefGroup>>,
 }
 
+/// The managed chain NAME decisions, computed before any segment mutation happens (phase 2 of
+/// gather-then-build). Models the naming state the passes would see — materialization names,
+/// then the anon-owner renames of the remote/target/explicit-tip passes — and decides purely:
+///
+/// * which shared workspace-parent tips float their name up as an empty chain placeholder
+///   (`float_shared_stack_tips`),
+/// * which anchors are DEMOTED to anonymous (a shared base at/below the bound, the lower-bound
+///   float) so their stacks' branches form their own chains (`demote_shared_bases`),
+/// * the group naming and ref order `insert_empty_branches` consumes as data
+///   (`thread_ref_groups`).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn chain_plan<T: but_core::RefMetadata>(
     cg: &CommitGraph,
@@ -118,6 +116,111 @@ pub(super) fn chain_plan<T: but_core::RefMetadata>(
         ref_order: Vec::new(),
     };
     // The naming state as the chain passes will see it: materialization names first…
+    let mut name_of = materialization_names(
+        cg,
+        facts,
+        workspace_commit,
+        entrypoint,
+        entrypoint_ref,
+        remote_tracking,
+        meta,
+        target_ref,
+    );
+    plan.base_name_of = name_of.clone();
+    // …then the renames of the remote, untracked-remote, target, and explicit-tip passes, each
+    // modeled in pass order.
+    let mut remote_used = model_remote_renames(
+        cg,
+        facts,
+        &mut name_of,
+        &mut plan.renames,
+        remote_tracking,
+        stack_branches,
+        symbolic_remotes,
+    );
+    model_untracked_remotes(cg, facts, &name_of, remote_tracking, &mut remote_used);
+    model_target_rename(
+        cg,
+        facts,
+        &mut name_of,
+        &mut plan.renames,
+        target_ref,
+        &mut remote_used,
+    );
+    model_explicit_tip_renames(cg, facts, &mut name_of, &mut plan.renames);
+
+    if !managed {
+        plan.remote_used = remote_used;
+        return plan;
+    }
+
+    float_shared_stack_tips(
+        cg,
+        facts,
+        workspace_commit,
+        target,
+        stack_branches,
+        &mut name_of,
+        &mut plan.floats,
+    );
+
+    let Some(lists) = stack_branches else {
+        return plan;
+    };
+    let lists_per_commit = stack_lists_per_commit(cg, lists);
+    let at_or_below_bound: Option<IdSet> = ws_lower_bound.map(|lb| cg.ancestor_set(lb));
+    demote_shared_bases(
+        cg,
+        facts,
+        lists,
+        &lists_per_commit,
+        at_or_below_bound.as_ref(),
+        ws_lower_bound,
+        &mut name_of,
+        &mut plan.demoted,
+    );
+    let mut used = names_in_use(
+        cg,
+        facts,
+        &name_of,
+        &plan.floats,
+        &remote_used,
+        lists,
+        remote_tracking,
+        meta,
+        target_ref,
+        extra_target,
+    );
+    thread_ref_groups(
+        cg,
+        facts,
+        workspace_commit,
+        ws_lower_bound,
+        lists,
+        &lists_per_commit,
+        at_or_below_bound.as_ref(),
+        &mut name_of,
+        &mut used,
+        &remote_used,
+        &mut plan,
+    );
+    plan.remote_used = remote_used;
+    plan
+}
+
+/// The naming state as the chain passes will see it, seeded with every boundary tip's
+/// materialization name.
+#[allow(clippy::too_many_arguments)]
+fn materialization_names<T: but_core::RefMetadata>(
+    cg: &CommitGraph,
+    facts: &Facts,
+    workspace_commit: gix::ObjectId,
+    entrypoint: gix::ObjectId,
+    entrypoint_ref: Option<&gix::refs::FullName>,
+    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
+    meta: &T,
+    target_ref: Option<&gix::refs::FullName>,
+) -> IdMap<gix::refs::FullName> {
     let mut name_of: IdMap<gix::refs::FullName> = IdMap::default();
     for &tip in &facts.tips {
         if let Some(name) = materialize_tip_name(
@@ -134,11 +237,22 @@ pub(super) fn chain_plan<T: but_core::RefMetadata>(
             name_of.insert(tip, name);
         }
     }
-    plan.base_name_of = name_of.clone();
-    // …then the anon-owner renames of `add_remote_segments` (a remote pointing BEHIND/at an
-    // anonymous in-set segment names it), in materialization order like the pass. Every remote
-    // name the pass consumes — a rename, an empty root, an ahead region — is tracked, because
-    // the target block only runs when nothing already used the target ref.
+    name_of
+}
+
+/// The anon-owner renames of `add_remote_segments` (a remote pointing BEHIND/at an anonymous
+/// in-set segment names it), in materialization order like the pass. Every remote name the pass
+/// consumes — a rename, an empty root, an ahead region — is tracked, because the target block
+/// only runs when nothing already used the target ref.
+fn model_remote_renames(
+    cg: &CommitGraph,
+    facts: &Facts,
+    name_of: &mut IdMap<gix::refs::FullName>,
+    renames: &mut IdMap<(gix::refs::FullName, gix::ObjectId)>,
+    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
+    stack_branches: Option<&[Vec<gix::refs::FullName>]>,
+    symbolic_remotes: &[String],
+) -> HashSet<gix::refs::FullName> {
     let in_play = |rt: &gix::refs::FullName| remote_name_in_play(rt, symbolic_remotes);
     let is_meta_stack_branch = |r: &gix::refs::FullName| {
         stack_branches
@@ -163,43 +277,61 @@ pub(super) fn chain_plan<T: but_core::RefMetadata>(
                 .unwrap_or(remote_tip);
             if let gix::hashtable::hash_map::Entry::Vacant(e) = name_of.entry(owner) {
                 e.insert(remote_ref.clone());
-                plan.renames.insert(owner, (remote_ref.clone(), remote_tip));
+                renames.insert(owner, (remote_ref.clone(), remote_tip));
             }
             remote_used.insert(remote_ref.clone());
         } else if in_play(remote_ref) && !is_meta_stack_branch(remote_ref) {
             remote_used.insert(remote_ref.clone());
         }
     }
-    // …the untracked-remote pass surfacing remotes whose local counterpart shares the commit…
-    {
-        let mut remote_refs: std::collections::BTreeSet<gix::refs::FullName> =
-            std::collections::BTreeSet::new();
-        for c in cg.commit_ids() {
-            for r in cg.refs_at(c) {
-                if r.as_ref().category() == Some(Category::RemoteBranch) {
-                    remote_refs.insert(r);
-                }
-            }
-        }
-        for r in remote_refs {
-            if remote_used.contains(&r) || name_of.values().any(|n| *n == r) {
-                continue;
-            }
-            let Some(tip) = cg.commit_by_ref(r.as_ref()) else {
-                continue;
-            };
-            if facts.in_set.contains(&tip)
-                && cg
-                    .refs_at(tip)
-                    .iter()
-                    .any(|l| remote_tracking.get(l) == Some(&r))
-            {
-                remote_used.insert(r);
+    remote_used
+}
+
+/// The untracked-remote pass surfacing remotes whose local counterpart shares the commit.
+fn model_untracked_remotes(
+    cg: &CommitGraph,
+    facts: &Facts,
+    name_of: &IdMap<gix::refs::FullName>,
+    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
+    remote_used: &mut HashSet<gix::refs::FullName>,
+) {
+    let mut remote_refs: std::collections::BTreeSet<gix::refs::FullName> =
+        std::collections::BTreeSet::new();
+    for c in cg.commit_ids() {
+        for r in cg.refs_at(c) {
+            if r.as_ref().category() == Some(Category::RemoteBranch) {
+                remote_refs.insert(r);
             }
         }
     }
-    // …the target pass naming an anonymous in-set owner after the target ref — only when
-    // nothing already used it…
+    for r in remote_refs {
+        if remote_used.contains(&r) || name_of.values().any(|n| *n == r) {
+            continue;
+        }
+        let Some(tip) = cg.commit_by_ref(r.as_ref()) else {
+            continue;
+        };
+        if facts.in_set.contains(&tip)
+            && cg
+                .refs_at(tip)
+                .iter()
+                .any(|l| remote_tracking.get(l) == Some(&r))
+        {
+            remote_used.insert(r);
+        }
+    }
+}
+
+/// The target pass naming an anonymous in-set owner after the target ref — only when nothing
+/// already used it.
+fn model_target_rename(
+    cg: &CommitGraph,
+    facts: &Facts,
+    name_of: &mut IdMap<gix::refs::FullName>,
+    renames: &mut IdMap<(gix::refs::FullName, gix::ObjectId)>,
+    target_ref: Option<&gix::refs::FullName>,
+    remote_used: &mut HashSet<gix::refs::FullName>,
+) {
     if let Some(tr) = target_ref
         && tr.as_ref().category() == Some(Category::RemoteBranch)
         && !remote_used.contains(tr)
@@ -210,12 +342,20 @@ pub(super) fn chain_plan<T: but_core::RefMetadata>(
             let owner = facts.owner_of.get(&tip).copied().unwrap_or(tip);
             if let gix::hashtable::hash_map::Entry::Vacant(e) = name_of.entry(owner) {
                 e.insert(tr.clone());
-                plan.renames.insert(owner, (tr.clone(), tip));
+                renames.insert(owner, (tr.clone(), tip));
             }
         }
         remote_used.insert(tr.clone());
     }
-    // …and the explicit-tip pass naming anonymous segments that START at a tip.
+}
+
+/// The explicit-tip pass naming anonymous segments that START at a tip.
+fn model_explicit_tip_renames(
+    cg: &CommitGraph,
+    facts: &Facts,
+    name_of: &mut IdMap<gix::refs::FullName>,
+    renames: &mut IdMap<(gix::refs::FullName, gix::ObjectId)>,
+) {
     for t in cg.traversal_tips.iter().filter(|_| cg.explicit_tips) {
         let Some(ref_name) = t.ref_name.clone() else {
             continue;
@@ -229,16 +369,24 @@ pub(super) fn chain_plan<T: but_core::RefMetadata>(
             && let gix::hashtable::hash_map::Entry::Vacant(e) = name_of.entry(t.id)
         {
             e.insert(ref_name.clone());
-            plan.renames.insert(t.id, (ref_name, t.id));
+            renames.insert(t.id, (ref_name, t.id));
         }
     }
+}
 
-    if !managed {
-        plan.remote_used = remote_used;
-        return plan;
-    }
-
-    // ── anonymize_shared_stack_tips: which workspace-parent tips float ──
+/// `anonymize_shared_stack_tips`: a workspace-parent tip whose commit another in-workspace
+/// commit builds on goes ANONYMOUS, and its name floats above as an empty chain placeholder —
+/// the unique metadata STACK branch when build-time disambiguation picked a non-stack ref
+/// (which then returns to the commit as a passive ref).
+fn float_shared_stack_tips(
+    cg: &CommitGraph,
+    facts: &Facts,
+    workspace_commit: gix::ObjectId,
+    target: Option<gix::ObjectId>,
+    stack_branches: Option<&[Vec<gix::refs::FullName>]>,
+    name_of: &mut IdMap<gix::refs::FullName>,
+    floats: &mut Vec<Float>,
+) {
     let is_stack_branch = |n: &gix::refs::FullName| {
         stack_branches
             .into_iter()
@@ -246,60 +394,60 @@ pub(super) fn chain_plan<T: but_core::RefMetadata>(
             .flatten()
             .any(|b| b == n)
     };
-    if facts.ws_is_managed_merge {
-        for parent in cg.parents(workspace_commit) {
-            // The target/base chain keeps its name even when other stacks depend on it.
-            if Some(parent) == target || !facts.boundaries.contains(&parent) {
-                continue;
-            }
-            let Some(current) = name_of.get(&parent).cloned() else {
-                continue;
-            };
-            // Shared iff some other IN-WORKSPACE commit's first parent is this tip.
-            let shared = facts.in_set.iter().any(|&c| {
-                c != workspace_commit
-                    && cg.first_parent(c) == Some(parent)
-                    && cg
-                        .node(c)
-                        .is_some_and(|n| n.commit.flags.contains(crate::CommitFlags::InWorkspace))
-            });
-            if !shared {
-                continue;
-            }
-            // When build-time disambiguation picked a NON-stack ref, float the unique metadata
-            // STACK branch instead and return the displaced name to the commit as a passive ref:
-            // an applied-but-empty stack must keep its own chain, or the projection's
-            // integration-prune swallows the whole stack with the shared base it would own.
-            let (float_name, displaced) = if is_stack_branch(&current) {
-                (current.clone(), None)
-            } else {
-                let mut stack_refs = cg
-                    .refs_at(parent)
-                    .into_iter()
-                    .filter(|r| is_plain_local_branch(r) && is_stack_branch(r));
-                match (stack_refs.next(), stack_refs.next()) {
-                    (Some(stack_ref), None)
-                        if !name_of.values().any(|n| *n == stack_ref)
-                            && !plan.floats.iter().any(|f| f.name == stack_ref) =>
-                    {
-                        (stack_ref, Some(current.clone()))
-                    }
-                    _ => (current.clone(), None),
-                }
-            };
-            name_of.remove(&parent);
-            plan.floats.push(Float {
-                tip: parent,
-                name: float_name,
-                displaced_ref_name: displaced,
-            });
-        }
+    if !facts.ws_is_managed_merge {
+        return;
     }
+    for parent in cg.parents(workspace_commit) {
+        // The target/base chain keeps its name even when other stacks depend on it.
+        if Some(parent) == target || !facts.boundaries.contains(&parent) {
+            continue;
+        }
+        let Some(current) = name_of.get(&parent).cloned() else {
+            continue;
+        };
+        // Shared iff some other IN-WORKSPACE commit's first parent is this tip.
+        let shared = facts.in_set.iter().any(|&c| {
+            c != workspace_commit
+                && cg.first_parent(c) == Some(parent)
+                && cg
+                    .node(c)
+                    .is_some_and(|n| n.commit.flags.contains(crate::CommitFlags::InWorkspace))
+        });
+        if !shared {
+            continue;
+        }
+        // When build-time disambiguation picked a NON-stack ref, float the unique metadata
+        // STACK branch instead and return the displaced name to the commit as a passive ref:
+        // an applied-but-empty stack must keep its own chain, or the projection's
+        // integration-prune swallows the whole stack with the shared base it would own.
+        let (float_name, displaced) = if is_stack_branch(&current) {
+            (current.clone(), None)
+        } else {
+            let mut stack_refs = cg
+                .refs_at(parent)
+                .into_iter()
+                .filter(|r| is_plain_local_branch(r) && is_stack_branch(r));
+            match (stack_refs.next(), stack_refs.next()) {
+                (Some(stack_ref), None)
+                    if !name_of.values().any(|n| *n == stack_ref)
+                        && !floats.iter().any(|f| f.name == stack_ref) =>
+                {
+                    (stack_ref, Some(current.clone()))
+                }
+                _ => (current.clone(), None),
+            }
+        };
+        name_of.remove(&parent);
+        floats.push(Float {
+            tip: parent,
+            name: float_name,
+            displaced_ref_name: displaced,
+        });
+    }
+}
 
-    // ── insert_empty_branches' demotions ──
-    let Some(lists) = stack_branches else {
-        return plan;
-    };
+/// How many metadata stack lists point (via any of their branches) at each commit.
+fn stack_lists_per_commit(cg: &CommitGraph, lists: &[Vec<gix::refs::FullName>]) -> IdMap<usize> {
     let mut lists_per_commit: IdMap<usize> = IdMap::default();
     for list in lists {
         let mut seen = HashSet::new();
@@ -311,14 +459,30 @@ pub(super) fn chain_plan<T: but_core::RefMetadata>(
             }
         }
     }
-    let at_or_below_bound: Option<IdSet> = ws_lower_bound.map(|lb| cg.ancestor_set(lb));
-    // A commit pointed at by branches of SEVERAL metadata stacks at/below the bound is a shared
-    // base: its segment stays anonymous and every stack's branches float above as their own chain.
-    for (&commit, &count) in &lists_per_commit {
+    lists_per_commit
+}
+
+/// `insert_empty_branches`' demotions. A commit pointed at by branches of SEVERAL metadata
+/// stacks at/below the bound is a shared base: its segment stays anonymous and every stack's
+/// branches float above as their own chain. The workspace LOWER BOUND is where independent
+/// stacks rest: an otherwise-unrepresented stack's branch pointing there floats as its own
+/// empty chain and the boundary segment stays anonymous.
+#[allow(clippy::too_many_arguments)]
+fn demote_shared_bases(
+    cg: &CommitGraph,
+    facts: &Facts,
+    lists: &[Vec<gix::refs::FullName>],
+    lists_per_commit: &IdMap<usize>,
+    at_or_below_bound: Option<&IdSet>,
+    ws_lower_bound: Option<gix::ObjectId>,
+    name_of: &mut IdMap<gix::refs::FullName>,
+    demoted: &mut IdSet,
+) {
+    for (&commit, &count) in lists_per_commit {
         if count <= 1 {
             continue;
         }
-        if let Some(below) = &at_or_below_bound
+        if let Some(below) = at_or_below_bound
             && !below.contains(&commit)
         {
             continue;
@@ -329,49 +493,67 @@ pub(super) fn chain_plan<T: but_core::RefMetadata>(
             .is_some_and(|n| lists.iter().flatten().any(|b| b == n))
         {
             name_of.remove(&anchor);
-            plan.demoted.insert(anchor);
+            demoted.insert(anchor);
         }
     }
-    // The workspace LOWER BOUND is where independent stacks rest: an otherwise-unrepresented
-    // stack's branch pointing there floats as its own empty chain and the boundary segment stays
-    // anonymous.
-    let floats_at_lower_bound = |list: &Vec<gix::refs::FullName>| -> bool {
-        let Some(lb) = ws_lower_bound else {
-            return false;
-        };
-        let mut at_lb = false;
-        for b in list {
-            match cg.commit_by_ref(b.as_ref()) {
-                Some(c) if c == lb => at_lb = true,
-                Some(c)
-                    if cg.node(c).is_some_and(|n| {
-                        !n.commit.flags.contains(crate::CommitFlags::Integrated)
-                    }) =>
-                {
-                    return false;
-                }
-                _ => {}
-            }
-        }
-        at_lb
-    };
     if let Some(lb) = ws_lower_bound
         && facts.boundaries.contains(&lb)
         && name_of.get(&lb).is_some_and(|n| {
             lists
                 .iter()
-                .any(|l| l.contains(n) && floats_at_lower_bound(l))
+                .any(|l| l.contains(n) && floats_at_lower_bound(cg, ws_lower_bound, l))
         })
     {
         name_of.remove(&lb);
-        plan.demoted.insert(lb);
+        demoted.insert(lb);
     }
+}
 
-    // ── Group naming: the pass's "does this ref already name a segment" ranges over every
-    // segment, so model the full set of names in use by insert_empty_branches time — chain names
-    // plus everything the remote/target/tip/advanced passes will have created. ──
+/// Does this metadata stack list rest at the workspace lower bound — some branch at the bound
+/// itself and every other resolved branch integrated?
+fn floats_at_lower_bound(
+    cg: &CommitGraph,
+    ws_lower_bound: Option<gix::ObjectId>,
+    list: &[gix::refs::FullName],
+) -> bool {
+    let Some(lb) = ws_lower_bound else {
+        return false;
+    };
+    let mut at_lb = false;
+    for b in list {
+        match cg.commit_by_ref(b.as_ref()) {
+            Some(c) if c == lb => at_lb = true,
+            Some(c)
+                if cg
+                    .node(c)
+                    .is_some_and(|n| !n.commit.flags.contains(crate::CommitFlags::Integrated)) =>
+            {
+                return false;
+            }
+            _ => {}
+        }
+    }
+    at_lb
+}
+
+/// The group naming's "does this ref already name a segment" ranges over every segment, so
+/// model the full set of names in use by `insert_empty_branches` time — chain names plus
+/// everything the remote/target/tip/advanced passes will have created.
+#[allow(clippy::too_many_arguments)]
+fn names_in_use<T: but_core::RefMetadata>(
+    cg: &CommitGraph,
+    facts: &Facts,
+    name_of: &IdMap<gix::refs::FullName>,
+    floats: &[Float],
+    remote_used: &HashSet<gix::refs::FullName>,
+    lists: &[Vec<gix::refs::FullName>],
+    remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
+    meta: &T,
+    target_ref: Option<&gix::refs::FullName>,
+    extra_target: Option<gix::ObjectId>,
+) -> HashSet<gix::refs::FullName> {
     let mut used: HashSet<gix::refs::FullName> = name_of.values().cloned().collect();
-    used.extend(plan.floats.iter().map(|fl| fl.name.clone()));
+    used.extend(floats.iter().map(|fl| fl.name.clone()));
     used.extend(remote_used.iter().cloned());
     // The target ref always ends up naming something when it resolves.
     if let Some(tr) = target_ref
@@ -400,42 +582,56 @@ pub(super) fn chain_plan<T: but_core::RefMetadata>(
         }
     }
     // Advanced-outside branches (`add_advanced_outside_branches`), deduped by outside tip.
-    {
-        let mut adv_seen: IdSet = IdSet::default();
-        for b in lists.iter().flatten() {
-            if !is_plain_local_branch(b) || used.contains(b) {
-                continue;
+    let mut adv_seen: IdSet = IdSet::default();
+    for b in lists.iter().flatten() {
+        if !is_plain_local_branch(b) || used.contains(b) {
+            continue;
+        }
+        let Some(tip) = cg.commit_by_ref(b.as_ref()) else {
+            continue;
+        };
+        if facts.in_set.contains(&tip) || !adv_seen.insert(tip) {
+            continue;
+        }
+        let mut cursor = Some(tip);
+        let mut any_outside = false;
+        let mut rejoin = false;
+        while let Some(id) = cursor {
+            if facts.in_set.contains(&id) {
+                rejoin = true;
+                break;
             }
-            let Some(tip) = cg.commit_by_ref(b.as_ref()) else {
-                continue;
-            };
-            if facts.in_set.contains(&tip) || !adv_seen.insert(tip) {
-                continue;
-            }
-            let mut cursor = Some(tip);
-            let mut any_outside = false;
-            let mut rejoin = false;
-            while let Some(id) = cursor {
-                if facts.in_set.contains(&id) {
-                    rejoin = true;
-                    break;
-                }
-                any_outside = true;
-                cursor = cg.first_parent(id);
-            }
-            if !(rejoin && any_outside) {
-                continue;
-            }
-            if let Some(name) = disambiguated_ref(cg, tip, remote_tracking, meta, None, target_ref)
-            {
-                used.insert(name);
-            }
+            any_outside = true;
+            cursor = cg.first_parent(id);
+        }
+        if !(rejoin && any_outside) {
+            continue;
+        }
+        if let Some(name) = disambiguated_ref(cg, tip, remote_tracking, meta, None, target_ref) {
+            used.insert(name);
         }
     }
+    used
+}
 
-    // The group threading, mirroring `insert_empty_branches` exactly: per stack list, groups of
-    // consecutive branches on one commit; the bottom-most member names an anonymous anchor, and
-    // metadata order overrides a build-time name that belongs to the group.
+/// The group threading, mirroring `insert_empty_branches` exactly: per stack list, groups of
+/// consecutive branches on one commit; the bottom-most member names an anonymous anchor, and
+/// metadata order overrides a build-time name that belongs to the group. Fills the plan's
+/// `group_names` and `ref_order`.
+#[allow(clippy::too_many_arguments)]
+fn thread_ref_groups(
+    cg: &CommitGraph,
+    facts: &Facts,
+    workspace_commit: gix::ObjectId,
+    ws_lower_bound: Option<gix::ObjectId>,
+    lists: &[Vec<gix::refs::FullName>],
+    lists_per_commit: &IdMap<usize>,
+    at_or_below_bound: Option<&IdSet>,
+    name_of: &mut IdMap<gix::refs::FullName>,
+    used: &mut HashSet<gix::refs::FullName>,
+    remote_used: &HashSet<gix::refs::FullName>,
+    plan: &mut ChainPlan,
+) {
     for (li, list) in lists.iter().enumerate() {
         let list: Vec<gix::refs::FullName> = list
             .iter()
@@ -464,13 +660,12 @@ pub(super) fn chain_plan<T: but_core::RefMetadata>(
             }
             let anchor = facts.owner_of.get(&commit).copied().unwrap_or(commit);
             let shared_commit_above_bound = lists_per_commit.get(&commit).copied().unwrap_or(0) > 1
-                && at_or_below_bound
-                    .as_ref()
-                    .is_some_and(|below| !below.contains(&commit));
+                && at_or_below_bound.is_some_and(|below| !below.contains(&commit));
             if !name_of.contains_key(&anchor)
                 && (lists_per_commit.get(&commit).copied().unwrap_or(0) <= 1
                     || shared_commit_above_bound)
-                && !(Some(commit) == ws_lower_bound && floats_at_lower_bound(&list))
+                && !(Some(commit) == ws_lower_bound
+                    && floats_at_lower_bound(cg, ws_lower_bound, &list))
                 && let Some(namer) = group.last()
                 && !used.contains(namer)
             {
@@ -506,9 +701,7 @@ pub(super) fn chain_plan<T: but_core::RefMetadata>(
             // `used` set at THIS point models materialization's "already names a segment"
             // gate (the group namer included — it names the anchor, not an empty). ──
             let shared_base = lists_per_commit.get(&commit).copied().unwrap_or(0) > 1
-                && at_or_below_bound
-                    .as_ref()
-                    .is_none_or(|below| below.contains(&commit));
+                && at_or_below_bound.is_none_or(|below| below.contains(&commit));
             let placement = if cross_stack_owned && anchor_not_integrated {
                 GroupPlacement::Passive
             } else if !shared_base && anchor_not_integrated {
@@ -530,8 +723,6 @@ pub(super) fn chain_plan<T: but_core::RefMetadata>(
             }
         }
     }
-    plan.remote_used = remote_used;
-    plan
 }
 
 /// The name a boundary tip gets at MATERIALIZATION — shared with `chain_plan`'s modeling so plan

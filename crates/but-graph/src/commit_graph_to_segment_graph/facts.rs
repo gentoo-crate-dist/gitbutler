@@ -101,16 +101,7 @@ pub(super) fn facts<T: but_core::RefMetadata>(
         .filter_map(|(_, r)| cg.commit_by_ref(r.as_ref()))
         .chain(target_tip)
         .chain(entrypoint_outside)
-        .filter_map(|tip| {
-            let mut c = Some(tip);
-            while let Some(id) = c {
-                if in_set.contains(&id) {
-                    return Some(id);
-                }
-                c = cg.first_parent(id);
-            }
-            None
-        })
+        .filter_map(|tip| first_in_set_on_spine(cg, &in_set, tip))
         .collect();
 
     // Is the checked-out workspace commit a real GitButler-managed merge, or a plain commit the ws ref
@@ -151,16 +142,7 @@ pub(super) fn facts<T: but_core::RefMetadata>(
         .iter()
         .flatten()
         .filter_map(|b| cg.commit_by_ref(b.as_ref()))
-        .filter_map(|tip| {
-            let mut c = Some(tip);
-            while let Some(id) = c {
-                if in_set.contains(&id) {
-                    return Some(id);
-                }
-                c = cg.first_parent(id);
-            }
-            None
-        })
+        .filter_map(|tip| first_in_set_on_spine(cg, &in_set, tip))
         .collect();
 
     // Stored/extra target positions must start their own segment: the projection's
@@ -245,4 +227,22 @@ pub(super) fn facts<T: but_core::RefMetadata>(
         owner_of,
         tips,
     }
+}
+
+/// The first in-set commit along `tip`'s first-parent spine — where an outside line (a remote,
+/// the target, an outside checkout, a metadata branch that advanced past the workspace) rejoins
+/// the local graph.
+fn first_in_set_on_spine(
+    cg: &CommitGraph,
+    in_set: &IdSet,
+    tip: gix::ObjectId,
+) -> Option<gix::ObjectId> {
+    let mut c = Some(tip);
+    while let Some(id) = c {
+        if in_set.contains(&id) {
+            return Some(id);
+        }
+        c = cg.first_parent(id);
+    }
+    None
 }
