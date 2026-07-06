@@ -3123,6 +3123,11 @@ fn insert_empty_branches(
                     remote_tracking,
                     dependent,
                     dependent,
+                    // A fresh lane straight off the workspace lands at its metadata position:
+                    // lanes are threaded in metadata-stack order, so `li` is the slot among the
+                    // workspace's connections (existing lanes sit in parent-array order, which
+                    // metadata mirrors in steady state).
+                    (from_sidx == ws_sidx).then_some(li),
                 );
             }
             from_sidx = Some(anchor);
@@ -3220,6 +3225,7 @@ fn effective_lower_bound(
 /// parents), they are moved onto the chain top; if it has none — because a sibling empty stack already
 /// consumed the shared edge to `anchor` (two empty stacks on the same base) — a fresh edge is added.
 /// Other stacks' and remotes' edges into `anchor` are untouched. Produces `top_empty → … → anchor`.
+#[allow(clippy::too_many_arguments)]
 fn insert_empty_chain_above(
     sg: &mut SegmentGraph,
     from_sidx: Option<SegmentIndex>,
@@ -3234,6 +3240,10 @@ fn insert_empty_chain_above(
     // above enter at the chain top — the walk's inline-splice shape. `false` keeps other stacks'
     // direct edges (a true shared base where each stack has its own lane).
     redirect_all: bool,
+    // Where a FRESH lane edge goes in `from_sidx`'s connections: the stack's metadata index, so a
+    // new empty stack surfaces at its metadata position (e.g. on top for `Some(0)`) instead of
+    // last. Connection order on the workspace segment is lane order. `None` appends.
+    fresh_lane_slot: Option<usize>,
 ) {
     let seg_ids: Vec<SegmentIndex> = empties
         .iter()
@@ -3302,9 +3312,14 @@ fn insert_empty_chain_above(
                 Some(parent) => {
                     sg.retarget_edges(parent, anchor, top);
                 }
-                None => {
-                    connect(sg, from_sidx, top);
-                }
+                None => match fresh_lane_slot {
+                    Some(slot) => {
+                        let conn = Connection::new(top, None, None, None, None)
+                            .adjusted_for(from_sidx, top, sg);
+                        sg.insert_edge_at(from_sidx, slot, conn);
+                    }
+                    None => connect(sg, from_sidx, top),
+                },
             }
         }
     }
