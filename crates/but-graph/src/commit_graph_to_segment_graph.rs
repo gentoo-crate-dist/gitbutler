@@ -8,6 +8,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use but_core::RefMetadata;
+
+/// `ObjectId`-keyed map/set on the prehashed [`gix::hashtable`] — ids are touched per commit in
+/// the hot build loops, where SipHash on 20-byte keys dominates profiles.
+type IdMap<V> = gix::hashtable::HashMap<gix::ObjectId, V>;
+type IdSet = gix::hashtable::HashSet<gix::ObjectId>;
 use gix::reference::Category;
 
 use crate::{
@@ -719,22 +724,22 @@ fn assemble_unmanaged<T: but_core::RefMetadata>(
 /// later pass read these; nothing here reads a segment.
 struct Facts {
     /// The commit set the LOCAL segments span.
-    in_set: HashSet<gix::ObjectId>,
+    in_set: IdSet,
     /// Is the checked-out workspace commit a real GitButler-managed merge?
     ws_is_managed_merge: bool,
     /// Managed, but the ws ref sits on (or advanced past) a plain commit: an empty workspace
     /// segment is spliced in above.
     empty_ws_case: bool,
     /// Stored/extra target positions (and explicit tips): segments must start there.
-    pinned_commits: HashSet<gix::ObjectId>,
+    pinned_commits: IdSet,
     /// Commits that START a segment.
-    boundaries: HashSet<gix::ObjectId>,
+    boundaries: IdSet,
     /// The in-set entrypoint was NOT a boundary on its own and is forced to start a segment
     /// (a checkout inside a stack). Its tip keeps the split's naming precedence: the checked-out
     /// ref first, then plain disambiguation.
     entrypoint_forced_boundary: bool,
     /// Which boundary's first-parent run each in-set commit belongs to.
-    owner_of: HashMap<gix::ObjectId, gix::ObjectId>,
+    owner_of: IdMap<gix::ObjectId>,
     /// The boundaries in materialization order: workspace first, then descending generation, id.
     tips: Vec<gix::ObjectId>,
 }
@@ -756,7 +761,7 @@ fn facts<T: but_core::RefMetadata>(
     // target's own history WHEN the target has a local branch (it is `NotInRemote`) — e.g. an
     // integrated `main` that sits outside the workspace. A remote-only target (ahead of its local, not
     // `NotInRemote`) is NOT added: it becomes a remote segment instead.
-    let mut in_set: HashSet<gix::ObjectId> = ancestors(cg, workspace_commit);
+    let mut in_set: IdSet = ancestors(cg, workspace_commit);
     if let Some(t) = target
         && cg
             .node(t)
@@ -766,7 +771,7 @@ fn facts<T: but_core::RefMetadata>(
     }
 
     // In-set children per commit, to detect branch points (a commit reached by >1 child).
-    let mut children: HashMap<gix::ObjectId, Vec<gix::ObjectId>> = HashMap::new();
+    let mut children: IdMap<Vec<gix::ObjectId>> = IdMap::default();
     for &c in &in_set {
         for p in cg.all_parent_ids(c) {
             if in_set.contains(&p) {
@@ -795,12 +800,12 @@ fn facts<T: but_core::RefMetadata>(
     // EXPLICIT tips (from_commit_traversal_tips) can point anywhere, and validation requires a tip
     // id to be its segment's first commit — so each one is a boundary. Workspace-discovered builds
     // must not carve these: there they are ordinary interior commits.
-    let tip_ids: HashSet<gix::ObjectId> = if cg.explicit_tips {
+    let tip_ids: IdSet = if cg.explicit_tips {
         cg.traversal_tips.iter().map(|t| t.id).collect()
     } else {
-        HashSet::new()
+        IdSet::default()
     };
-    let remote_rejoins: HashSet<gix::ObjectId> = remote_tracking
+    let remote_rejoins: IdSet = remote_tracking
         .iter()
         .filter(|(local, _)| {
             cg.commit_by_ref(local.as_ref())
@@ -833,15 +838,15 @@ fn facts<T: but_core::RefMetadata>(
     // segment holds only the workspace commit, even when a parent is anonymous, e.g. an advanced tip).
     // Only for a real managed merge; a plain checked-out tip, co-located stack tip, or advanced ref has
     // no stack parents to split on.
-    let ws_parents: HashSet<gix::ObjectId> = if ws_is_managed_merge {
+    let ws_parents: IdSet = if ws_is_managed_merge {
         cg.parents(workspace_commit).collect()
     } else {
-        HashSet::new()
+        IdSet::default()
     };
 
     // A merge commit's segment holds only the merge, so its FIRST parent starts its own segment (the
     // second parent is already a boundary — reached by a non-first-parent edge).
-    let merge_first_parents: HashSet<gix::ObjectId> = in_set
+    let merge_first_parents: IdSet = in_set
         .iter()
         .filter(|&&c| cg.all_parent_ids(c).len() > 1)
         .filter_map(|&c| cg.first_parent(c))
@@ -854,7 +859,7 @@ fn facts<T: but_core::RefMetadata>(
     // ADVANCED past the workspace anchors at its rejoin point instead — the first in-workspace commit
     // on its first-parent spine — which must equally start a segment (the advanced branch is projected
     // onto it via a sibling link).
-    let metadata_commits: HashSet<gix::ObjectId> = stack_branches
+    let metadata_commits: IdSet = stack_branches
         .unwrap_or(&[])
         .iter()
         .flatten()
@@ -875,7 +880,7 @@ fn facts<T: but_core::RefMetadata>(
     // `TargetCommit::from_commit` ignores a stored target commit that sits mid-segment, losing the
     // remembered base (and with it the workspace lower bound). Not restricted to the workspace set —
     // an older target position often sits inside the target REMOTE's ahead region.
-    let mut pinned_commits: HashSet<gix::ObjectId> = project_meta
+    let mut pinned_commits: IdSet = project_meta
         .target_commit_id
         .into_iter()
         .chain(options.extra_target_commit_id)
@@ -895,6 +900,16 @@ fn facts<T: but_core::RefMetadata>(
             || metadata_commits.contains(&c)
             || pinned_commits.contains(&c)
             || tip_ids.contains(&c)
+            || cg.connected_parent_count(c) > 1
+            || {
+                let kids = children.get(&c).map(Vec::as_slice).unwrap_or_default();
+                // Reached by a non-first-parent edge, or by more than one child.
+                kids.len() > 1
+                    || kids
+                        .iter()
+                        .any(|&k| cg.first_parent(k) != Some(c) && in_set.contains(&k))
+            }
+            // Last: the only check that touches refs and metadata.
             || disambiguated_ref(
                 cg,
                 c,
@@ -904,18 +919,8 @@ fn facts<T: but_core::RefMetadata>(
                 project_meta.target_ref.as_ref(),
             )
             .is_some()
-            || cg.all_parent_ids(c).len() > 1
-            || {
-                let kids = children.get(&c).map(Vec::as_slice).unwrap_or_default();
-                // Reached by a non-first-parent edge, or by more than one child.
-                kids.len() > 1
-                    || kids
-                        .iter()
-                        .any(|&k| cg.first_parent(k) != Some(c) && in_set.contains(&k))
-            }
     };
-    let mut boundaries: HashSet<gix::ObjectId> =
-        in_set.iter().copied().filter(|&c| is_boundary(c)).collect();
+    let mut boundaries: IdSet = in_set.iter().copied().filter(|&c| is_boundary(c)).collect();
     // A checkout inside a stack (from_commit_traversal): the entrypoint always starts its own
     // segment — planned here instead of splitting the enclosing segment after the build.
     let entrypoint_forced_boundary = in_set.contains(&entrypoint) && boundaries.insert(entrypoint);
@@ -924,17 +929,18 @@ fn facts<T: but_core::RefMetadata>(
     // first-parent tail up to (excluding) the next boundary. These runs partition the set, so assigning
     // each commit in a run to its boundary gives the owner directly — no reverse walk (a run's oldest
     // commit, e.g. a root, has no first-parent path back up to its own boundary).
-    let mut owner_of: HashMap<gix::ObjectId, gix::ObjectId> = HashMap::new();
+    let mut owner_of: IdMap<gix::ObjectId> = IdMap::default();
     let mut tips: Vec<gix::ObjectId> = boundaries.iter().copied().collect();
     for &tip in &tips {
-        for c in commit_run(cg, tip, &in_set, &|c| boundaries.contains(&c)) {
-            owner_of.insert(c.id, tip);
+        for c in commit_run_ids(cg, tip, &in_set, &|c| boundaries.contains(&c)) {
+            owner_of.insert(c, tip);
         }
     }
 
     // Segment tips in a stable order (workspace first, then by descending generation, then id) so the
     // numbering is deterministic even though it need not match the walk's.
-    tips.sort_by_key(|&t| {
+    // Cached: the key does a by-id lookup, too expensive to re-run per comparison.
+    tips.sort_by_cached_key(|&t| {
         (
             t != workspace_commit,
             std::cmp::Reverse(cg.node(t).map(|n| n.generation).unwrap_or(0)),
@@ -976,6 +982,12 @@ fn facts<T: but_core::RefMetadata>(
 ///    remote tip is present; the target's own remote segment when no local tracks it; regions for
 ///    an extra (older) target position, an outside checkout, and any explicit tip left uncovered.
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(
+    name = "graph_from_commit_graph",
+    level = "trace",
+    skip_all,
+    fields(commits = cg.node_count())
+)]
 pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
     cg: &CommitGraph,
     workspace_commit: gix::ObjectId,
@@ -1043,13 +1055,12 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
     let is_boundary = |c: gix::ObjectId| boundaries.contains(&c);
 
     let mut sg = SegmentGraph::new();
-    let mut seg_of_tip: HashMap<gix::ObjectId, SegmentIndex> = HashMap::new();
+    let mut seg_of_tip: IdMap<SegmentIndex> = IdMap::default();
 
     // Create a local segment per tip, holding its first-parent commit run. Names come from the
     // plan: floated and demoted tips start ANONYMOUS (their name never touches the segment); a
     // float's displaced build-time name rides on the tip commit as a passive ref.
-    let floated: HashMap<gix::ObjectId, &Float> =
-        plan.floats.iter().map(|fl| (fl.tip, fl)).collect();
+    let floated: IdMap<&Float> = plan.floats.iter().map(|fl| (fl.tip, fl)).collect();
     for &tip in &tips {
         let mut commits = commit_run(cg, tip, &in_set, &is_boundary);
         let suppressed = floated.contains_key(&tip) || plan.demoted.contains(&tip);
@@ -1097,7 +1108,7 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
     }
     // The planned float placeholders: empty segments carrying the floated names, spliced between
     // the workspace and the now-anonymous shared tips (edges below).
-    let mut placeholder_of: HashMap<gix::ObjectId, SegmentIndex> = HashMap::new();
+    let mut placeholder_of: IdMap<SegmentIndex> = IdMap::default();
     for float in &plan.floats {
         let sidx = sg.add_node(Segment {
             id: 0,
@@ -1190,7 +1201,7 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
     // lane structure and keyed on the pre-lane names — the overlay carries exactly that view
     // (materialization names plus the passes' own renames), so the lane reorder cannot change
     // their decisions.
-    let pre_lane_names: HashMap<gix::ObjectId, gix::refs::FullName> = plan.base_name_of.clone();
+    let pre_lane_names: IdMap<gix::refs::FullName> = plan.base_name_of.clone();
     // Remote refs some creator will consume as a segment name: the region builder cuts its run
     // at interior remote refs only when unclaimed. Plan-modeled names (`remote_used` covers the
     // walk seeds) plus the ahead-case remotes of EVERY boundary-tip local (`add_remote_segments`
@@ -1545,14 +1556,8 @@ pub(crate) fn graph_from_commit_graph<T: but_core::RefMetadata>(
                 if s.remote_tracking_branch_segment_id == Some(ep_sidx) {
                     s.remote_tracking_branch_segment_id = Some(floated);
                 }
-                for conn in &mut s.connections {
-                    if conn.target == ep_sidx {
-                        conn.target = floated;
-                        conn.dst = None;
-                        conn.dst_id = None;
-                    }
-                }
             }
+            sg.retarget_edges(sidx, ep_sidx, floated);
         }
         connect(&mut sg, floated, ep_sidx);
     }
@@ -1761,15 +1766,7 @@ fn name_entrypoint_segment(
                     if other == empty {
                         continue;
                     }
-                    if let Some(s) = sg.node_mut(other) {
-                        for conn in &mut s.connections {
-                            if conn.target == sidx {
-                                conn.target = empty;
-                                conn.dst = None;
-                                conn.dst_id = None;
-                            }
-                        }
-                    }
+                    sg.retarget_edges(other, sidx, empty);
                 }
                 connect(sg, empty, sidx);
                 return Some(empty);
@@ -1835,7 +1832,7 @@ enum GroupPlacement {
 
 struct LanePlan {
     floats: Vec<Float>,
-    demoted: HashSet<gix::ObjectId>,
+    demoted: IdSet,
     /// Group-naming decisions of `insert_empty_branches`, keyed by (stack-list index, group
     /// commit): the anchor takes `name`; `clear_remote` marks the metadata-order override (a
     /// non-bottom namer is displaced, the remote creators link its floated empty instead).
@@ -1843,13 +1840,13 @@ struct LanePlan {
     /// Every boundary tip's MATERIALIZATION name (before floats/demotions suppress it on the
     /// segment). The remote/target passes historically ran before the lane shape existed and
     /// keyed their decisions on these — they read them through [`LanePlan::effective_name`].
-    base_name_of: HashMap<gix::ObjectId, gix::refs::FullName>,
+    base_name_of: IdMap<gix::refs::FullName>,
     /// Names the remote/target/explicit-tip passes give to ANONYMOUS boundary tips (a remote
     /// pointing behind/at an anonymous owner names it; the target and explicit tips likewise).
     /// Modeled here in pass order so materialization can mint segments with their FINAL names;
     /// the passes only add links. The value carries the named ref's actual position (a behind
     /// remote can point mid-run, below the owner's tip).
-    renames: HashMap<gix::ObjectId, (gix::refs::FullName, gix::ObjectId)>,
+    renames: IdMap<(gix::refs::FullName, gix::ObjectId)>,
     /// Every remote-ref name the remote passes will consume (renames, empty roots, ahead
     /// regions, untracked surfacing, the target). With the lane structure built FIRST, the
     /// empties filter consults this instead of finding the remote segments in the graph.
@@ -1880,15 +1877,15 @@ fn lane_plan<T: but_core::RefMetadata>(
 ) -> LanePlan {
     let mut plan = LanePlan {
         floats: Vec::new(),
-        demoted: HashSet::new(),
+        demoted: IdSet::default(),
         group_names: HashMap::new(),
-        base_name_of: HashMap::new(),
-        renames: HashMap::new(),
+        base_name_of: IdMap::default(),
+        renames: IdMap::default(),
         remote_used: HashSet::new(),
         ref_order: Vec::new(),
     };
     // The naming state as the lane passes will see it: materialization names first…
-    let mut name_of: HashMap<gix::ObjectId, gix::refs::FullName> = HashMap::new();
+    let mut name_of: IdMap<gix::refs::FullName> = IdMap::default();
     for &tip in &facts.tips {
         if let Some(name) = materialize_tip_name(
             cg,
@@ -1931,7 +1928,7 @@ fn lane_plan<T: but_core::RefMetadata>(
                 .get(&remote_tip)
                 .copied()
                 .unwrap_or(remote_tip);
-            if let std::collections::hash_map::Entry::Vacant(e) = name_of.entry(owner) {
+            if let gix::hashtable::hash_map::Entry::Vacant(e) = name_of.entry(owner) {
                 e.insert(remote_ref.clone());
                 plan.renames.insert(owner, (remote_ref.clone(), remote_tip));
             }
@@ -1978,7 +1975,7 @@ fn lane_plan<T: but_core::RefMetadata>(
     {
         if facts.in_set.contains(&tip) {
             let owner = facts.owner_of.get(&tip).copied().unwrap_or(tip);
-            if let std::collections::hash_map::Entry::Vacant(e) = name_of.entry(owner) {
+            if let gix::hashtable::hash_map::Entry::Vacant(e) = name_of.entry(owner) {
                 e.insert(tr.clone());
                 plan.renames.insert(owner, (tr.clone(), tip));
             }
@@ -1996,7 +1993,7 @@ fn lane_plan<T: but_core::RefMetadata>(
             continue;
         }
         if facts.boundaries.contains(&t.id)
-            && let std::collections::hash_map::Entry::Vacant(e) = name_of.entry(t.id)
+            && let gix::hashtable::hash_map::Entry::Vacant(e) = name_of.entry(t.id)
         {
             e.insert(ref_name.clone());
             plan.renames.insert(t.id, (ref_name, t.id));
@@ -2070,7 +2067,7 @@ fn lane_plan<T: but_core::RefMetadata>(
     let Some(lists) = stack_branches else {
         return plan;
     };
-    let mut lists_per_commit: HashMap<gix::ObjectId, usize> = HashMap::new();
+    let mut lists_per_commit: IdMap<usize> = IdMap::default();
     for list in lists {
         let mut seen = HashSet::new();
         for b in list {
@@ -2081,8 +2078,7 @@ fn lane_plan<T: but_core::RefMetadata>(
             }
         }
     }
-    let at_or_below_bound: Option<HashSet<gix::ObjectId>> =
-        ws_lower_bound.map(|lb| cg.ancestor_set(lb));
+    let at_or_below_bound: Option<IdSet> = ws_lower_bound.map(|lb| cg.ancestor_set(lb));
     // A commit pointed at by branches of SEVERAL metadata stacks at/below the bound is a shared
     // base: its segment stays anonymous and every stack's branches float above as their own lane.
     for (&commit, &count) in &lists_per_commit {
@@ -2172,7 +2168,7 @@ fn lane_plan<T: but_core::RefMetadata>(
     }
     // Advanced-outside branches (`add_advanced_outside_branches`), deduped by outside tip.
     {
-        let mut adv_seen: HashSet<gix::ObjectId> = HashSet::new();
+        let mut adv_seen: IdSet = IdSet::default();
         for b in lists.iter().flatten() {
             if !is_plain_local_branch(b) || used.contains(b) {
                 continue;
@@ -2366,9 +2362,22 @@ fn materialize_tip_name<T: but_core::RefMetadata>(
 fn commit_run(
     cg: &CommitGraph,
     tip: gix::ObjectId,
-    in_set: &HashSet<gix::ObjectId>,
+    in_set: &IdSet,
     is_boundary: &impl Fn(gix::ObjectId) -> bool,
 ) -> Vec<Commit> {
+    commit_run_ids(cg, tip, in_set, is_boundary)
+        .into_iter()
+        .filter_map(|c| cg.node(c).map(|node| node.commit.clone()))
+        .collect()
+}
+
+/// [`commit_run`] as ids only — no commit payload cloned.
+fn commit_run_ids(
+    cg: &CommitGraph,
+    tip: gix::ObjectId,
+    in_set: &IdSet,
+    is_boundary: &impl Fn(gix::ObjectId) -> bool,
+) -> Vec<gix::ObjectId> {
     let mut out = Vec::new();
     let mut id = Some(tip);
     while let Some(c) = id {
@@ -2378,9 +2387,7 @@ fn commit_run(
         if c != tip && is_boundary(c) {
             break;
         }
-        if let Some(node) = cg.node(c) {
-            out.push(node.commit.clone());
-        }
+        out.push(c);
         id = cg.first_parent(c).filter(|p| in_set.contains(p));
     }
     out
@@ -2418,15 +2425,15 @@ fn link_remote_to_local(
 fn add_remote_segments(
     cg: &CommitGraph,
     sg: &mut SegmentGraph,
-    seg_of_tip: &HashMap<gix::ObjectId, SegmentIndex>,
-    in_set: &HashSet<gix::ObjectId>,
-    owner_of: &HashMap<gix::ObjectId, gix::ObjectId>,
+    seg_of_tip: &IdMap<SegmentIndex>,
+    in_set: &IdSet,
+    owner_of: &IdMap<gix::ObjectId>,
     symbolic_remotes: &[String],
     stack_branches: Option<&[Vec<gix::refs::FullName>]>,
-    pinned_commits: &HashSet<gix::ObjectId>,
+    pinned_commits: &IdSet,
     remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
-    pre_lane_names: &HashMap<gix::ObjectId, gix::refs::FullName>,
-    renames: &HashMap<gix::ObjectId, (gix::refs::FullName, gix::ObjectId)>,
+    pre_lane_names: &IdMap<gix::refs::FullName>,
+    renames: &IdMap<(gix::refs::FullName, gix::ObjectId)>,
     claimed_remote_names: &HashSet<gix::refs::FullName>,
     pending_edges: &mut Vec<(SegmentIndex, gix::ObjectId)>,
 ) {
@@ -2519,9 +2526,9 @@ fn segment_ahead_region(
     // plain local branch on it, if any.
     remote_ref: Option<&gix::refs::FullName>,
     remote_tip: gix::ObjectId,
-    in_set: &HashSet<gix::ObjectId>,
-    seg_of_tip: &HashMap<gix::ObjectId, SegmentIndex>,
-    owner_of: &HashMap<gix::ObjectId, gix::ObjectId>,
+    in_set: &IdSet,
+    seg_of_tip: &IdMap<SegmentIndex>,
+    owner_of: &IdMap<gix::ObjectId>,
     remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
     // The local segment tracking this remote, if any — a TARGET without a tracking local segment
     // builds the same region without the sibling/remote-tracking links.
@@ -2529,7 +2536,7 @@ fn segment_ahead_region(
     // Stored/extra target positions must start their own segment even inside a remote's ahead
     // region — the projection's `TargetCommit::from_commit` ignores one that sits mid-segment,
     // silently disabling integration checks against it.
-    pinned_commits: &HashSet<gix::ObjectId>,
+    pinned_commits: &IdSet,
     // Remote refs some creator will consume as a segment name (tracked roots, untracked
     // surfacing, the target, explicit tips): an interior remote ref cuts the root run only
     // when unclaimed — a claimed one STOPS it (that creator's region owns the territory).
@@ -2539,7 +2546,7 @@ fn segment_ahead_region(
     pending_edges: &mut Vec<(SegmentIndex, gix::ObjectId)>,
 ) {
     // Commits the remote is ahead by: ancestors of the tip that stop at the in-set boundary.
-    let mut ahead_set: HashSet<gix::ObjectId> = HashSet::new();
+    let mut ahead_set: IdSet = IdSet::default();
     let mut stack = vec![remote_tip];
     while let Some(id) = stack.pop() {
         if in_set.contains(&id) || !ahead_set.insert(id) {
@@ -2548,7 +2555,7 @@ fn segment_ahead_region(
         stack.extend(cg.all_parent_ids(id));
     }
 
-    let mut children: HashMap<gix::ObjectId, Vec<gix::ObjectId>> = HashMap::new();
+    let mut children: IdMap<Vec<gix::ObjectId>> = IdMap::default();
     for &c in &ahead_set {
         for p in cg.all_parent_ids(c) {
             if ahead_set.contains(&p) {
@@ -2556,7 +2563,7 @@ fn segment_ahead_region(
             }
         }
     }
-    let merge_first_parents: HashSet<gix::ObjectId> = ahead_set
+    let merge_first_parents: IdSet = ahead_set
         .iter()
         .filter(|&&c| cg.all_parent_ids(c).len() > 1)
         .filter_map(|&c| cg.first_parent(c))
@@ -2584,7 +2591,7 @@ fn segment_ahead_region(
     // to that creator's region, and the connection into it is wired once every creator ran.
     let root_is_remote =
         remote_ref.is_some_and(|r| r.as_ref().category() == Some(Category::RemoteBranch));
-    let mut interior_cuts: HashMap<gix::ObjectId, gix::refs::FullName> = HashMap::new();
+    let mut interior_cuts: IdMap<gix::refs::FullName> = IdMap::default();
     let mut stop: Option<gix::ObjectId> = None;
     if root_is_remote {
         let existing_remote_tip = |c: gix::ObjectId| {
@@ -2632,16 +2639,16 @@ fn segment_ahead_region(
         .filter(|&c| is_boundary(c))
         .collect();
     // Deterministic segment ids: `ahead_set` is a HashSet, its order varies per process.
-    tips.sort_by_key(|&t| {
+    tips.sort_by_cached_key(|&t| {
         (
             t != remote_tip,
             std::cmp::Reverse(cg.node(t).map(|n| n.generation).unwrap_or(0)),
             t,
         )
     });
-    let mut ahead_owner: HashMap<gix::ObjectId, gix::ObjectId> = HashMap::new();
-    let mut ahead_seg: HashMap<gix::ObjectId, SegmentIndex> = HashMap::new();
-    let mut reused: HashSet<gix::ObjectId> = HashSet::new();
+    let mut ahead_owner: IdMap<gix::ObjectId> = IdMap::default();
+    let mut ahead_seg: IdMap<SegmentIndex> = IdMap::default();
+    let mut reused: IdSet = IdSet::default();
     for &tip in &tips {
         // The stop commit is another creator's root: this region neither mints nor owns it —
         // the connection into that segment is a pending edge resolved after every creator ran.
@@ -2767,9 +2774,9 @@ fn add_untracked_remote_segments(
     cg: &CommitGraph,
     sg: &mut SegmentGraph,
     remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
-    seg_of_tip: &HashMap<gix::ObjectId, SegmentIndex>,
-    in_set: &HashSet<gix::ObjectId>,
-    owner_of: &HashMap<gix::ObjectId, gix::ObjectId>,
+    seg_of_tip: &IdMap<SegmentIndex>,
+    in_set: &IdSet,
+    owner_of: &IdMap<gix::ObjectId>,
 ) {
     let mut remote_refs: std::collections::BTreeSet<gix::refs::FullName> =
         std::collections::BTreeSet::new();
@@ -2911,7 +2918,7 @@ fn add_empty_remote_root(
 /// the stack segment that owns `workspace_commit`.
 fn insert_empty_workspace_segment(
     sg: &mut SegmentGraph,
-    seg_of_tip: &HashMap<gix::ObjectId, SegmentIndex>,
+    seg_of_tip: &IdMap<SegmentIndex>,
     cg: &CommitGraph,
     workspace_commit: gix::ObjectId,
 ) -> Option<SegmentIndex> {
@@ -2962,13 +2969,13 @@ fn segment_by_ref(sg: &SegmentGraph, ref_name: &gix::refs::FullName) -> Option<S
 fn add_advanced_outside_branches<T: but_core::RefMetadata>(
     sg: &mut SegmentGraph,
     cg: &CommitGraph,
-    in_set: &HashSet<gix::ObjectId>,
+    in_set: &IdSet,
     stack_branches: Option<&[Vec<gix::refs::FullName>]>,
     workspace_commit: gix::ObjectId,
     remote_tracking: &HashMap<gix::refs::FullName, gix::refs::FullName>,
     meta: &T,
     target_ref: Option<&gix::refs::FullName>,
-    pinned_commits: &HashSet<gix::ObjectId>,
+    pinned_commits: &IdSet,
 ) {
     for b in stack_branches.into_iter().flatten().flatten() {
         // Only LOCAL branches advance past a workspace; metadata can also list remote refs as stack
@@ -3292,16 +3299,7 @@ fn insert_empty_chain_above(
             vec![from_sidx]
         };
         for source in redirect_sources {
-            if let Some(from) = sg.node_mut(source) {
-                for conn in &mut from.connections {
-                    if conn.target == anchor {
-                        conn.target = top;
-                        conn.dst = None;
-                        conn.dst_id = None;
-                        redirected = true;
-                    }
-                }
-            }
+            redirected |= sg.retarget_edges(source, anchor, top) > 0;
         }
         if !redirected {
             // Prefer a commit-holding chain parent (the dependent-branch pattern); an EMPTY one —
@@ -3323,15 +3321,7 @@ fn insert_empty_chain_above(
                 .flatten();
             match chain_parent {
                 Some(parent) => {
-                    if let Some(parent) = sg.node_mut(parent) {
-                        for conn in &mut parent.connections {
-                            if conn.target == anchor {
-                                conn.target = top;
-                                conn.dst = None;
-                                conn.dst_id = None;
-                            }
-                        }
-                    }
+                    sg.retarget_edges(parent, anchor, top);
                 }
                 None => {
                     connect(sg, from_sidx, top);
@@ -3354,8 +3344,8 @@ fn connect(sg: &mut SegmentGraph, src: SegmentIndex, dst: SegmentIndex) {
 }
 
 /// All ancestors of `start` (inclusive) present in the graph, walking every parent.
-fn ancestors(cg: &CommitGraph, start: gix::ObjectId) -> HashSet<gix::ObjectId> {
-    let mut seen = HashSet::new();
+fn ancestors(cg: &CommitGraph, start: gix::ObjectId) -> IdSet {
+    let mut seen = IdSet::default();
     let mut stack = vec![start];
     while let Some(c) = stack.pop() {
         if cg.node(c).is_none() {
@@ -3386,18 +3376,23 @@ fn disambiguated_ref<T: but_core::RefMetadata>(
     workspace_commit: Option<gix::ObjectId>,
     target_ref: Option<&gix::refs::FullName>,
 ) -> Option<gix::refs::FullName> {
-    let branches: Vec<gix::refs::FullName> = cg
-        .refs_at(c)
-        .into_iter()
-        .filter(is_plain_local_branch)
+    let node = cg.node(c)?;
+    let branches: Vec<&gix::refs::FullName> = node
+        .commit
+        .refs
+        .iter()
+        .map(|r| &r.ref_name)
+        .filter(|rn| is_plain_local_branch(rn))
         .collect();
+    // Most commits carry no refs at all — this runs per commit in the boundary scan.
+    if branches.is_empty() {
+        return None;
+    }
     let unique = |pred: &dyn Fn(&gix::refs::FullName) -> bool| {
-        let mut it = branches.iter().filter(|r| pred(r));
+        let mut it = branches.iter().copied().filter(|r| pred(r));
         it.next().filter(|_| it.next().is_none()).cloned()
     };
-    let integrated = cg
-        .node(c)
-        .is_some_and(|n| n.commit.flags.contains(crate::CommitFlags::Integrated));
+    let integrated = node.commit.flags.contains(crate::CommitFlags::Integrated);
     (!integrated)
         .then(|| unique(&|r| segment_metadata(r.as_ref(), meta).is_some()))
         .flatten()

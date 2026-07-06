@@ -35,7 +35,7 @@
 //! that unification has landed (the editor mutates this graph and projects it), while read-side
 //! consumers still see the segment graph rebuilt on top.
 
-use std::collections::{HashMap, HashSet};
+use gix::hashtable::{HashMap, HashSet};
 
 use crate::{Commit, CommitFlags};
 
@@ -156,7 +156,7 @@ impl CommitGraph {
             tombstoned,
             entrypoint,
             entrypoint_ref: None,
-            managed_ws_commits: HashSet::new(),
+            managed_ws_commits: HashSet::default(),
             hard_limit_hit: false,
             traversal_tips: Vec::new(),
             explicit_tips: false,
@@ -167,7 +167,10 @@ impl CommitGraph {
 
     /// Restrict connectivity to the given `(child, parent)` pairs — flag every other slot as
     /// severed — and rebuild the child adjacency from the connected, present slots.
-    fn set_connected(&mut self, connected: HashSet<(gix::ObjectId, gix::ObjectId)>) {
+    fn set_connected(
+        &mut self,
+        connected: std::collections::HashSet<(gix::ObjectId, gix::ObjectId)>,
+    ) {
         for children in &mut self.children {
             children.clear();
         }
@@ -195,6 +198,7 @@ impl CommitGraph {
     }
 
     /// Assemble from the NATIVE traversal outcome (see `init::native_walk`).
+    #[tracing::instrument(name = "CommitGraph::from_native_outcome", level = "trace", skip_all)]
     pub(crate) fn from_native_outcome(o: crate::init::native_walk::NativeOutcome) -> Self {
         let mut cg = CommitGraph::from_commits(o.commits, o.entrypoint);
         cg.entrypoint_ref = o.entrypoint_ref;
@@ -321,7 +325,7 @@ impl CommitGraph {
     /// the write-through seam's flag refresh: an editor-mutated graph carries walk-time flags
     /// (empty on editor-added nodes), while the rewalk derives integration fresh.
     pub(crate) fn recompute_integrated(&mut self, tips: impl IntoIterator<Item = gix::ObjectId>) {
-        let mut integrated: HashSet<gix::ObjectId> = HashSet::new();
+        let mut integrated: HashSet<gix::ObjectId> = HashSet::default();
         for tip in tips {
             if self.by_id.contains_key(&tip) && !integrated.contains(&tip) {
                 integrated.extend(self.ancestor_set(tip));
@@ -365,7 +369,7 @@ impl CommitGraph {
         &mut self,
         local_tips: impl IntoIterator<Item = gix::ObjectId>,
     ) {
-        let mut not_in_remote: HashSet<gix::ObjectId> = HashSet::new();
+        let mut not_in_remote: HashSet<gix::ObjectId> = HashSet::default();
         for tip in local_tips {
             if self.by_id.contains_key(&tip) && !not_in_remote.contains(&tip) {
                 not_in_remote.extend(self.ancestor_set(tip));
@@ -429,6 +433,22 @@ impl CommitGraph {
         let Some(&idx) = self.by_id.get(&id) else {
             return Vec::new();
         };
+        // Fast path: no tombstoned parent to substitute through (always true for walk-built
+        // graphs), so the connected slots map straight to parent ids.
+        if !self.has_tombstoned_parent(idx) {
+            return self.nodes[idx]
+                .commit
+                .parent_ids
+                .iter()
+                .copied()
+                .zip(&self.parent_slots[idx])
+                .filter(|(_, slot)| slot.connected)
+                .map(|(p, slot)| match slot.target {
+                    Some(t) => self.nodes[t].commit.id,
+                    None => p,
+                })
+                .collect();
+        }
         // The CONNECTED `(raw parent id, slot target)` pairs of `idx`, in slot order.
         let connected = |idx: CommitIdx| {
             self.nodes[idx]
@@ -442,7 +462,8 @@ impl CommitGraph {
         };
         let mut potential: Vec<(gix::ObjectId, Option<CommitIdx>)> =
             connected(idx).into_iter().rev().collect();
-        let mut seen_idx: HashSet<CommitIdx> = potential.iter().filter_map(|(_, t)| *t).collect();
+        let mut seen_idx: std::collections::HashSet<CommitIdx> =
+            potential.iter().filter_map(|(_, t)| *t).collect();
         let mut seen_raw: HashSet<gix::ObjectId> = potential
             .iter()
             .filter_map(|(p, t)| t.is_none().then_some(*p))
@@ -489,7 +510,7 @@ impl CommitGraph {
     /// traversal severed is not rejoined. Bounded by the graph, which is the traversal-limited
     /// window, not the repository.
     pub fn ancestor_set(&self, tip: gix::ObjectId) -> HashSet<gix::ObjectId> {
-        let mut set = HashSet::new();
+        let mut set = HashSet::default();
         let mut queue = std::collections::VecDeque::from([tip]);
         while let Some(c) = queue.pop_front() {
             if set.insert(c) {
@@ -525,6 +546,21 @@ impl CommitGraph {
         self.node(id)
             .map(|n| n.commit.refs.iter().map(|r| r.ref_name.clone()).collect())
             .unwrap_or_default()
+    }
+
+    /// `all_parent_ids(id).len()` without materializing the list — exact under tombstone
+    /// substitution, allocation-free in the common no-tombstone case.
+    pub(crate) fn connected_parent_count(&self, id: gix::ObjectId) -> usize {
+        let Some(&idx) = self.by_id.get(&id) else {
+            return 0;
+        };
+        if self.has_tombstoned_parent(idx) {
+            return self.all_parent_ids(id).len();
+        }
+        self.parent_slots[idx]
+            .iter()
+            .filter(|slot| slot.connected)
+            .count()
     }
 
     /// The parents of `id` that are present in this graph, first-parent first.
