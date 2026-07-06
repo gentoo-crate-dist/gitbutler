@@ -1,6 +1,6 @@
 //! A graph based workspace projection, framed from the rebase [`Editor`].
 //!
-//! Rather than being its own graph, this points into the editor's internal step
+//! Rather than being its own graph, this points into the editor's internal commit
 //! graph via [`Selector`]s, so consumers can frame the mutations they're about
 //! to perform against the same selectors they'll act on.
 

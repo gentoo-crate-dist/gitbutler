@@ -347,7 +347,8 @@ pub(crate) fn apply_chain_join(
 /// reconnect renumbering the leg's slot). With `reclassify` true the ref's current derived legs
 /// are re-classified against `to_pick`'s legs, so a ref sliding onto a dup-parent MERGE base splits
 /// into the `Lane` its leg occupies. `ambiguous` is preserved. NOTE: preserve-vs-reclassify is
-/// per-situation, not cleanly per-caller — see the STAGE-B reanchor notes in graph-unify-plan.md.
+/// per-situation, not cleanly per-caller — each call site picks based on whether the leg set
+/// should survive the move or be re-derived at the destination.
 pub(crate) fn reposition_refs(
     graph: &mut CommitGraph,
     from_pick: CommitGraphIndex,

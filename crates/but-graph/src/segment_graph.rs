@@ -229,7 +229,7 @@ impl SegmentGraph {
             .filter_map(|(i, n)| n.as_ref().map(|_| i))
     }
 
-    /// petgraph-compatible alias for `Self::node_ids`.
+    /// Alias for `Self::node_ids` under the petgraph-era name callers still use.
     pub fn node_indices(&self) -> impl Iterator<Item = SegmentIndex> + '_ {
         self.node_ids()
     }

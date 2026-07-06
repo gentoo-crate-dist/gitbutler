@@ -1,4 +1,4 @@
-//! Step graph traversal helpers.
+//! Commit graph traversal helpers.
 
 use std::collections::HashSet;
 

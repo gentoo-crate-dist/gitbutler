@@ -3,24 +3,22 @@
 //!
 //! # Why
 //!
-//! Today the pipeline is `gix traversal → SegmentGraph (segments own commit ranges) → projection`,
-//! and but-rebase builds its editor commit graph from that same segment graph. The segment layer turned out
-//! to be an *artifact of incremental construction*, not something either consumer fundamentally
-//! needs:
+//! The pipeline is `gix traversal → CommitGraph → segment graph → projection`: the traversal
+//! accumulates this graph directly ([`CommitGraph::from_walk`]), the segment graph is rebuilt
+//! from it, and but-rebase's editor adopts the carried copy as its mutable arena. The segment
+//! layer turned out to be an *artifact of incremental construction*, not something either
+//! consumer fundamentally needs:
 //!
-//! * **The rebase editor graph** is already commit/ref-granular — its nodes are `Pick(commit)` / `Reference(ref)`
-//!   and its edges carry only the parent-array `order`. It re-derives parent order from
-//!   `commit.parent_ids` and even *corrects* but-graph when they disagree. It needs: commit id,
-//!   parent ids (first-parent at `[0]`), the refs on each commit, an entrypoint, and parent-walk
-//!   reachability. No segment boundaries, no segment ids.
+//! * **The rebase editor** is commit/ref-granular. It needs: commit id, parent ids (first-parent
+//!   at `[0]`), the refs on each commit, an entrypoint, and parent-walk reachability. No segment
+//!   boundaries, no segment ids. Its arena IS this type, with pick/ref side tables on top.
 //!
 //! * **Projection** emits segment-shaped output (`Stack`/`StackSegment`), but the segmentation is
 //!   recomputable: a segment is a maximal first-parent run, split where a local-branch ref appears,
 //!   at branch/merge points, and at the projection's own stops (entrypoint, merge-base, target).
-//!   `generation`, merge-base, and remote-reachability are commit-level. `sibling_segment_id` /
-//!   `remote_tracking_branch_segment_id` are just cached pointers — recomputable by ref-name match.
+//!   `generation`, merge-base, and remote-reachability are commit-level.
 //!
-//! So both can build straight from the commit DAG, and segments become a *view* produced during
+//! So both build straight from the commit DAG, and segments are a *view* produced on the way to
 //! projection rather than a stored graph.
 //!
 //! # The model
@@ -33,10 +31,9 @@
 //! order-stacks machinery ([`crate::Graph`] post-pass) disappears — the order is read straight off
 //! the merge commit's parents.
 //!
-//! Historically this was a standalone spike toward deleting the segment graph outright; today the
-//! production builders source it from the REAL traversal ([`CommitGraph::from_walk`]) and rebuild
-//! the full segment graph on top, so downstream consumers are unchanged. The commit-first model
-//! remains the intended shape for the eventual but-graph/but-rebase unification.
+//! Started as a standalone spike toward deleting the segment graph outright; the rebase side of
+//! that unification has landed (the editor mutates this graph and projects it), while read-side
+//! consumers still see the segment graph rebuilt on top.
 
 use std::collections::{HashMap, HashSet};
 
@@ -69,7 +66,7 @@ struct ParentSlot {
 }
 
 /// A commit-first graph: an arena of commits with HANDLE-based `commit → parent` edges (one
-/// [`ParentSlot`] per raw `parent_ids` entry) and the reverse (`parent → child`) adjacency derived
+/// `ParentSlot` per raw `parent_ids` entry) and the reverse (`parent → child`) adjacency derived
 /// for downward walks. `ObjectId` is pure payload; `by_id` is a rebuildable lookup index.
 #[derive(Debug, Clone, Default)]
 pub struct CommitGraph {
