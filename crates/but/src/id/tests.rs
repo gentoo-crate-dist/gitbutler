@@ -183,57 +183,6 @@ fn branches_work_with_single_character() -> anyhow::Result<()> {
 }
 
 #[test]
-fn branches_match_by_substring() -> anyhow::Result<()> {
-    let stacks = vec![stack([
-        segment("foo-bar", [id(1)], None, []),
-        segment("bar", [id(2)], None, []),
-        segment("foo", [id(3)], None, []),
-        segment("baz", [id(4)], None, []),
-    ])];
-
-    let id_map = IdMap::new(stacks, Vec::new())?;
-    let changed_paths_fn = |commit_id: gix::ObjectId,
-                            parent_id: Option<gix::ObjectId>|
-     -> anyhow::Result<Vec<but_core::TreeChange>> {
-        bail!("unexpected IDs {commit_id} {parent_id:?}");
-    };
-    insta::assert_debug_snapshot!(id_map.debug_state(), @"
-    workspace_and_remote_commits_count: 4
-    branches: [ az, g0, h0, i0 ]
-    ");
-
-    let expected = [
-        CliId::Branch {
-            name: "foo-bar".into(),
-            id: "g0".into(),
-            stack_id: None,
-        },
-        CliId::Branch {
-            name: "foo".into(),
-            id: "i0".into(),
-            stack_id: None,
-        },
-    ];
-    assert_eq!(
-        id_map.parse("fo", Box::new(changed_paths_fn))?,
-        expected,
-        "substring searches can yield multiple items"
-    );
-
-    let expected = [CliId::Branch {
-        name: "baz".into(),
-        id: "az".into(),
-        stack_id: None,
-    }];
-    assert_eq!(
-        id_map.parse("az", Box::new(changed_paths_fn))?,
-        expected,
-        "We see the ID was generated from a substring directly"
-    );
-    Ok(())
-}
-
-#[test]
 fn branches_avoid_uncommitted_area_id() -> anyhow::Result<()> {
     let stacks = vec![stack([segment("zza", [id(1)], None, [])])];
     let id_map = IdMap::new(stacks, Vec::new())?;
@@ -283,7 +232,7 @@ fn branches_avoid_invalid_ids() -> anyhow::Result<()> {
         stack_id: None,
     }];
     assert_eq!(
-        id_map.parse("x-yz", Box::new(changed_paths_fn))?,
+        id_map.parse("yz", Box::new(changed_paths_fn))?,
         expected,
         "avoids non-alphanumeric, taking first alphanumeric pair"
     );
@@ -293,7 +242,7 @@ fn branches_avoid_invalid_ids() -> anyhow::Result<()> {
         stack_id: None,
     }];
     assert_eq!(
-        id_map.parse("0ax", Box::new(changed_paths_fn))?,
+        id_map.parse("ax", Box::new(changed_paths_fn))?,
         expected,
         "avoids hexdigit pair which can be confused with a commit ID"
     );
@@ -752,10 +701,18 @@ fn uncommitted_files_disambiguate_between_themselves() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Branch names and short IDs can be prefixes of the reverse hex IDs of file paths for uncommitted
+/// files.
+///
+/// The current solution to this is to only match against uncommitted file short IDs if there are no
+/// other matches. So even on overlapping prefixes, we can still match out a branch short ID.
+///
+/// This needs to be extended further or reconsidered once commits can be matched via change ID, as
+/// change IDs do not provide the convenience of being hexadecimal.
 #[test]
 fn uncommitted_files_disambiguate_with_branch() -> anyhow::Result<()> {
-    let stacks = vec![stack([segment("fookpfoo", [id(1)], None, [])])];
-    let hunk_assignments = vec![hunk_assignment("foo23", None)];
+    let stacks = vec![stack([segment("qsy", [id(1)], None, [])])];
+    let hunk_assignments = vec![hunk_assignment("file", None)];
     let id_map = IdMap::new(stacks, hunk_assignments)?;
     let changed_paths_fn = |commit_id: gix::ObjectId,
                             parent_id: Option<gix::ObjectId>|
@@ -767,29 +724,40 @@ fn uncommitted_files_disambiguate_with_branch() -> anyhow::Result<()> {
         })
     };
 
-    // Only the branch is returned
-    insta::assert_debug_snapshot!(id_map.parse("kp", Box::new(changed_paths_fn))?, @r#"
+    // Only the branch is returned when querying by short ID
+    insta::assert_debug_snapshot!(id_map.parse("qs", Box::new(changed_paths_fn))?, @r#"
     [
         Branch {
-            name: "fookpfoo",
-            id: "ok",
+            name: "qsy",
+            id: "qs",
+            stack_id: None,
+        },
+    ]
+    "#);
+
+    // Still only the branch when querying by full name
+    insta::assert_debug_snapshot!(id_map.parse("qsy", Box::new(changed_paths_fn))?, @r#"
+    [
+        Branch {
+            name: "qsy",
+            id: "qs",
             stack_id: None,
         },
     ]
     "#);
 
     // More characters must be specified to get the file
-    insta::assert_debug_snapshot!(id_map.parse("kpr", Box::new(changed_paths_fn))?, @r#"
+    insta::assert_debug_snapshot!(id_map.parse("qsyn", Box::new(changed_paths_fn))?, @r#"
     [
         UncommittedHunkOrFile(
             UncommittedHunkOrFile {
-                id: "kpr",
+                id: "qsyn",
                 hunk_assignments: NonEmpty {
                     head: HunkAssignment {
                         id: None,
                         hunk_header: None,
                         path: "",
-                        path_bytes: "foo23",
+                        path_bytes: "file",
                         stack_id: None,
                         branch_ref_bytes: None,
                         line_nums_added: None,
