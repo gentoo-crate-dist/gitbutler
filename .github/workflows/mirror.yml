@@ -1,0 +1,20 @@
+  name: Sync with upstream
+  on:
+    push:
+    schedule:
+      - cron: "52 */8 * * *"
+    workflow_dispatch:
+
+  jobs:
+    sync-mirror:
+      runs-on: ubuntu-latest
+      permissions:
+        contents: write
+      steps:
+        - name: Update mirror
+          uses: projg2/crate-dist-mirror-action@v2
+          with:
+            ssh-private-key: ${{ secrets.ssh_key }}
+            directories: crates/but crates/gitbutler-tauri
+            
+            
