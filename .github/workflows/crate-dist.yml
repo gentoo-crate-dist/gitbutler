@@ -1,0 +1,20 @@
+
+name: Create crate dist
+on:
+  push:
+    tags:
+      - '**'
+
+jobs:
+  crate-dist:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create crate dist
+        uses: projg2/crate-dist-action@v1
+        with:
+          directories: crates/but crates/gitbutler-tauri
+          dist-filename: gitbutler-nightly-0.5.2132-crates.tar.xz
+          run-cargo-update: false
+
